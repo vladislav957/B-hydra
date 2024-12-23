@@ -122,8 +122,8 @@ def  static_PyObject(self,static,PyOject):
      
 
 # Пример использования
-previous_hash = ' '
-block_number = True
+previous_hash = '0000000'
+block_number = sum
 (walrus := True)
 transactions =  'Blockchain.py','wallet.py' 
 difficulty = 7 # количество нулей в начале хеша

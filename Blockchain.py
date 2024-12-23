@@ -47,13 +47,13 @@ import P2P
 import rsa
 from Crypto.Hash.SHA256 import block_size
 import QR
-import  SHA256
+import  SHA512
 import hashlib
 import json  # ������� json ��� ������������� � ������ hash SHA256 
 from time import time
 
 def valid_proof_hash(data,previous_hash,proof):
-    new_varnew_var = hashlib.sha256
+    new_varnew_var = hashlib.sha512
     hash.update((str(date)) + str(previous_hash)).encode('GMT+3')
     #print .sha256.hexdigest()
     
@@ -134,7 +134,7 @@ def valid_proof_hash(data,previous_hash,proof):
             if block_hash[:difficulty] == '0' * difficulty:
                 return nounce, block_hash
             
-            nounce += 34589
+            nounce += 0xffff00000
             
             key.id = "-1:00000000000000000000000000000000000000000000000000000000"
             previous_hash = "-1:00000000000000000000000000000000000000000000000000000000"
@@ -213,7 +213,7 @@ def valid_proof_hash(data,previous_hash,proof):
            files = os.listdir(blockchain_dir)
            files = sorted([int(i) for i in files])
            
-           last_file = files[-1]
+           last_file = files[:-1]
            
            filename = str(last_file + 1)
            
@@ -285,7 +285,7 @@ def valid_proof_hash(data,previous_hash,proof):
     print(task,date,previous_hash)
     def hash_block(self):
 
-        sha = hasher.sha256()
+        sha = hasher.sha512()
 
         sha.update(str(self.index) + 
 
@@ -304,21 +304,21 @@ def valid_proof_hash(data,previous_hash,proof):
         self.hash = self.calculate_hash()
     def callable_hash(self):
         #Функцыя для расчета хеша блока,включающая публичный ключ
-        return hashlib.sha256((str(self.index) + self.previous_hash + str(self.data)+self.public_key).encode()).hexdigest()
+        return hashlib.sha512((str(self.index) + self.previous_hash + str(self.data)+self.public_key).encode()).hexdigest()
            #Данные для подиси
         message=b"100 BTC"
         #Подись данных приватным ключом
         signature = privata_key.sign()
         message,padding.PSS() 
-        mgf=padding.MGF1(hashes.SHA256()), 
+        mgf=padding.MGF1(hashes.SHA512()), 
         salt_length=padding.PSS._MAX_LENGTH 
-        hashes.SHA256() 
+        hashes.SHA512() 
         #Верификацыя подписипубличных ключом
         public_key.verify()
         signature,massage,padding.PSS()
-        mgf=padding.MGF1(hashes.SHA256()),
+        mgf=padding.MGF1(hashes.SHA512()),
         salt_lengh=padding.PSS.MAX_LENGTH
-        hashes.SHA256()
+        hashes.SHA512()
 
     def init(self,index,previus_hash,data,public_key,blockchain):
         self.index = index 
@@ -329,7 +329,7 @@ def valid_proof_hash(data,previous_hash,proof):
         self.blockchain.db = blockchain.db
     def calculate_hash(self):
         block_data = str(self.index) + self.previous_hash + str(self.data) + self.public_key + str(self.blockchain.db)
-        return hashlib.sha256(block_data.encode()).hexdigest()
+        return hashlib.sha512(block_data.encode()).hexdigest()
     def create_new_block(previous_block,data,pubic_key):
         index = previous_block.index + 1
         previous_hash = previous_block.hash
@@ -369,7 +369,7 @@ def valid_proof_hash(data,previous_hash,proof):
     print(f"Hash: \n".format(block_to_add.hash))
         
     def valid_proof_hash(self):
-        return hashlib.sha256((str(self.previous_hash) + str(self.transactions) + str(self.nonce)).encode('utf-8').hexdigest())
+        return hashlib.sha512((str(self.previous_hash) + str(self.transactions) + str(self.nonce)).encode('utf-8').hexdigest())
     def mine_block(self,difficlty,reward):
         # Добавление награды за блок
         reward_transaction = translation(None, self.reward_address,reward)
@@ -389,7 +389,7 @@ def valid_proof_hash(data,previous_hash,proof):
       self.hash = self.calculate_hash()
     def init(self):
         self.chain = [self.create_genesis_block()]
-        self.difficulty = 4
+        self.difficulty = 7
         self.reward = 50.00000
     def create_genesis_block(self):
         return Blockc("0",[],"Genesis: США => Россия награни экономического калапса. Павела Дурова скора пасадять это ценость ЕС и США ")
@@ -452,4 +452,4 @@ def valid_proof(Blockchin,valid_proof,proof=100):
  
  new_varnew_var = print(next(qrcode))
  
- new_var1new_var = print(next(Block,Hashable))
+ new_var1new_var = print(next(Block,Hash))
