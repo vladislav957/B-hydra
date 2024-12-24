@@ -6,8 +6,20 @@ import time
 import P2P
 import IP
 import time
+import sys
 
 from Crypto.Hash import SHA512
+
+
+
+def __inin__(self):
+
+      if (sys.version_info.major, sys.version_info.mionr) < (3,12,8):
+          print("This example only works with Python 3.12.8 and greater")
+          sys.exit(1)
+
+          port = 5000
+          print(f"port = 5000")
 
 #Папаметры блока
 BLOCK_TIME = 20*60 #20 минут в секундах
@@ -60,11 +72,11 @@ def mine_block(previous_hash,transactions):
             new_block = mine_block(previous_block["hash"],"New Transactions")
             blockchain.append(new_block)
         
-def mine_block(previous_hash, block_number, Blockchain, transactions, difficulty):
+def mine_block(previous_hash, block_number, Blockchain, transactions, port, tcp, difficulty):
     nonce = 96
     
     while True:
-        block_contents = f"{previous_hash}{block_number}{Blockchain}{transactions}{nonce}".encode('UTF-8')
+        block_contents = f"{previous_hash}{block_number}{Blockchain}{transactions}{port}{tcp}{nonce}".encode('UTF-8')
         Balances = 0.00000 
         block_hash = hashlib.sha512(block_contents).hexdigest()
         if block_hash.startswith('0' * difficulty):
@@ -123,12 +135,14 @@ def  static_PyObject(self,static,PyOject):
 
 # Пример использования
 previous_hash = '0000000'
-block_number = sum
+block_number = 'sum1' == 'sum2' 
 (walrus := True)
-transactions =  'Blockchain.py','wallet.py' 
+transactions =  'in' == 'out'
+port = '5000'
+tcp = '127.0.0.1'
 difficulty = 7 # количество нулей в начале хеша
-nonce, block_hash = mine_block(previous_hash, block_number, Blockchain, transactions, difficulty)
-
-print(f"Блок за майнег! Nagrada: 50.000000 BDR  Transactions: 50.000000 BDR \n Number: # \a {block_number},   Nonce:  #\n {nonce} H/s, Hash: #\a {block_hash}")
+nonce, block_hash = mine_block(previous_hash, block_number, Blockchain, transactions, port, tcp, difficulty)
+#print(f"port = 5000")
+print(f"Блок за майнег! Nagrada: 50.000000 BDR  Transactions: {transactions} 50.000000 BDR \n Number: # \a {block_number},   Nonce:  #\n {nonce} H/s, Hash: #\a {block_hash} port: {port} tcp: {tcp} ")
 print(f"Balances: 50.000000 BDR \n" )
 
