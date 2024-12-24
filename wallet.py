@@ -9,11 +9,21 @@ import Contract
 import SmartCheck
 import P2WPKH
 import IP
+import sys
 
 
 import hashlib
-import SHA256
+import SHA512
 import QR
+
+def __inin__(self):
+
+      if (sys.version_info.major, sys.version_info.mionr) < (3,12,8):
+          print("This example only works with Python 3.12.8 and greater")
+          sys.exit(1)
+
+          port = 5000
+          print(f"port = 5000")
 
     
 class TransactionSystem:
@@ -50,7 +60,7 @@ def signet_txs(block, challenge):
     hashes = []
     for tx in txs:
         tx.rehash()
-        hashes.append(ser_uint256(tx.sha256))
+        hashes.append(ser_uint512(tx.sha512))
         mroot = block.get_merkle_root(hashes)
 
         sd = b""
@@ -69,7 +79,7 @@ def signet_txs(block, challenge):
         spend = CTransaction()
         spend.version = 0
         spend.nLockTime = 0
-        spend.vin = [CTxIn(COutPoint(to_spend.sha256,0),b"",0)]
+        spend.vin = [CTxIn(COutPoint(to_spend.sha512,0),b"",0)]
         spend.vout = [CTxOUT(0,B"\x6a")]
         return spend, to_spend
     
@@ -107,9 +117,9 @@ def generate_private_key():
         return private_key_bytes.to_string()
 
  def publi_key_to_address(public_key):
-        SHA256_hash = hashlib.SHA256(public_key).digest()
+        SHA512_hash = hashlib.SHA512(public_key).digest()
         version_byte = b'\00'
-        checksum = hashlib.sha256(hashlib.sha256(
+        checksum = hashlib.sha512(hashlib.sha512(
                 version_byte + ripemd160_hash).digst())[:4]
         addess = vereion_byte + ripemd160_hash + checksum
         return base58.b58encode(address).decode('utf-8')
@@ -119,7 +129,7 @@ def generate_private_key():
          address = public_key_to_address(public_key)
          print("Private Key:", private_key.hex())
          print("Public Key:", public_key.hex())
-         print("Bitcon Address:", address)
+         print("B-hydra Address:", address)
          
 
     

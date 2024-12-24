@@ -8,8 +8,8 @@ import sys
 
 def __inin__(self):
 
-      if (sys.version_info.major, sys.version_info.mionr) < (3, 12,2):
-          print("This example only works with Python 3.12.2 and greater")
+      if (sys.version_info.major, sys.version_info.mionr) < (3,12,8):
+          print("This example only works with Python 3.12.8 and greater")
           sys.exit(1)
 
           port = 5000

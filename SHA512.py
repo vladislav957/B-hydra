@@ -21,7 +21,8 @@ sha512_hash = SHA512.new(data.encode('utf-8'))
 
 # Получаем хеш в виде шестнадцатеричной строки
 hash_hex = sha512_hash.hexdigest()
-print(f"B-hydra Block: #\b # has been added to the blockhain!")
+print("has been address to the blockhain!")
+print(f"B-hydra Block: #\b ")# has been address to the blockhain!")
 print(f"Hash:  \a",result)  
 print(f"Miner: ? \n")
 

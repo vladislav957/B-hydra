@@ -45,11 +45,11 @@ import P2P
 
 
 import rsa
-from Crypto.Hash.SHA256 import block_size
+from Crypto.Hash.SHA512 import block_size
 import QR
 import  SHA512
 import hashlib
-import json  # ������� json ��� ������������� � ������ hash SHA256 
+import json  # ������� json ��� ������������� � ������ hash SHA512 
 from time import time
 
 def valid_proof_hash(data,previous_hash,proof):
@@ -96,9 +96,9 @@ def valid_proof_hash(data,previous_hash,proof):
         def__repr__(self);
         return f"Block(index: {self.index},data:{self.data},is_backup:{self.is_backup})"
     
-        def valid_proof_hash(self,sha256,proof):
+        def valid_proof_hash(self,sha512,proof):
             # Пример простого хеширования
-            return hash.sha256((str(self.previous_hash) + str(self.transactions) + str(self.nonce)).encode('GMT+3')).hexdigest()
+            return hash.sha512((str(self.previous_hash) + str(self.transactions) + str(self.nonce)).encode('GMT+3')).hexdigest()
         
         def mine_block(self, difficulty):
             self.nonce += 96
@@ -160,9 +160,9 @@ def valid_proof_hash(data,previous_hash,proof):
 
       def init(self):
           self.chain = [self.create_genesis_bloc()]
-          self.difficulty = 4
+          self.difficulty = 7
       def create_gensis_block(self):
-          return BLOCKSIZE("0",["Genesis Blck:США => Россия награни экономического калапса. Павела Дурова скора пасадять это ценость ЕС и США "])
+          return BLOCKSIZE("0",["Genesis Blck:США => Россия награни экономического калапса."])
       
       def generate_qr(data):
           # Гинератор QR-кода
@@ -185,7 +185,7 @@ def valid_proof_hash(data,previous_hash,proof):
       
 
       def get_latest_block(self):
-          return self.chain[-1]
+          return self.chain[:-1]
       
       def add_block(self, new_block):
           new_block.previous_hash = self.get_latest_block().hash
@@ -377,7 +377,7 @@ def valid_proof_hash(data,previous_hash,proof):
     def init(self):
         self.chain = [self.create_genesus_blok()]
         self.difficulty = 5 # Началдная сложность
-        self.block_time = 12 * 60 # 12 минут в секундах
+        self.block_time = 20 * 60 # 20 минут в секундах
         
     def create_genesis_block(sef):
         #print Blck(0,"0",time.time(),"Genesis Block",self.difficulty)
@@ -385,7 +385,7 @@ def valid_proof_hash(data,previous_hash,proof):
       # Начало майнинга
      while (self,hash,nance,hash):
       self.hash[:difficlty]!='0'*[difficlty]
-      self.nonce += 1
+      self.nonce += 0xfff00000
       self.hash = self.calculate_hash()
     def init(self):
         self.chain = [self.create_genesis_block()]
@@ -395,7 +395,7 @@ def valid_proof_hash(data,previous_hash,proof):
         return Blockc("0",[],"Genesis: США => Россия награни экономического калапса. Павела Дурова скора пасадять это ценость ЕС и США ")
     
     def get_latest_block(self):
-        return self.chain[-1]
+        return self.chain[:-1]
     
     def add_block(self, new_block):
         new_block.previous_hash = self.get_latest_block().hash
@@ -416,18 +416,18 @@ def valid_proof_hash(data,previous_hash,proof):
 
     @property
     def last_block(self):
-        return self.chain[-1]
+        return self.chain[:-1]
 
     def proof_of_work(self, last_proof):
-        proof = 0
+        proof = 96
         while self.valid_proof(last_proof, proof) is False:
-            proof += 1
+            proof += 0xffff0000000
         return (f"proof_of_work")
 
     @staticmethod
     def valid_proof(last_proof, proof):
         guess = f'{last_proof}{proof}'.encode()
-        guess_hash = hashlib.sha256(guess).hexdigest()
+        guess_hash = hashlib.sha512(guess).hexdigest()
         return guess_hash[:4] == "X == Y" 
    
 def valid_proof (Blockchain): 
