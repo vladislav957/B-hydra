@@ -33,6 +33,15 @@ python maing.py или maing.py
 
 4.Основной алгоритом SHA-512
 
+Установленные в зависимости на Ubuntn:
+
+Шаги:
+
+1.Клонируйте репозитории:
+
+git clone https://codeberg.org/B-hydra/B-hydra.git
+cd B-hydra
+
 Пример использования :
 После запуска программы вы можете начать майнинг или создать транзакции. Пример кода для добавления блока:
 
@@ -74,6 +83,15 @@ pip install -r requirements.txt
 python maing.py or maing.py
 
 4.Basic algorithm SHA-512
+
+Installed dependencies on Ubuntu:
+
+Steps:
+
+1. Clone repositories:
+
+git clone https://codeberg.org/B-hydra/B-hydra.git
+cd B-hydra
 
 Example of usage: After running the program, you can start mining or create transactions. Example code for adding a block:
 
