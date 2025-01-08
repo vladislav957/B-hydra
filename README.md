@@ -33,13 +33,12 @@ python maing.py или maing.py
 
 4.Основной алгоритом SHA-512
 
-Установленные в зависимости на Ubuntn:
+Установленные в зависимости на Linux:
 
 Шаги:
 
-1.Клонируйте репозитории:
-
-git clone https://codeberg.org/B-hydra/B-hydra.git
+1.Клонируйте 
+https://github.com/vladislav957/B-hydra.git
 cd B-hydra
 
 Пример использования :
@@ -69,7 +68,7 @@ How to install and run : Requirements: Python 3.9 or higher Installed in depende
 
 Steps:
 
-1.Clone the repositories:
+1.Clone the repositories Linux:
 
 git clone https://github.com/vladislav957/B-hydra.git
 cd B-hydra
