@@ -68,7 +68,7 @@ How to install and run : Requirements: Python 3.9 or higher Installed in depende
 
 Steps:
 
-1.Clone the repositories Linux:
+1.Clone the repositories:
 
 git clone https://github.com/vladislav957/B-hydra.git
 cd B-hydra
@@ -83,13 +83,12 @@ python maing.py or maing.py
 
 4.Basic algorithm SHA-512
 
-Installed dependencies on Ubuntu:
+Installed dependencies on Linux:
 
 Steps:
 
-1. Clone repositories:
-
-git clone https://codeberg.org/B-hydra/B-hydra.git
+1.Clone the repositories:
+https://github.com/vladislav957/B-hydra.git
 cd B-hydra
 
 Example of usage: After running the program, you can start mining or create transactions. Example code for adding a block:
