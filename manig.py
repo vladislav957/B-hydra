@@ -166,6 +166,12 @@ def block_data(block_data, hash_rate):
              h5 = 0x9b05688c
              h6 = 0x1f83d9ab
              h7 = 0x5be0cd19
+
+             print(f"Текущая сложность: {difficulty}")
+             nonce = mine_block(block_data, difficulty)
+              # Имитируем рост вычислительной мощности
+             hash_rate += 500  # Рост мощности
+             difficulty = adjist_difficulty(hash_rate)
          
         # Фунция для вычесления хеща
 def calculate_hash(data, nonce):
