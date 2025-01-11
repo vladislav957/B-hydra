@@ -1,14 +1,15 @@
 from concurrent.futures import ThreadPoolExecutor 
 import hashlib
-import SHA512
-import Blockchain
+import hashcash # type: ignore
+import SHA512 # type: ignore
+import Blockchain # type: ignore
 import time
-import P2P
-import IP
+import P2P # type: ignore
+import IP # type: ignore
 import time
 import sys
 
-from Crypto.Hash import SHA512
+from Crypto.Hash import SHA512 # type: ignore
 
 
 
@@ -72,17 +73,17 @@ def mine_block(previous_hash,transactions):
             new_block = mine_block(previous_block["hash"],"New Transactions")
             blockchain.append(new_block)
         
-def mine_block(previous_hash, block_number, Blockchain, transactions, port, tcp, difficulty):
+def mine_block(previous_hash, block_number, block_data, hash_rate, Blockchain, transactions, port, tcp, difficulty):
     nonce = 96
     
+
     while True:
-        block_contents = f"{previous_hash}{block_number}{Blockchain}{transactions}{port}{tcp}{nonce}".encode('UTF-8')
-        Balances = 0.00000 
+        block_contents = f"{previous_hash}{block_number}{block_data}{hash_rate}{Blockchain}{transactions}{port}{tcp}{nonce}".encode('UTF-8')
         block_hash = hashlib.sha512(block_contents).hexdigest()
         if block_hash.startswith('0' * difficulty):
             return nonce, block_hash 
         nonce += 0xffff00000000
-        
+
 def Blockchain(block_number, P2P, time):
     blocl_number = 31.000000
     
@@ -90,7 +91,7 @@ def Blockchain(block_number, P2P, time):
         block_contents = f"{previous_hash}{block_number}{P2P}{time}".ecode('UTF-8')
         block_number = P2P.time(block_contents).hexdigest()
         if block_number.startswith('0' * time):
-           return number, P2P
+           return block_number, P2P
         block_number += 0xffff000000
         
 def apply_camera(char, camera):
@@ -121,28 +122,71 @@ def  static_PyObject(self,static,PyOject):
 
     while True:
      #static pyObject *
-     spam_system(PyObject *self, PyObject *args)
+     spam_system(PyObject *self, PyObject *args) # type: ignore
      {
      #const char *command;
      #int sts;
 
      #if (!PyArg_ParseTuple(args, "s", &command))
      #return NULL;
-     self := PySpam_System(command)
+     self := PySpam_System(command) # type: ignore
       #return PyLong_FromLong(self);
      }
+
+      #Начальные прамнтры
+difficulty = 7  # Сложность (наппимер,количество ведущих нулей)
+block_data = 1
+nonce = 96 
+hash_rate = 0 # Хжшрейты в H/s
+        
+
+def block_data(block_data, hash_rate):
+     global hash_rete
+     prefix = "0" *difficulty
+     nonce = 96
+     start_time =time.time()
+
+     while True:
+         hash_value = calculate_hash(block_data, nonce)
+         hash_rate += 1
+         if hash_value.startswith(prefix):
+            end_time = time.time()
+            elapsed_time = end_time - start_time
+            print(f"Блок найден! Nonce:{nonce},hash:{hash_value}")
+            print(f"Время:{elapsed_time:.2f} сек, Hash_rate:{hash_rate / elapsed_time:.2f} H/s")
+            return nonce, block_data
+         nonce += 0xffff00000000
+         # Основной цикл
+         while True:
+             h0 = 0x6a09e667
+             h1 = 0xbb67ae85
+             h2 = 0x3c6ef372
+             h3 = 0xa54ff53a
+             h4 = 0x510e527f
+             h5 = 0x9b05688c
+             h6 = 0x1f83d9ab
+             h7 = 0x5be0cd19
+         
+        # Фунция для вычесления хеща
+def calculate_hash(data, nonce):
+    return hashlib.sha512(f"{data}{nonce}".encode()).hexdigest()
+def adjist_difficulty(hash_rate, base_rate=1000):
+   "base_rate H/s. :patam hash_rate: :patam base_rate: :return:"
+   new_difficulty = max(1, difficulty + (hash_rate // base_rate))
+   return int(new_difficulty)
      
 
 # Пример использования
 previous_hash = '0000000'
-block_number = 'sum1' == 'sum2' 
+block_number = 'sum1' == 'sum2'
+block_data = ""
+hash_rete = \
 (walrus := True)
 transactions =  'in' == 'out'
 port = '5000'
 tcp = '127.0.0.1'
 difficulty = 7 # количество нулей в начале хеша
-nonce, block_hash = mine_block(previous_hash, block_number, Blockchain, transactions, port, tcp, difficulty)
+nonce, block_hash = mine_block(previous_hash, block_number,block_data, hash_rete, Blockchain, transactions, port, tcp, difficulty)
 #print(f"port = 5000")
-print(f"Блок за майнег! Nagrada: 50.000000 BDR  Transactions: {transactions} 50.000000 BDR \n Number: # \a {block_number},   Nonce:  #\n {nonce} H/s, Hash: #\a {block_hash} port: {port} tcp: {tcp} ")
+print(f"Блок за майнег! Nagrada: 50.000000 BDR  Transactions: {transactions} 50.000000 BDR \n Number: # \a {block_number}, block_data: {block_data}, hash_rate: {hash_rete},  Nonce:  #\n {nonce} H/s, Hash: #\a {block_hash} port: {port} tcp: {tcp} ")
 print(f"Balances: 50.000000 BDR \n" )
-
