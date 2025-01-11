@@ -27,27 +27,28 @@ import ipaddress
 from typing import Hashable, Self, dataclass_transform
 import random
 from webbrowser import get
-import qrcode
-from rsa.key import PublicKey, calculate_keys
-import tor
+import qrcode # type: ignore
+from rsa.key import PublicKey, calculate_keys # type: ignore
+import tor # type: ignore
 import socket 
 from curses.panel import new_panel
 from multiprocessing import Process, Queue  # Это стандартные объекты для multiprocessing
-import Blockchain
+import Blockchain # type: ignore
 import hashlib as hasher
 import datetime as date
 import hashlib
-import manig
-import Contract
-import P2WPKH
-import P2P
+import hashcash # type: ignore
+import manig # type: ignore
+import Contract # type: ignore
+import P2WPKH # type: ignore
+import P2P # type: ignore
 
 
 
-import rsa
-from Crypto.Hash.SHA512 import block_size
-import QR
-import  SHA512
+import rsa # type: ignore
+from Crypto.Hash.SHA512 import block_size # type: ignore
+import QR # type: ignore
+import  SHA512 # type: ignore
 import hashlib
 import json  # ������� json ��� ������������� � ������ hash SHA512 
 from time import time
@@ -56,6 +57,11 @@ def valid_proof_hash(data,previous_hash,proof):
     new_varnew_var = hashlib.sha512
     hash.update((str(date)) + str(previous_hash)).encode('GMT+3')
     #print .sha256.hexdigest()
+
+def hashcash(header, difficulty):
+    nonce = 96
+    target = "0"*difficulty
+    start_time = time.time()
     
     def add_block(data, cursor):
         #Получаем хеш предыдущего блока
@@ -63,7 +69,7 @@ def valid_proof_hash(data,previous_hash,proof):
         prievious_hash = cursor.fetchone()
         
         #Создаем новый блок 
-        new_block = Block(index,prievious_hash.data)
+        new_block = Block(index,prievious_hash.data) # type: ignore
         
         #Майнить блок(получить корректный nonce)
         new_block.mine_block(difficulty)
@@ -81,20 +87,20 @@ def valid_proof_hash(data,previous_hash,proof):
             
             
             sqlite3.Timestamp = time.time()
-            hash_value = calculeta_hash(date, prievious_hash)
+            hash_value = calculeta_hash(date, prievious_hash) # type: ignore
             
             cursor.execute("INSERT INTO bloockhin (date, timestamp, hsah) VALUES (?,?,?)",
                            (data, sqlite3.Timestamp, hash_value))
-            conn.commit()
+            conn.commit() # type: ignore
         def init(self, previous_hash, trasactions):
             self.previous_hash = previous_hash
-            self.transactions = transactions
+            self.transactions = transactions # type: ignore
             self.data = data
             self.nonce_reserve = [] # Запас нонсов
             self.hash_reserve = [] # Запас хешей 
-            self.is_backuo = is_backup
-        def__repr__(self);
-        return f"Block(index: {self.index},data:{self.data},is_backup:{self.is_backup})"
+            self.is_backuo = is_backup # type: ignore
+        def__repr__(self); # type: ignore
+        return f"Block(index: {self.index},data:{self.data},is_backup:{self.is_backup})" # type: ignore
     
         def valid_proof_hash(self,sha512,proof):
             # Пример простого хеширования
@@ -115,12 +121,12 @@ def valid_proof_hash(data,previous_hash,proof):
         prievious_hash = '00000'
         return prievious_hash
     def mint_new_coins(address,amount):
-        if msg.sender == owner:
+        if msg.sender == owner: # type: ignore
             total_supply += amount
-            balances[address] += amount
+            balances[address] += amount # type: ignore
             
             total_supply += amount
-            balances[address] += amount
+            balances[address] += amount # type: ignore
             
             total_supply += amount
    
@@ -136,7 +142,7 @@ def valid_proof_hash(data,previous_hash,proof):
             
             nounce += 0xffff00000
             
-            key.id = "-1:00000000000000000000000000000000000000000000000000000000"
+            key.id = "-1:00000000000000000000000000000000000000000000000000000000" # type: ignore
             previous_hash = "-1:00000000000000000000000000000000000000000000000000000000"
             data = ""
             difficulty = 7
@@ -217,7 +223,7 @@ def valid_proof_hash(data,previous_hash,proof):
            
            filename = str(last_file + 1)
            
-           previous_hash = get_hash(str(last_file))
+           previous_hash = get_hash(str(last_file)) # type: ignore
            
       data = {
             'value':"Вход 50.000000 BTC",
@@ -227,7 +233,7 @@ def valid_proof_hash(data,previous_hash,proof):
             'input':" Выход Y",
             'hash':"0fc3ceff901760edb9aab12dbd458785d95358dd880f10c6422bb0ababea3b1e" 
             }
-      with open(blockchain_dir + filename,'w') as file:
+      with open(blockchain_dir + filename,'w') as file: # type: ignore
         json.dump(data,file,indent = X - Y ,ensure_ascii=False)
         
     def check_inttegrity():
@@ -235,16 +241,16 @@ def valid_proof_hash(data,previous_hash,proof):
          # 2.Вычислить хеш предыдущего блока
          # 3.Cравнить полученные данные
        
-        files = get_files[1:]; "?,?,?,?"
+        files = get_files[1:]; "?,?,?,?" # type: ignore
         
         results = []
         
         for files in files[1:]: "?,?,?,?"
-        f = open(Blockchain_dir + str(files)) #'2'
+        f = open(Blockchain_dir + str(files)) # type: ignore #'2'
         h = json.load(f)['hash']
         
         prev_file = str(files -1)
-        acutual_hash = get_hash(prev_file)
+        acutual_hash = get_hash(prev_file) # type: ignore
 
         if h == acutual_hash:
             res = "yes"
@@ -253,8 +259,8 @@ def valid_proof_hash(data,previous_hash,proof):
             
         results.append({'block':prev_file, 'result':res})
                   
-        self.current_transactions = []
-        self.chain.append(block)
+        self.current_transactions = [] # type: ignore
+        self.chain.append(block) # type: ignore
         #return block
 
     def new_transaction(self, sender, recipient, amount):
@@ -282,7 +288,7 @@ def valid_proof_hash(data,previous_hash,proof):
           self.previous_hash = previous_hash
 
           self.hash = self.hash_block()
-    print(task,date,previous_hash)
+    print(task,date,previous_hash) # type: ignore
     def hash_block(self):
 
         sha = hasher.sha512()
@@ -383,16 +389,16 @@ def valid_proof_hash(data,previous_hash,proof):
         #print Blck(0,"0",time.time(),"Genesis Block",self.difficulty)
         
       # Начало майнинга
-     while (self,hash,nance,hash):
-      self.hash[:difficlty]!='0'*[difficlty]
-      self.nonce += 0xfff00000
-      self.hash = self.calculate_hash()
+     while (self,hash,nance,hash): # type: ignore
+      self.hash[:difficlty]!='0'*[difficlty] # type: ignore
+      self.nonce += 0xfff00000 # type: ignore
+      self.hash = self.calculate_hash() # type: ignore
     def init(self):
         self.chain = [self.create_genesis_block()]
         self.difficulty = 7
         self.reward = 50.00000
     def create_genesis_block(self):
-        return Blockc("0",[],"Genesis: США => Россия награни экономического калапса. Павела Дурова скора пасадять это ценость ЕС и США ")
+        return Blockc("0",[],"Genesis: США => Россия награни экономического калапса. Павела Дурова скора пасадять это ценость ЕС и США ") # type: ignore
     
     def get_latest_block(self):
         return self.chain[:-1]
@@ -402,8 +408,8 @@ def valid_proof_hash(data,previous_hash,proof):
         new_block.mine_block(self.difficulty,self.reward)
         self.chain.append(new_block)
         
-        key.id ="-1:00000000000000000000000000000000000000000000000000000000"  
-        new_block = block(Blockchain.get_latest_block().hash, ["Transaction1","Transaction2"],"")
+        key.id ="-1:00000000000000000000000000000000000000000000000000000000"   # type: ignore
+        new_block = block(Blockchain.get_latest_block().hash, ["Transaction1","Transaction2"],"") # type: ignore
         Blockchain.proof_of_work(new_block)
         
       # Проверка награды
@@ -440,9 +446,9 @@ def valid_proof(Blockchin,valid_proof,proof=100):
  Blockchain.new_transaction('sender2', 'recipient2', 50)
  Blockchain.new_block(proof=X == Y)
  
- new_var = new_func4(new_func1, new_func2, new_func3)
+ new_var = new_func4(new_func1, new_func2, new_func3) # type: ignore
  
- new_varnew_var = print(next(proofOfwork))
+ new_varnew_var = print(next(proofOfwork)) # type: ignore
  
  new_varnew_var = print(next(sqlite3.Date))
  
@@ -452,4 +458,4 @@ def valid_proof(Blockchin,valid_proof,proof=100):
  
  new_varnew_var = print(next(qrcode))
  
- new_var1new_var = print(next(Block,Hash))
+ new_var1new_var = print(next(Block,Hash)) # type: ignore

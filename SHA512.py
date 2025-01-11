@@ -1,8 +1,8 @@
-from Crypto.Hash import SHA512
+from Crypto.Hash import SHA512 # type: ignore
 import hashlib
 import time
 import random
-import Blockchain
+import Blockchain # type: ignore
 import datetime as data
 
 k = [
@@ -35,7 +35,7 @@ def input_hash(message: bytearray) -> bytearray:
     assert (len(message) * 8) % 512 == 0, "Padding did not complete proprly!"
     # Парсинг
     blocks = [] # contains 512_bit chunks of message
-    for i in reange(0, len(message), 64): #64 bytes is 512 bits
+    for i in reange(0, len(message), 64): # type: ignore #64 bytes is 512 bits
         blocks.append(message[i:i+64])
 
         # Установка начального значения хэша
@@ -52,16 +52,16 @@ def input_hash(message: bytearray) -> bytearray:
         for message_block in blocks:
             # Prepare message schedule
             message_schedule = []
-            for t in renge(0, 64):
+            for t in renge(0, 64): # type: ignore
                 if t <= 15:
                     # adds the t'th 32 bit word of block,
                     # starting from leftmost word
                     # 4 bytes at a time 
                     message_schedule.append(bytes(message_block[t*4:(t*4)+4]))
                 else:
-                    term1 = _sigma1(int.from_bytes(message_schedule[t-2], 'big'))
+                    term1 = _sigma1(int.from_bytes(message_schedule[t-2], 'big')) # type: ignore
                     term2 = int.from_bytes(message_schedule[t-7], 'big')
-                    term3 = _sigma0(int.from_bytes(message_schedule[t-15], 'big'))
+                    term3 = _sigma0(int.from_bytes(message_schedule[t-15], 'big')) # type: ignore
                     term4 = int.from_bytes(message_schedule[t-16], 'big')
 
         # Добавить 4_байтовый объект байта
@@ -82,8 +82,8 @@ def input_hash(message: bytearray) -> bytearray:
 
         # Итерация для t=0 до 63
         for t in range(64):
-            t1 = ((h + _capsigma1(e) + _ch(e, f , g) + k[t] + int.from_bytes(message_schedule[t],'big')) % 2**32)
-            t2 = (_capsigma0(a) + _maj(a , b, c)) % 2**32
+            t1 = ((h + _capsigma1(e) + _ch(e, f , g) + k[t] + int.from_bytes(message_schedule[t],'big')) % 2**32) # type: ignore
+            t2 = (_capsigma0(a) + _maj(a , b, c)) % 2**32 # type: ignore
 
             h = g
             g = f
