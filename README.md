@@ -38,6 +38,7 @@ python maing.py или maing.py
 Шаги:
 
 1.Клонируйте
+
  git clone
 https://github.com/vladislav957/B-hydra.git
 cd B-hydra
