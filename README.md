@@ -12,7 +12,7 @@
 
 
 
-Установка
+![1676177365_papik-pro-p-risunok-shesternya-7](https://github.com/user-attachments/assets/382c9e7f-c23f-4268-8f07-b545241382b1) Установка
 Как установить и запустить :
 Требования:
 Python 3.9 или выше
