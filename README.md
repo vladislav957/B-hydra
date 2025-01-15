@@ -12,7 +12,7 @@
 
 
 
-
+Установка
 Как установить и запустить :
 Требования:
 Python 3.9 или выше
@@ -75,7 +75,7 @@ Key Features: Decentralized Architecture: The platform operates without a centra
 ![Снимок экрана (40)](https://github.com/user-attachments/assets/2f56edec-3b73-435f-8394-1870d88855ae)
 
 
-
+Installation
 How to install and run : Requirements: Python 3.9 or higher Installed in dependencies (see requirements.txt) Steps: Clone the repositories
 
 Steps:
