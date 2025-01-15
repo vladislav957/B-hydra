@@ -69,6 +69,9 @@ print(blockchain.chain)
 
 Key Features: Decentralized Architecture: The platform operates without a central server, ensuring complete independence. Ease of Use: Intuitive interface and easy communication with other groups. Reliability and Security: Execution Scalability: The ability to expand the network to work with specified data volumes.
 
+![Снимок экрана (39)](https://github.com/user-attachments/assets/4f05102c-824f-42a4-b1f4-73bfbae0db3a)
+
+
 How to install and run : Requirements: Python 3.9 or higher Installed in dependencies (see requirements.txt) Steps: Clone the repositories
 
 Steps:
