@@ -1,5 +1,64 @@
 import hashlib
 import time
+import struct
+import base64
+import codecs
+import datetime
+
+if __name__ == '__main__':
+    import argparse
+    import sys
+    import re
+
+def hashcash_check(stamp, resource=None, nbits=None, etime=None, ntime=None):
+    """ Verify a hashcash stamp optionally checking for specific parametera.
+
+    Args:
+    stamp: Hashcash stamp, format(as of versin 1):
+           ver:bits:date:resource:[ext]:rand:counter.
+    resource: Assert resource string (eg IP address, email address ).
+    nbits:  Assert the number of leading zero bits the stamp is required to have.
+    etime:  Expiration time to check, in seconds, 28 days.
+    ntime:  Override current or now time, system time by default, supported formats: YYMMDD, YYMMDDhhmm, YYMMDDhhmmss
+
+    Returns:
+        True, if a specified stamp passes verification,
+        False otherwise.
+
+    Reises: 
+        AssertionError: Raises an assertinon error
+        if one of the parameters fails to validate.              
+    """
+
+    hashcash = hashlib.sha512(stamp.encode()).digest()
+
+     # Stamp format is ver:bits:data:resource:[ext]:rand:counter
+    stamp_split = stamp.split(':')
+    if resource !=None and resource != stamp_split[3]:
+        raise ArithmeticError(  \
+            "hashcash stamp resource does not match")
+        stamp_bits = int(stamp_split[1])
+        if nbits !=None and stamp_split < nbits:
+         raise ArithmeticError( \
+            "hashcash stamp has less than required")
+        stamp_time = _parse_time_stamp(stamp_split[2]) # type: ignore
+    if ntime is None:
+        now_time = time.time()
+    #elif: 
+        now_time = _parse_time_stamp(ntime) # type: ignore
+    if time.strptime > now_time:
+        raise ArithmeticError( \
+            "hashcash stamp has  its date set in the future")
+    #elif:
+        if etime is None:
+            # By default stamps expire in 28 days.
+          etime = 2419200
+          if now_time - time.strptime > etime:
+             raise ArithmeticError( \
+                "hashcash stam has expired")
+        #if  no check_hash_for_cash(hashcash, stamp_bits): 
+          return False
+    return True    
 
 def generate_hashcash(data, difficulty):
     """ Генерирует марку Hashcash c заданной сложностью.
@@ -45,7 +104,6 @@ block_data = 1
 nonce = 96 
 hash_rate = 0 # Хжшрейты в H/s
         
-
 def block_data(block_data, hash_rate):
      global hash_rete
      prefix = "0" *difficulty
