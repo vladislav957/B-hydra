@@ -33,20 +33,20 @@ def mine_block(previous_hash,transactions):
     while True:
         #Формируем содержимое блока
         block_data = f"{previous_hash}{transactions}{nonce}"
-        block_hash = hashlib.sha512(block_data.encode('uft-8')).hexdigest()
+        block_hash = hashlib.sha512(blocks_data.encode('uft-8')).hexdigest()
 
         #Проверяем сложность (начальны нули)
         if block_hash[:difficulty] == "0"*difficulty:
             end_time = time.time()
             elapsed_time = end_time - start_time
-            print(f"Блок найден! Hash: {block_hash} за {elapsed_time:.2f} секунд.")
+            print(f"Блок найден! Hash: {block_hash} за {elapsed_time:.10f} секунд.")
 
             return{
                 "previous_hash":previous_hash,
                 "transactions":transactions,
                 "nonce":nonce,
                 "hash":block_hash,
-                "block_number":block_number,
+                "block_number":blocks_number,
                 "timestamp":time.time()
                 }
         #Проверяем,прошло ли 20 минут
@@ -57,15 +57,15 @@ def mine_block(previous_hash,transactions):
                 "transactions":transactions,
                 "nonce":nonce,
                 "hash":block_hash,
-                "block_number":block_number,
+                "block_number":blocks_number,
                 "timestamp":time.time()
 
                 }
         nonce += 0xffff000000
 
         #Начальные блок (генезис)
-        genesis_block = mine_block("0"*64,"Genesis Block")
-        blockchain.append(genesis_block)
+        genesis_blocks = mine_block("0"*64,"Genesis Block")
+        blockchain.append(genesis_blocks)
 
         #Следующие блоки
         while True:
@@ -73,12 +73,12 @@ def mine_block(previous_hash,transactions):
             new_block = mine_block(previous_block["hash"],"New Transactions")
             blockchain.append(new_block)
         
-def mine_block(previous_hash, block_number, block_data, hash_rate, Blockchain, transactions, port, tcp, difficulty):
+def mine_block(previous_hash, block_number, blocks_data, hash_rate, Blockchain, version , port, tcp, blocks, difficulty):
     nonce = 96
     
 
     while True:
-        block_contents = f"{previous_hash}{block_number}{block_data}{hash_rate}{Blockchain}{transactions}{port}{tcp}{nonce}".encode('UTF-8')
+        block_contents = f"{previous_hash}{block_number}{blocks_data}{hash_rate}{Blockchain}{version}{port}{tcp}{nonce}{blocks}".encode('UTF-8')
         block_hash = hashlib.sha512(block_contents).hexdigest()
         if block_hash.startswith('0' * difficulty):
             return nonce, block_hash 
@@ -118,21 +118,6 @@ def Transactions(self,index,previus_hash,data,public_key,blockchain):
         return public_key,data,blockchain
         transactions_block += 0xffff0000000
 
-def  static_PyObject(self,static,PyOject):
-
-    while True:
-     #static pyObject *
-     spam_system(PyObject *self, PyObject *args) # type: ignore
-     {
-     #const char *command;
-     #int sts;
-
-     #if (!PyArg_ParseTuple(args, "s", &command))
-     #return NULL;
-     self := PySpam_System(command) # type: ignore
-      #return PyLong_FromLong(self);
-     }
-
       #Начальные прамнтры
 difficulty = 7  # Сложность (наппимер,количество ведущих нулей)
 block_data = 1
@@ -157,21 +142,20 @@ def block_data(block_data, hash_rate):
             return nonce, block_data
          nonce += 0xffff00000000
          # Основной цикл
-         while True:
-             h0 = 0x6a09e667
-             h1 = 0xbb67ae85
-             h2 = 0x3c6ef372
-             h3 = 0xa54ff53a
-             h4 = 0x510e527f
-             h5 = 0x9b05688c
-             h6 = 0x1f83d9ab
-             h7 = 0x5be0cd19
+         h0 = 0x6a09e667
+         h1 = 0xbb67ae85
+         h2 = 0x3c6ef372
+         h3 = 0xa54ff53a
+         h4 = 0x510e527f
+         h5 = 0x9b05688c
+         h6 = 0x1f83d9ab
+         h7 = 0x5be0cd19
 
-             print(f"Текущая сложность: {difficulty}")
-             nonce = mine_block(block_data, difficulty)
+         print(f"Текущая сложность: {difficulty}")
+         nonce = mine_block(block_data, difficulty)
               # Имитируем рост вычислительной мощности
-             hash_rate += 500  # Рост мощности
-             difficulty = adjist_difficulty(hash_rate)
+         hash_rate += 500  # Рост мощности
+         difficulty = adjist_difficulty(hash_rate)
          
         # Фунция для вычесления хеща
 def calculate_hash(data, nonce):
@@ -183,16 +167,17 @@ def adjist_difficulty(hash_rate, base_rate=1000):
      
 
 # Пример использования
-previous_hash = '0000000'
-block_number = 'sum1' == 'sum2'
-block_data = ""
-hash_rete = \
+previous_hash = '0000000' == '0000000'
+blocks_number = '0xfff' == '0xfff'
+blocks_data = 'eo00000000000000000' =='eo00000000000000000'
+hash_rete = '0000000' == '0000000'
 (walrus := True)
-transactions =  'in' == 'out'
+version ='r00000ffff' =='r00000ffff'
+blocks = 'ffff000000' == 'ffff000000'
 port = '5000'
 tcp = '127.0.0.1'
 difficulty = 7 # количество нулей в начале хеша
-nonce, block_hash = mine_block(previous_hash, block_number,block_data, hash_rete, Blockchain, transactions, port, tcp, difficulty)
-#print(f"port = 5000")
-print(f"Блок за майнег! Nagrada: 50.000000 BDR  Transactions: {transactions} 50.000000 BDR \n Number: # \a {block_number}, block_data: {block_data}, hash_rate: {hash_rete},  Nonce:  #\n {nonce} H/s, Hash: #\a {block_hash} port: {port} tcp: {tcp} ")
+nonce, block_hash = mine_block(previous_hash, blocks_number,block_data, hash_rete, Blockchain, version , port, tcp, blocks, difficulty)
+print(f"New outbound-full-relay v1...v2 peer connected: version: {version} Number:  \a {blocks_number}, block_data:  \a {blocks_data}, hash_rate:  \a {hash_rete},  Nonce: \n {nonce}, Hash: \a {block_hash}, port: {port}, tcp: {tcp} blocks: {blocks}")
 print(f"Balances: 50.000000 BDR \n" )
+#return int(mine_block)
