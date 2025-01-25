@@ -1,4 +1,4 @@
-from concurrent.futures import ThreadPoolExecutor 
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import hashcash # type: ignore
 import SHA512 # type: ignore
@@ -73,16 +73,20 @@ def mine_block(previous_hash,transactions):
             new_block = mine_block(previous_block["hash"],"New Transactions")
             blockchain.append(new_block)
         
-def mine_block(previous_hash, block_number, blocks_data, hash_rate, Blockchain, version , port, tcp, blocks, difficulty):
+def mine_block(previous_hash, block_number, blocks_data, hash_rate, Blockchain, version , peer, port, tcp, blocks, difficulty):
     nonce = 96
+    version = 96
+    peer = 96
     
 
     while True:
-        block_contents = f"{previous_hash}{block_number}{blocks_data}{hash_rate}{Blockchain}{version}{port}{tcp}{nonce}{blocks}".encode('UTF-8')
+        block_contents = f"{previous_hash}{block_number}{blocks_data}{hash_rate}{Blockchain}{version}{peer}{port}{tcp}{nonce}{blocks}".encode('UTF-8')
         block_hash = hashlib.sha512(block_contents).hexdigest()
         if block_hash.startswith('0' * difficulty):
-            return nonce, block_hash 
+            return nonce,block_hash 
         nonce += 0xffff00000000
+        version += 0x0000ffffff
+        peer += 0
 
 def Blockchain(block_number, P2P, time):
     blocl_number = 31.000000
@@ -167,17 +171,18 @@ def adjist_difficulty(hash_rate, base_rate=1000):
      
 
 # Пример использования
-previous_hash = '0000000' == '0000000'
-blocks_number = '0xfff' == '0xfff'
-blocks_data = 'eo00000000000000000' =='eo00000000000000000'
-hash_rete = '0000000' == '0000000'
+previous_hash = '0000000'
+blocks_number = '0xfff'
+blocks_data = 'eo00000000000000000'
+hash_rete = '0000000'
 (walrus := True)
-version ='r00000ffff' =='r00000ffff'
-blocks = 'ffff000000' == 'ffff000000'
+version = '0x0000ffff'
+peer = '0xfff0000000'
+blocks = 'ffff000000'
 port = '5000'
 tcp = '127.0.0.1'
 difficulty = 7 # количество нулей в начале хеша
-nonce, block_hash = mine_block(previous_hash, blocks_number,block_data, hash_rete, Blockchain, version , port, tcp, blocks, difficulty)
-print(f"New outbound-full-relay v1...v2 peer connected: version: {version} Number:  \a {blocks_number}, block_data:  \a {blocks_data}, hash_rate:  \a {hash_rete},  Nonce: \n {nonce}, Hash: \a {block_hash}, port: {port}, tcp: {tcp} blocks: {blocks}")
+nonce, block_hash = mine_block(previous_hash, blocks_number,block_data, hash_rete, Blockchain, version , peer, port, tcp, blocks, difficulty)
+print(f"New outbound-full-relay v1...v2 peer connected: version: {version} peer:  \a {peer} Number:  \a {blocks_number}, block_data:  \a {blocks_data}, hash_rate:  \a {hash_rete},  Nonce: \n {nonce}, Hash: \a {block_hash}, port: {port}, tcp: {tcp} blocks: {blocks}")
 print(f"Balances: 50.000000 BDR \n" )
 #return int(mine_block)
