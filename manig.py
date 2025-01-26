@@ -173,12 +173,12 @@ def adjist_difficulty(hash_rate, base_rate=1000):
 # Пример использования
 previous_hash = '0000000'
 blocks_number = '0xfff'
-blocks_data = 'eo00000000000000000'
+blocks_data = '00000000000000000'
 hash_rete = '0000000'
 (walrus := True)
 version = '0x0000ffff'
-peer = '0xfff0000000'
-blocks = 'ffff000000'
+peer = '0'
+blocks = '0xffff000000'
 port = '5000'
 tcp = '127.0.0.1'
 difficulty = 7 # количество нулей в начале хеша
