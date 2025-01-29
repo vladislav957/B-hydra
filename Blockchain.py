@@ -152,17 +152,18 @@ def hashcash(header, difficulty):
             print(f'Hash:{block_hash}')  
   
     class Blockchain: 
-      def init(self,chain,transaction,previous_hash="0000000",proof=100):
+      def init(self, chain, transaction, previous_hash="0000000", proof=100, block_size=1):
         self.chain = []
         self.current_transactions = []
-        self.new_block(previous_hash="0000000", proof=100)
+        #self.new_block(previous_hash="0000000", proof=100)
         
-        # Размер блока данных 8 мегабайт
-        block_size = 8 * 1024 *1024
+        # Размер блока данных 1 мегабайт
+        self.block_size = 1 * 1024 *1024
         
-        # Создаем байтовый массивразмеров 8 мегабайт
-        block = bytearray(block_size)
-        print("Блок данных размер 8 мегабайт создан.")
+        # Создаем байтовый массивразмеров 1 мегабайт
+        self.block = bytearray(block_size)
+        print("Блок данных размер 1 мегабайт создан.")
+        self.new_block(previous_hash="0000000", proof=100, block_size=1 )
 
       def init(self):
           self.chain = [self.create_genesis_bloc()]
@@ -398,7 +399,7 @@ def hashcash(header, difficulty):
         self.difficulty = 7
         self.reward = 50.00000
     def create_genesis_block(self):
-        return Blockc("0",[],"Genesis: США => Россия награни экономического калапса. Павела Дурова скора пасадять это ценость ЕС и США ") # type: ignore
+        return Blockc("0",[],"Genesis: США => Россия награни экономического калапса.Я Ковтун Владислав Сам я из Россий, даю послания из_за 21 века людям 22 века беригите себя и плонету и мир на этой чудесной плонети земля. Удачи вам!!!") # type: ignore
     
     def get_latest_block(self):
         return self.chain[:-1]
@@ -438,7 +439,7 @@ def hashcash(header, difficulty):
    
 def valid_proof (Blockchain): 
     SyntaxError
-    proof = blockchain = Blockchain(31.0000000)
+    proof = blockchain = Blockchain(310000000)
 def valid_proof(Blockchain, new_func):
     blockchain = new_func(Blockchain)
 def valid_proof(Blockchin,valid_proof,proof=100):
