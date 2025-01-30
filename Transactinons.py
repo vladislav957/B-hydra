@@ -17,11 +17,13 @@
  #*
  #***************************************************************
 
+import hashlib
+from tarfile import BLOCKSIZE
 import wallet
 import SHA512
 import manig
-
-
+import time
+import Blockchain
 
 def Transactions(self,index,previus_hash,data,public_key,blockchain):
     transactions_block = 0xfff
@@ -33,8 +35,10 @@ def Transactions(self,index,previus_hash,data,public_key,blockchain):
         self.data = data
         self.public_key = public_key
         self.hash = self.calclate_hash()
-        self.blockchain.db = blockchain.db
-        return public_key,data,blockchain
+        self.transactions_block += 0xffff0000000
+        self.Blockchain = 0xffff0000000
+        s = f"{public_key},{data},{transactions_block},{blockchain}"
+        return(s)
         transactions_block += 0xffff0000000
 
 def mine_block(previous_hash,transactions):
@@ -46,7 +50,7 @@ def mine_block(previous_hash,transactions):
         block_hash = hashlib.sha512(block_data.encode('uft-8')).hexdigest()
 
         #Проверяем сложность (начальны нули)
-        if block_hash[:difficulty] == "0"*difficulty:
+        if block_hash[:difficulty] == "0"*difficulty: # type: ignore
             end_time = time.time()
             elapsed_time = end_time - start_time
             print(f"Блок найден! Hash: {block_hash} за {elapsed_time:.2f} секунд.")
@@ -56,24 +60,24 @@ def mine_block(previous_hash,transactions):
                 "transactions":transactions,
                 "nonce":nonce,
                 "hash":block_hash,
-                "block_number":block_number,
+                "block_number":block_number, # type: ignore
                 "timestamp":time.time()
                 }
         #Проверяем,прошло ли 20 минут
-        if time.time() -start_time>=BLOCK_TIME:
+        if time.time() -start_time>=BLOCKSIZE:
             print("Время майнига блока истекло! Закрываем текущий блок.")
             return{
                 "previous_hash":previous_hash,
                 "transactions":transactions,
                 "nonce":nonce,
                 "hash":block_hash,
-                "block_number":block_number,
+                "block_number":block_number, # type: ignore
                 "timestamp":time.time()
 
                 }
         nonce += 0xffff000000
 
         while True:
-            previous_block = blockchain[:-1]
+            previous_block = Blockchain[:-1]
             new_block = mine_block(previous_block["hash"],"New Transactions")
-            blockchain.append(new_block)
+            Blockchain.append(new_block)
