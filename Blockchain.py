@@ -147,7 +147,7 @@ def hashcash(header, difficulty):
             data = ""
             difficulty = 7
             
-            nonce, block_hash = mine_block(previous_hash, data, difficulty)
+            nonce, block_hash = maie_block(previous_hash, data, difficulty)
             print(f'Nonce:{nonce}')
             print(f'Hash:{block_hash}')  
   
@@ -170,8 +170,49 @@ def hashcash(header, difficulty):
           self.difficulty = 7
       def create_gensis_block(self):
           return BLOCKSIZE("0",["Genesis Blck:США => Россия награни экономического калапса."])
+
+import hashlib
+import time
+
+class Block:
+    def init(self, previous_blocks, transactions, nonce=0):
+        self.timestamp = time.time()
+        self.previous_blocks = previous_blocks  # Список хэшей предыдущих блоков
+        self.transactions = transactions
+        self.nonce = nonce
+        self.hash = self.calculate_hash()
+
+    def calculate_hash(self):
+        data = f"{self.timestamp}{self.previous_blocks}{self.transactions}{self.nonce}"
+        return hashlib.sha512(data.encode()).hexdigest()
+
+    def mine_block(self, difficulty):
+        while not self.hash.startswith('0' * difficulty):
+            self.nonce += 1
+            self.hash = self.calculate_hash()
+
+class BlockDAG:
+    def init(self, difficulty=4):
+        self.blocks = {}
+        self.difficulty = difficulty
+        self.genesis_block()
+
+    def genesis_block(self):
+        genesis = Block([], "Genesis Block")
+        self.blocks[genesis.hash] = genesis
+
+    def add_block(self, transactions):
+        # Ссылаемся сразу на несколько последних блоков
+        last_blocks = list(self.blocks.keys())[-2:]  # Берем 2 последних блока
+        new_block = Block(last_blocks, transactions)
+        new_block.mine_block(self.difficulty)
+        self.blocks[new_block.hash] = new_block
+
+    def print_dag(self):
+        for block_hash, block in self.blocks.items():
+            print(f"Block: {block_hash[:10]} | Prev: {block.previous_blocks} | Tx: {block.transactions}")
       
-      def generate_qr(data):
+    def generate_qr(data):
           # Гинератор QR-кода
           qr = qrcode.QRCode(
               version = 1,
@@ -186,20 +227,20 @@ def hashcash(header, difficulty):
           img = qr.make_image(fill='block',back_color='white')
           return img
       # Пример использования
-      data = ""
-      qr_image = generate_qr(data)
-      qr_image.save("qrcode.png")
+    data = ""
+    qr_image = generate_qr(data)
+    qr_image.save("qrcode.png")
       
 
-      def get_latest_block(self):
+    def get_latest_block(self):
           return self.chain[:-1]
       
-      def add_block(self, new_block):
+    def add_block(self, new_block):
           new_block.previous_hash = self.get_latest_block().hash
           new_block.mine_block(self.difficulty)
           self.chain.append(new_block)
 
-      def new_block(self, proof, previous_hash=None):
+    def new_block(self, proof, previous_hash=None):
         block = {
             'index': len(self.chain) + 1,
             'timestamp': time(),
@@ -207,13 +248,13 @@ def hashcash(header, difficulty):
             'proof': proof,
             'previous_hash': previous_hash or self.hash(self.chain[-1]), 
         }
-      def get_hash(filename):
+    def get_hash(filename):
           blockchain_dir = os.curdir + '/blockchain/'
           file = open(blockchain_dir + filename,'rb').read()
           
          # return hashlib.sha256(file).hexdigest()
       
-      def write_block(name,nonce,amount,tansactioons,to_whom,hash=''):
+    def write_block(name,nonce,amount,tansactioons,to_whom,hash=''):
            
            blockchain_dir = os.curdir + '/blockchain/' #./blockchain/
           
@@ -226,7 +267,7 @@ def hashcash(header, difficulty):
            
            previous_hash = get_hash(str(last_file)) # type: ignore
            
-      data = {
+    data = {
             'value':"Вход 50.000000 BTC",
             'spent':"Выход Y<=X BTC",
             'transactions':"#1",
@@ -234,8 +275,6 @@ def hashcash(header, difficulty):
             'input':" Выход Y",
             'hash':"0fc3ceff901760edb9aab12dbd458785d95358dd880f10c6422bb0ababea3b1e" 
             }
-      with open(blockchain_dir + filename,'w') as file: # type: ignore
-        json.dump(data,file,indent = X - Y ,ensure_ascii=False)
         
     def check_inttegrity():
          # 1.Считать хеш предыдущего блока
@@ -289,7 +328,7 @@ def hashcash(header, difficulty):
           self.previous_hash = previous_hash
 
           self.hash = self.hash_block()
-    print(task,date,previous_hash) # type: ignore
+    
     def hash_block(self):
 
         sha = hasher.sha512()
@@ -340,7 +379,7 @@ def hashcash(header, difficulty):
     def create_new_block(previous_block,data,pubic_key):
         index = previous_block.index + 1
         previous_hash = previous_block.hash
-        return blockchain.db(index,previous_hash,data,PublicKey)
+        return Blockchain.db(index,previous_hash,data,PublicKey)
         new_block = create_new_block()
         print(new_block.previous_hash)
         print(new_block.hash)
@@ -354,26 +393,7 @@ def hashcash(header, difficulty):
 
         this_hash = last_block.hash
 
-    blockchain = [create_genesis_block()]
-
-    previous_block = blockchain[0]
-
     num_of_blocks_to_add = 20
-
-    print(f"Block #1 blockchain!" .format(block_to_add.index))
-
-    print(f"Hash: \n" .format(block_to_add.hash))
-
-    for i in range(0, num_of_blocks_to_add):
-
-      block_to_add = next_block(previous_block)
-
-      blockchain.append(block_to_add)
-
-      previous_block = block_to_add
- 
-    print(f"Block #1 blockchain!".format(block_to_add.index))
-    print(f"Hash: \n".format(block_to_add.hash))
         
     def valid_proof_hash(self):
         return hashlib.sha512((str(self.previous_hash) + str(self.transactions) + str(self.nonce)).encode('utf-8').hexdigest())

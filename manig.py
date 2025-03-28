@@ -73,7 +73,7 @@ def mine_block(previous_hash,transactions):
             new_block = mine_block(previous_block["hash"],"New Transactions")
             blockchain.append(new_block)
         
-def mine_block(previous_hash, block_number, blocks_data, hash_rate, Blockchain, version , peer, port, tcp, blocks, difficulty):
+def mine_block(previous_hash, block_number, blocks_data, hash_rate, Blockchain, version , peer, blocks, difficulty):
     nonce = 96
     version = 96
     peer = 96
@@ -182,7 +182,7 @@ blocks = '0xffff000000'
 port = '5000'
 tcp = '127.0.0.1'
 difficulty = 7 # количество нулей в начале хеша
-nonce, block_hash = mine_block(previous_hash, blocks_number,block_data, hash_rete, Blockchain, version , peer, port, tcp, blocks, difficulty)
-print(f"New outbound-full-relay v1...v2 peer connected: version: {version} peer:  \a {peer} Number:  \a {blocks_number}, block_data:  \a {blocks_data}, hash_rate:  \a {hash_rete},  Nonce: \n {nonce}, Hash: \a {block_hash}, port: {port}, tcp: {tcp} blocks: {blocks}")
+nonce, block_hash = mine_block(previous_hash, blocks_number,block_data, hash_rete, Blockchain, version , peer, blocks, difficulty)
+print(f"New outbound-full-relay v1...v2 peer connected: version: {version} peer:  \a {peer} Number:  \a {blocks_number}, block_data:  \a {blocks_data}, hash_rate:  \a {hash_rete},  Nonce: \n {nonce}, Hash: \a {block_hash},  blocks: {blocks}")
 print(f"Balances: 50.000000 BDR \n" )
 #return int(mine_block)
