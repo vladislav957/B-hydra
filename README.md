@@ -63,6 +63,7 @@ print(blockchain.chain)
 Улучшение производительности за счет многоточности.
 Интеграция с другими платёжными жизнью.
 https://chatgpt.com/canvas/shared/67ecb859c23881918b6d6be34a7ebde9
+[B-hydra.docx](https://github.com/user-attachments/files/19562178/B-hydra.docx)
 
 
 Контакты:
@@ -116,6 +117,7 @@ print(blockchain.chain)
 
 Future plans: Adding a command line interface for the management system. Implementation of the automatic complexity adjustment function. Improving performance through multi-precision. Integration with other payment services.
 https://chatgpt.com/canvas/shared/67ecb859c23881918b6d6be34a7ebde9
+[B-hydra.docx](https://github.com/user-attachments/files/19562186/B-hydra.docx)
 
 Contacts: If you have any questions or suggestions, please contact me via GitHub Issues or write to: Kovtunvladislav96@gmail.com killnetvladislav@outlook.com
 
