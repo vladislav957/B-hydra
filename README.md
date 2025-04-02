@@ -62,6 +62,7 @@ print(blockchain.chain)
 Реализация функции автоматической настройки сложности.
 Улучшение производительности за счет многоточности.
 Интеграция с другими платёжными жизнью.
+https://chatgpt.com/canvas/shared/67ecb859c23881918b6d6be34a7ebde9
 
 
 Контакты:
@@ -114,6 +115,7 @@ blockchain.add_block(data="Пример транзакции")
 print(blockchain.chain)
 
 Future plans: Adding a command line interface for the management system. Implementation of the automatic complexity adjustment function. Improving performance through multi-precision. Integration with other payment services.
+https://chatgpt.com/canvas/shared/67ecb859c23881918b6d6be34a7ebde9
 
 Contacts: If you have any questions or suggestions, please contact me via GitHub Issues or write to: Kovtunvladislav96@gmail.com killnetvladislav@outlook.com
 
