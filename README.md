@@ -65,8 +65,7 @@ print(blockchain.chain)
 
 [B-hydra.docx](https://github.com/user-attachments/files/19874548/B-hydra.docx)
 
-[B-hydra.pdf](https://github.com/user-attachments/files/19874555/B-hydra.pdf)
-
+[B-hydra.pdf](https://github.com/user-attachments/files/19913919/B-hydra.pdf)
 
 Контакты:
 Если у вас есть вопросы или предложения, свяжитесь со мной через GitHub Issues или напишите на: Kovtunvladislav96@gmail.com killnetvladislav@outlook.com
@@ -121,7 +120,6 @@ Future plans: Adding a command line interface for the management system. Impleme
 
 [B-hydra.docx](https://github.com/user-attachments/files/19874572/B-hydra.docx)
 
-[B-hydra.pdf](https://github.com/user-attachments/files/19874574/B-hydra.pdf)
-
+[B-hydra.pdf](https://github.com/user-attachments/files/19913922/B-hydra.pdf)
 
 Contacts: If you have any questions or suggestions, please contact me via GitHub Issues or write to: Kovtunvladislav96@gmail.com killnetvladislav@outlook.com
