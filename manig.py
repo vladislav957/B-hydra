@@ -20,7 +20,7 @@ def __inin__(self):
           sys.exit(1)
 
           port = 5000
-          print(f"port = 5000")
+          print(f"port = 5000")         
 
 #Папаметры блока
 BLOCK_TIME = 20*60 #20 минут в секундах
@@ -33,7 +33,7 @@ def mine_block(previous_hash,transactions):
     while True:
         #Формируем содержимое блока
         block_data = f"{previous_hash}{transactions}{nonce}"
-        block_hash = hashlib.sha512(blocks_data.encode('uft-8')).hexdigest()
+        block_hash = hashcash.sha512(blocks_data.encode('uft-8')).hexdigest()
 
         #Проверяем сложность (начальны нули)
         if block_hash[:difficulty] == "0"*difficulty:
@@ -163,7 +163,7 @@ def block_data(block_data, hash_rate):
          
         # Фунция для вычесления хеща
 def calculate_hash(data, nonce):
-    return hashlib.sha512(f"{data}{nonce}".encode()).hexdigest()
+    return hashcash.sha512(f"{data}{nonce}".encode()).hexdigest()
 def adjist_difficulty(hash_rate, base_rate=1000):
    "base_rate H/s. :patam hash_rate: :patam base_rate: :return:"
    new_difficulty = max(1, difficulty + (hash_rate // base_rate))
@@ -171,18 +171,28 @@ def adjist_difficulty(hash_rate, base_rate=1000):
      
 
 # Пример использования
-previous_hash = '0000000'
-blocks_number = '0xfff'
-blocks_data = '00000000000000000'
-hash_rete = '0000000'
+Blockchain = BLOCK_TIME
+previous_hash = 0000000
+blocks_number = BLOCK_TIME
+blocks_data = block_data
+difficulty = difficulty
+hash_rete = ""
 (walrus := True)
-version = '0x0000ffff'
-peer = '0'
-blocks = '0xffff000000'
-port = '5000'
-tcp = '127.0.0.1'
+version = ""
+peer = ""
+blocks = globals
+port = ""
+tcp = ""
 difficulty = 7 # количество нулей в начале хеша
 nonce, block_hash = mine_block(previous_hash, blocks_number,block_data, hash_rete, Blockchain, version , peer, blocks, difficulty)
-print(f"New outbound-full-relay v1...v2 peer connected: version: {version} peer:  \a {peer} Number:  \a {blocks_number}, block_data:  \a {blocks_data}, hash_rate:  \a {hash_rete},  Nonce: \n {nonce}, Hash: \a {block_hash},  blocks: {blocks}")
-print(f"Balances: 50.000000 BDR \n" )
-#return int(mine_block)
+print(f"New outbound-full-relay v1...v2 peer connected: version: {version} peer:  \a {peer} ")
+print(f"hash_rate:  \a {hash_rete}")  
+print(f"Nonce: \n {nonce}") 
+print(f"Hash: \a {block_hash}")
+print(f"block_data: \a {block_data}")
+print(f"difficulty: \a {difficulty}")
+print(f"Blockchain: \a {Blockchain}" )
+print(f"blocks_number: \a {blocks_number}")
+print(f"blocks: \a {blocks}")
+print(f"int(mine_block: \a {mine_block})")
+print(f"main: <<------------------------------------------------------------------>>") 
