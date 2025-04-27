@@ -1,7 +1,8 @@
-import hashlib
+import hashcash
 import time
 import json
 import Blockchain
+import manig
 
 class Block:
     def init(self, index, previous_hash, data, timestamp=None):
@@ -13,7 +14,7 @@ class Block:
 
     def calculate_hash(self):
         block_string = f"{self.index}{self.previous_hash}{self.data}{self.timestamp}"
-        return hashlib.sha512(block_string.encode()).hexdigest()
+        return hashcash.sha512(block_string.encode()).hexdigest()
 
     def to_dict(self):
         return {

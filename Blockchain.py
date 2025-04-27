@@ -1,63 +1,32 @@
-from curses.panel import new_panel
 from datetime import date
 from email import message
-from email.charset import QP
-from fileinput import filename
-from functools import total_ordering
 from gettext import translation
-from hmac import new
-from importlib.metadata import files
-from inspect import BlockFinder, signature
-from mimetypes import init
+from inspect import signature
 from operator import index
 import os
 from re import X
 import sqlite3
-from sys import version
-from tabnanny import check
 from tarfile import BLOCKSIZE
-from textwrap import fill
-from tkinter import Y, ttk
-from turtle import bgcolor
-from types import new_class
-from unittest.util import _MAX_LENGTH
-from urllib.parse import non_hierarchical
-import warnings
-import ipaddress
-from typing import Hashable, Self, dataclass_transform
-import random
-from webbrowser import get
-import qrcode # type: ignore
-from rsa.key import PublicKey, calculate_keys # type: ignore
-import tor # type: ignore
-import socket 
-from curses.panel import new_panel
-from multiprocessing import Process, Queue  # Это стандартные объекты для multiprocessing
+from tkinter import Y
+import qrcode # type: ignore 
+from rsa.key import PublicKey # type: ignore
 import Blockchain # type: ignore
 import hashlib as hasher
 import datetime as date
-import hashlib
-import hashcash # type: ignore
-import manig # type: ignore
-import Contract # type: ignore
-import P2WPKH # type: ignore
-import P2P # type: ignore
+import hashcash
+import wallet
+import Blocks_date
 
 
-
-import rsa # type: ignore
-from Crypto.Hash.SHA512 import block_size # type: ignore
-import QR # type: ignore
-import  SHA512 # type: ignore
 import hashlib
 import json  # ������� json ��� ������������� � ������ hash SHA512 
 from time import time
 
 def valid_proof_hash(data,previous_hash,proof):
-    new_varnew_var = hashlib.sha512
+    new_varnew_var = hashcash.sha512
     hash.update((str(date)) + str(previous_hash)).encode('GMT+3')
     #print .sha256.hexdigest()
-
+    
 def hashcash(header, difficulty):
     nonce = 96
     target = "0"*difficulty
@@ -104,9 +73,9 @@ def hashcash(header, difficulty):
     
         def valid_proof_hash(self,sha512,proof):
             # Пример простого хеширования
-            return hash.sha512((str(self.previous_hash) + str(self.transactions) + str(self.nonce)).encode('GMT+3')).hexdigest()
+         return hash.sha512((str(self.previous_hash) + str(self.transactions) + str(self.nonce)).encode('GMT+3')).hexdigest()
         
-        def mine_block(self, difficulty):
+    def mine_block(self, difficulty):
             self.nonce += 96
             while self.hash[:difficulty] != '0'* difficulty:
                 self.nonce += 0xffff000000

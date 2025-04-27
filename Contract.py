@@ -1,3 +1,7 @@
+from dataclasses import field
+from itertools import count
+from ntpath import join
+from typing import Self
 import Blockchain
 import wallet
 import cripta
@@ -15,7 +19,7 @@ class SmartContrat:
    def depostit(self, amount):
        if amount > 0:
            self.balance += amount
-           peturn(f"Deposited {amount} units.New balance: {self.balance}")
+           return(f"Deposited {amount} units.New balance: {self.balance}")
                    #return(f"Lnvalid deposit amount.")
                 
    def withdraw(self, amount, requester):
@@ -24,24 +28,24 @@ class SmartContrat:
           if amount <= 0 or amount >self.balance:
             #return ("Lnvalid withdrawal amount.")
             self.balance -= amount
-            return(f"Withdrawn {amout} units.Remaining balance: {self.balance}")
+            return(f"Withdrawn {amount} units.Remaining balance: {self.balance}")
    def set_data(self,key,value,requester):
           if requester !=self.owner:
             return ("Only the owner can set data.")
             self.storage[key] = value
              #return (f"Data set: {key} = {value}")
    def get_data(self,key):
-          self.storade[key] = amount
+          self.storade[key] = count
           return(f"Key not found.")
    def join(left,right,join_fields, left_fielde, right_fielde):
-      left_join_field, righe_join_field = join_fielde
+      left_join_field, righe_join_field = join_fields
 
       def field_list_to_dict(field_list):
          result_dict = {}
-         for fieldin in fild_list:
+         for fieldin in field_list:
             if isinstance(field, tuple):
                #result_dact[field[0] = field[1]]
-                      self.result_dict[field] = field  
+                      Self.result_dict[field] = field  
                       return result_dict
                       left_fielde_as_dict = field_list_to_dict(left_fields)
                       right_fielde_as_dact = field_list_to_dict(right-fields)
@@ -118,7 +122,7 @@ class SmartContrat:
             ]))
       
       if len(result) != len(contracts):
-         raise ValusError('The number of contracts in wrong' + str(result))
+         raise ValueError('The number of contracts in wrong' + str(result))
       return result
    def ecrich_tokens(blocks, tokens):
       result = list(join(
