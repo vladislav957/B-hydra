@@ -171,28 +171,27 @@ def adjist_difficulty(hash_rate, base_rate=1000):
      
 
 # Пример использования
-Blockchain = BLOCK_TIME
+Blockchain = 0xfff00000
 previous_hash = 0000000
-blocks_number = BLOCK_TIME
-blocks_data = block_data
-difficulty = difficulty
+blocks_number = nonce
+blocks_data = 0xfff0000
 hash_rete = ""
 (walrus := True)
-version = ""
-peer = ""
-blocks = globals
+version = 0xfff
+peer = 0xfff000
+blocks = 0xff0000
 port = ""
 tcp = ""
-difficulty = 7 # количество нулей в начале хеша
+difficulty = 0xfff00 # количество нулей в начале хеша
 nonce, block_hash = mine_block(previous_hash, blocks_number,block_data, hash_rete, Blockchain, version , peer, blocks, difficulty)
 print(f"New outbound-full-relay v1...v2 peer connected: version: {version} peer:  \a {peer} ")
 print(f"hash_rate:  \a {hash_rete}")  
 print(f"Nonce: \n {nonce}") 
 print(f"Hash: \a {block_hash}")
 print(f"block_data: \a {block_data}")
-print(f"difficulty: \a {difficulty}")
 print(f"Blockchain: \a {Blockchain}" )
 print(f"blocks_number: \a {blocks_number}")
+print(f"Diffi: \a {difficulty}")
 print(f"blocks: \a {blocks}")
 print(f"int(mine_block: \a {mine_block})")
 print(f"main: <<------------------------------------------------------------------>>") 
