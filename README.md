@@ -63,9 +63,10 @@ print(blockchain.chain)
 Улучшение производительности за счет многоточности.
 Интеграция с другими платёжными жизнью.
 
-[B-hydra.docx](https://github.com/user-attachments/files/19874548/B-hydra.docx)
+[B-hydra.docx](https://github.com/user-attachments/files/19970749/B-hydra.docx)
 
-[B-hydra.pdf](https://github.com/user-attachments/files/19913919/B-hydra.pdf)
+[B-hydra.pdf](https://github.com/user-attachments/files/19970752/B-hydra.pdf)
+
 
 Контакты:
 Если у вас есть вопросы или предложения, свяжитесь со мной через GitHub Issues или напишите на: Kovtunvladislav96@gmail.com killnetvladislav@outlook.com
@@ -76,7 +77,6 @@ Key Features: Decentralized Architecture: The platform operates without a centra
 
 ![Снимок экрана (39)](https://github.com/user-attachments/assets/4f05102c-824f-42a4-b1f4-73bfbae0db3a)
 ![Снимок экрана (40)](https://github.com/user-attachments/assets/2f56edec-3b73-435f-8394-1870d88855ae)
-
 
 Installation
 How to install and run : Requirements: Python 3.9 or higher Installed in dependencies (see requirements.txt) Steps: Clone the repositories
@@ -118,8 +118,8 @@ print(blockchain.chain)
 
 Future plans: Adding a command line interface for the management system. Implementation of the automatic complexity adjustment function. Improving performance through multi-precision. Integration with other payment services.
 
-[B-hydra.docx](https://github.com/user-attachments/files/19874572/B-hydra.docx)
+[B-hydra.docx](https://github.com/user-attachments/files/19970757/B-hydra.docx)
 
-[B-hydra.pdf](https://github.com/user-attachments/files/19913922/B-hydra.pdf)
+[B-hydra.pdf](https://github.com/user-attachments/files/19970758/B-hydra.pdf)
 
 Contacts: If you have any questions or suggestions, please contact me via GitHub Issues or write to: Kovtunvladislav96@gmail.com killnetvladislav@outlook.com
