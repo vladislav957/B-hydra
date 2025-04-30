@@ -1,7 +1,9 @@
+from calendar import c
 from datetime import date
 from email import message
 from gettext import translation
 from inspect import signature
+from itertools import chain
 from operator import index
 import os
 from re import X
@@ -144,12 +146,58 @@ import hashlib
 import time
 
 class Block:
-    def init(self, previous_blocks, transactions, nonce=0):
+    def __init__(self, index, previous_blocks, transactions, contributors,nonce=0):
+        self.index = index
+        self.chain = []
+        self.mempool = []
         self.timestamp = time.time()
+        self.contributions = contributors # Список с вкладом
         self.previous_blocks = previous_blocks  # Список хэшей предыдущих блоков
         self.transactions = transactions
         self.nonce = nonce
         self.hash = self.calculate_hash()
+
+    def compute_hash(self):
+        Blocks_date = {
+            self.index
+        }    
+
+    def  mine_block(self):
+        prefix = '0' * self.difficulty
+        while True:
+            hash_result = self.compute_hash()
+            if hash_result.startwith(prefix):
+                return hash_result
+            self.nonce
+
+    def add_transaction(self, sender, recipient, amount):
+        self.mempool.append({"from": sender,"to": recipient, "amount": amount})
+
+    def calculate_contributions(self):
+        # Примерны вклад, можно сделать динамическими
+        return  ["user", "sentinel", "points" , "user", "observer", "points",]
+
+    def mine_pending_transactions(self, miner_address):
+        # Добавим майнеру награду
+        self.mempool.append({"from":"network","to": miner_address, "amount": 1 })
+
+        contributor = self.calculate_contributions()
+        new_block = Block(
+            len(self.chain),self.mempool,self.chain[-1].hash,self.contributors,self.difficulty
+        )     
+        self.chain.append(new_block)
+        self.mempool = []
+        print(f"[+] Блок #{new_block.index} Добыт! Хэш: {new_block.hash}")
+
+        for block in chain: 
+         print(f"\nБлок  #{block.index} | Хэш: {block.hash}")
+         print(f"Транзакции:")
+         for tx in block.transactions:
+          print(f" {tx}")
+         if block.contributors:
+            print("Вклад участников (РоС):")
+            if c in block.contributors:
+                print(f" {c['user']}: {c['points']} очков")
 
     def calculate_hash(self):
         data = f"{self.timestamp}{self.previous_blocks}{self.transactions}{self.nonce}"
