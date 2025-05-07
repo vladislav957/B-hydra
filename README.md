@@ -1,5 +1,6 @@
 # B-hydra- это одноранговая электронная кассовая система P2P.
 
+ ---
 
 Ключевые особенности :
 Децентрализованная архитектура : Платформа работает без центрального сервера, обеспечивает полную независимость.
@@ -10,7 +11,7 @@
 ![Снимок экрана (39)](https://github.com/user-attachments/assets/096c8c4e-2ddb-45cd-b01d-b5c89ee1980c)
 ![Снимок экрана (40)](https://github.com/user-attachments/assets/5daa4e3d-bff6-4995-b1f3-77bda0f0cbcf)
 
-
+ ---
 
  Установка
 Как установить и запустить :
@@ -73,6 +74,8 @@ print(blockchain.chain)
 
 # B-hydra is a peer-to-peer electronic cash register system P2P.
 
+ ---
+
 Key Features: Decentralized Architecture: The platform operates without a central server, ensuring complete independence. Ease of Use: Intuitive interface and easy communication with other groups. Reliability and Security: Execution Scalability: The ability to expand the network to work with specified data volumes.
 
 ![Снимок экрана (39)](https://github.com/user-attachments/assets/4f05102c-824f-42a4-b1f4-73bfbae0db3a)
@@ -80,6 +83,8 @@ Key Features: Decentralized Architecture: The platform operates without a centra
 
 Installation
 How to install and run : Requirements: Python 3.9 or higher Installed in dependencies (see requirements.txt) Steps: Clone the repositories
+
+ ---
 
 Steps:
 
