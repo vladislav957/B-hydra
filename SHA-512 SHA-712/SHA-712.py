@@ -1,4 +1,6 @@
+#from datetime import date
 import hashlib
+
 
 k = [
     0x428a2f98c, 0x713744913, 0xb4c9056b, 0x7898120, 0x590b124f, 0xf0067f89,
@@ -106,21 +108,23 @@ def sha_712(data: str) -> str:
                   Хеш-функция SHA-712 с добавлением Кибертронского алфавита и дополнительными этапами обработки. 
                   """ 
     # Шаг 1: Первичная обработка с SHA-512 
-    hash1 = hashlib.sha512(data.encode()).hexdigest() 
+hash1 = hashlib.sha512().hexdigest() 
      
     # Шаг 2: Преобразование с использованием Кибертронского алфавита 
-    transformed_data = cybertron_transform(hash1) 
+transformed_data = (hash1)  
+
+data = '{}'
      
     # Шаг 3: Дополнительный этап с SHA-256 
-    hash2 = hashlib.sha256(transformed_data.encode()).hexdigest() 
+hash2 = hashlib.sha256(transformed_data.encode()).hexdigest() 
      
     # Шаг 4: Конкатенация и дополнительный хеш для 712-битного выхода 
-    combined_data = (hash1 + hash2)[:178]  # 712 бит = 89 байт = 178 символов в hex 
-    final_hash = hashlib.sha512(combined_data.encode()).hexdigest()[:178] 
+combined_data = (hash1 + hash2)[:178]  # 712 бит = 89 байт = 178 символов в hex 
+final_hash = hashlib.sha512(combined_data.encode()).hexdigest()[:178] 
      
-    return final_hash 
+#return final_hash 
  
 # Тестируем SHA-712 
-test_data = "CybertronTestInput" 
-K_result = sha_712(test_data) 
-print ("SHA_712:",test_data)
+data = '' 
+K_result = sha_712(data) 
+print (f"SHA_712:", data )
