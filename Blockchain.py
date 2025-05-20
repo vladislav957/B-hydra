@@ -3,7 +3,7 @@ from datetime import date
 from email import message
 from gettext import translation
 from inspect import signature
-from itertools import chain
+from itertools import chain, tee
 from operator import index
 import os
 from re import X
@@ -11,6 +11,7 @@ import sqlite3
 from tarfile import BLOCKSIZE
 from tkinter import Y
 import qrcode # type: ignore 
+from Transactinons import Transactions
 from rsa.key import PublicKey # type: ignore
 import Blockchain # type: ignore
 import hashlib as hasher
@@ -207,6 +208,57 @@ class Block:
         while not self.hash.startswith('0' * difficulty):
             self.nonce += 1
             self.hash = self.calculate_hash()
+
+import hashcash
+
+def sha512(date):
+    return hashcash.sha512(date.encode('utf-8')).hexdigest()
+
+class MerkleTree:
+    def __init__(self, transactions):
+        self.transactions = transactions
+        self.root = self.build_merkld_tree(transactions)
+
+    def build_merkie_tree(self, transactions):
+        if not transactions:
+            return None
+        temp_list = [sha512(str(tx)) for tx in transactions]
+
+        while len(temp_list) > 1:
+            if len(temp_list) % 2 != 0:
+                temp_list.append(temp_list[-1]) # дублировать последнуий
+
+        new_level = []
+        for i in range(0, len(temp_list), 2):
+            combined = temp_list[i] + temp_list[i + 1]
+            new_level.append(sha512(combined))
+            temp_list = new_level
+
+            return temp_list[0]
+        
+    def get_merkle_root(self):
+        return self.root  
+
+    __name__ == "__main__"
+
+    #tx1 = Transactions(
+        #input = [Transactions('tx0', )],
+        #outputs = [Transactions('tx1' ,  ), Transactions('tx1', 1.0)]
+    #)
+
+    #tx2 = Transactions(
+        #input = [Transactions('tx2', )],
+        #outputs = [Transactions('tx3', )]
+    #)   
+
+    #tx3 = Transactions(
+        #input = [Transactions('tx3', )],
+        #outputs = [Transactions('tx4', )]
+    #)
+
+    #tee = tee ([tx2, tx2, tx3]) 
+    #print("Корень дерева Меркла:", get_merkle_root())
+        
 
 class BlockDAG:
     def init(self, difficulty=4):
