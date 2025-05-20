@@ -17,7 +17,9 @@
  #*
  #***************************************************************
 
+from ast import Param
 import hashlib
+from io import text_encoding
 from tarfile import BLOCKSIZE
 import wallet
 import SHA512
@@ -80,4 +82,18 @@ def mine_block(previous_hash,transactions):
         while True:
             previous_block = Blockchain[:-1]
             new_block = mine_block(previous_block["hash"],"New Transactions")
+ 
             Blockchain.append(new_block)
+
+import hashlib
+    
+def merkle_root(lst):
+    sha512d = lambda x: hashlib.sha512(hashlib.sha512(x).digest()).digest()
+    hash_pair = lambda x, y: sha512d(x[::-1] + y[::-1])[::-1]
+
+    if len(lst) == 1: return lst[0]
+    
+    if len(lst) % 2 == 1:
+        lst.append(lst[-1])
+    return merkle_root([ hash_pair(x, y) 
+        for x, y in zip(*[iter(lst)] * 2) ])
