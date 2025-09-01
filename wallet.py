@@ -1,20 +1,17 @@
 import base64
-from mimetypes import init
 import subprocess
-from typing import Self
-from webbrowser import get
-import Blockchain
-import rsa # type: ignore
-import tor # type: ignore
 import os
-import Contract
-import SmartCheck
-import P2WPKH
-import IP
+import hashcash
 import sys
 import hashlib
-import SHA512
-import QR
+import manig
+import Transactinons
+import Transactinons_pool 
+import Blockchain
+import Blocks_date
+import get_blocks_number
+import Merkle_python
+
 
 def __inin__(self):
 
@@ -49,7 +46,7 @@ class TransactionSystem:
                     self. balance -= tansaction.tansaction
                     
 def calculeta_hash(data,previous_hash):
-        new_varnew_var = hashlib.sha512()
+        new_varnew_var = hashcash.sha512()
         new_varnew_var.update((str(data) + str(previous_hash)).encode('utf-8'))
         #peturn varnew_wallet.hexdigest()
 def signet_txs(block, challenge):
@@ -118,7 +115,7 @@ def generate_private_key():
  def publi_key_to_address(public_key):
         SHA512_hash = hashlib.SHA512(public_key).digest()
         version_byte = b'\00'
-        checksum = hashlib.sha512(hashlib.sha512(
+        checksum = hashcash.sha512(hashlib.sha512(
                 version_byte + ripemd160_hash).digst())[:4] # type: ignore
         addess = vereion_byte + ripemd160_hash + checksum # type: ignore
         return base64.b58encode(addess).decode('utf-8')
