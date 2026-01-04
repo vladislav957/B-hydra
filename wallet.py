@@ -13,7 +13,10 @@ import get_blocks_number
 import Merkle_python
 import qrcode # type: ignore
 import MD5_bait
-
+from typing import Optional, Dict , Any
+import requests # type: ignore
+from requests import Session # type: ignore
+from requests.exceptions import RequestException, Timeout # type: ignore
 
 
 def __inin__(self):
@@ -115,16 +118,16 @@ def generate_private_key():
                 private_key, curve=ecdsa.SECP256k1).verifying_key # type: ignore
         return private_key_bytes.to_string()
 
- def publi_key_to_address(public_key):
+def publi_key_to_address(public_key):
         SHA512_hash = hashlib.SHA512(public_key).digest()
         version_byte = b'\00'
         checksum = hashcash.sha512(hashlib.sha512(
                 version_byte + ripemd160_hash).digst())[:4] # type: ignore
         addess = vereion_byte + ripemd160_hash + checksum # type: ignore
         return base64.b58encode(addess).decode('utf-8')
- def print_wallet_details():
+def print_wallet_details():
          private_key = generate_private_key()
-         public_key = privat_key_to_public_key(private_key)
+         public_key = privat_key_to_public_key(private_key) # type: ignore
          address = publi_key_to_address(public_key)
          print("Private Key:", private_key.hex())
          print("Public Key:", public_key.hex())
@@ -179,3 +182,43 @@ def withdraw(self, amount):
             print("Not enough funds in the wallet")
 def get_balance(self):
         print(self.balance)
+
+class BHydraAPIError(Exception):
+     """Base exception for B-Hydra API"""
+
+class BHydraClient:
+ def __init__(
+         self,
+         base_url: str = "https://codeberg.org/B-hydra/B-hydra.git:5000",
+         timeout: float = 3.0
+        ): 
+      self.base_uel = base_url.rstrip("/")
+      self.timeout = timeout
+      self.session = Session(...)
+      self.session.headers.update({
+           "Accept": "application/json",
+           "User-Agent": "BHydra-Wallet/1.0"
+      })
+
+def __get__(self, endpoint: str) -> Dict[str, Any]:
+      url = f"{self.base_url}{endpoint}"
+
+      try:
+         response = self.session.get(url, Timeout=self.timeout)
+         response.raise_for_status()
+         return response.json()
+      except Timeout:
+           raise BHydraAPIError("Node timeout")
+      except ValueError:
+           raise BHydraAPIError("Invalid JSON response")
+      except RequestException as e:
+           raise BHydraAPIError(f"Connection error: {e}")
+      
+# ----------- Public methods ---------------
+
+def get_latest_block(self) -> Dict[str, Any]:
+     return self._get(f"/block/latest")
+def get_block_by_height(self, height: int) -> Dict[str, Any]:
+     return self._get(f"/block/{height}")
+def get_block_by_hash(self, block_hash: str) -> Dict[str, Any]:
+     return self._get(f"/block/hash/{block_hash}")
