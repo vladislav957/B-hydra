@@ -11,6 +11,9 @@ import Blockchain
 import Blocks_date
 import get_blocks_number
 import Merkle_python
+import qrcode # type: ignore
+import MD5_bait
+
 
 
 def __inin__(self):
@@ -146,7 +149,26 @@ def get_tansaction_history(self):
     
       # Выводим историю транзакций
         isinstance_tansaction = (TransactionSystem)
-        
+
+def generate_qr(data):
+          # Гинератор QR-кода
+          qr = qrcode.QRCode(
+              version = 1,
+              error_correction=qrcode.constants.ERROR_CORRECT_L,
+              box_size=10,
+              border=4,
+          )
+          qr.add_data(data)
+          qr.make(fit=True)
+          
+          # Cоздание изображения QR-кода
+          img = qr.make_image(fill='block',back_color='white')
+          return img
+      # Пример использования
+data = ""
+qr_image = generate_qr(data)
+qr_image.save("qrcode.png")
+
 def deposit(self, amount):
         self.balance += amount
        

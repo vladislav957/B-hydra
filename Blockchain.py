@@ -10,7 +10,6 @@ from re import X
 import sqlite3
 from tarfile import BLOCKSIZE
 from tkinter import Y
-import qrcode # type: ignore 
 from Transactinons import Transactions
 from rsa.key import PublicKey # type: ignore
 import Blockchain # type: ignore
@@ -230,26 +229,6 @@ class BlockDAG:
         for block_hash, block in self.blocks.items():
             print(f"Block: {block_hash[:10]} | Prev: {block.previous_blocks} | Tx: {block.transactions}")
       
-    def generate_qr(data):
-          # Гинератор QR-кода
-          qr = qrcode.QRCode(
-              version = 1,
-              error_correction=qrcode.constants.ERROR_CORRECT_L,
-              box_size=10,
-              border=4,
-          )
-          qr.add_data(data)
-          qr.make(fit=True)
-          
-          # Cоздание изображения QR-кода
-          img = qr.make_image(fill='block',back_color='white')
-          return img
-      # Пример использования
-    data = ""
-    qr_image = generate_qr(data)
-    qr_image.save("qrcode.png")
-      
-
     def get_latest_block(self):
           return self.chain[:-1]
       
@@ -494,7 +473,5 @@ def valid_proof(Blockchin,valid_proof,proof=100):
  new_var1new_var = print(next(X == Y ))
  
  new_varnew_var = print(next(Nonce = "0xffff000000"))
- 
- new_varnew_var = print(next(qrcode))
- 
+  
  new_var1new_var = print(next(Block,Hash)) # type: ignore
