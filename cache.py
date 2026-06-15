@@ -1,8 +1,8 @@
 class HashTable:
-    def init(self, size):
+    def __init__(self, size):
         self.size = size
         self.table = [[] for _ in range(size)]
-    
+
     def hash_function(self, key):
         return key % self.size
 
@@ -16,7 +16,7 @@ class HashTable:
             if item[0] == key:
                 return item[1]
         return None
-    
+
     def delete(self, key):
         hash_key = self.hash_function(key)
         for index, item in enumerate(self.table[hash_key]):
@@ -25,15 +25,10 @@ class HashTable:
                 return True
         return False
 
-# Пример использования
+# РџСЂРёРјРµСЂ РёСЃРїРѕР»СЊР·РѕРІР°РЅРёСЏ
 hash_table = HashTable(10)
 hash_table.insert(12, "Alice")
 hash_table.insert(25, "Bob")
 print(hash_table.search(12))  # Output: Alice
 hash_table.delete(12)
 print(hash_table.search(12))  # Output: None
-    
-
-    
-
-

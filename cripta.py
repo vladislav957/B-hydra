@@ -9,7 +9,7 @@ import manig
 import time
 
 class Blockchain:
-    def init(self, index, timestamp, data, previous_hash):
+    def __init__(self, index, timestamp, data, previous_hash):
         self.index = index
         self.timestamp = timestamp
         self.data = data

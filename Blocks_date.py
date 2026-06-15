@@ -5,7 +5,7 @@ import Blockchain
 import manig
 
 class Block:
-    def init(self, index, previous_hash, data, timestamp=None):
+    def __init__(self, index, previous_hash, data, timestamp=None):
         self.index = index
         self.previous_hash = previous_hash
         self.data = data
@@ -26,7 +26,7 @@ class Block:
         }
 
 class Blockchain:
-    def init(self):
+    def __init__(self):
         self.chain = [self.create_genesis_block()]
 
     def create_genesis_block(self):

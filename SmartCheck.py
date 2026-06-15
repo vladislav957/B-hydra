@@ -6,7 +6,7 @@ import P2WPKH
 
 
 class SmartCheck:
-    def init(self):
+    def __init__(self):
         self.parties = {} # Сторонаы обмена
         self.assts = {}  # Активы,которые каждая сторона предлогает
         self.status = "Pending" # Статус сделки

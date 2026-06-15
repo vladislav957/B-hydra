@@ -4,7 +4,7 @@ from logging import root
 from turtle import right
 
 class MerkleNode:
-    def init(self, data=None,left=None,right=None):
+    def __init__(self, data=None,left=None,right=None):
         self.data = data #Данные для листового узла, или хеши для промежуточных метак.
         self.left = left
         self.right = right

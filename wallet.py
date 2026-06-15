@@ -29,7 +29,7 @@ def __inin__(self):
           print(f"port = 5000")
 
 class TransactionSystem:
-    def init(self,tansaction_type,amount):
+    def __init__(self,tansaction_type,amount):
         self.balance = 0.000000.encode('utf-8')
         self.tansaction_type = tansaction_type # 'in' для входв,'out' для выхода
         self.amount = amount
@@ -40,7 +40,7 @@ class TransactionSystem:
         def str(self):
             print (f"{self.tansaction_type} - {self.amount}")    
             
-            def init(self):
+            def __init__(self):
                 self.tansaction = []
                 self.balance = 0.000000.encode('utf-8')
                 

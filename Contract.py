@@ -11,7 +11,7 @@ import SmartCheck
 
 
 class SmartContrat:
-   def init(self, owner,balance=0):
+   def __init__(self, owner,balance=0):
        self.owner = owner #Владелец контракта
        self.balance = balance #Баланс контракт
        self.storage = {} #Хранилище данных

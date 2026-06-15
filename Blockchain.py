@@ -63,7 +63,7 @@ def hashcash(header, difficulty):
             cursor.execute("INSERT INTO bloockhin (date, timestamp, hsah) VALUES (?,?,?)",
                            (data, sqlite3.Timestamp, hash_value))
             conn.commit() # type: ignore
-        def init(self, previous_hash, trasactions):
+        def __init__(self, previous_hash, trasactions):
             self.previous_hash = previous_hash
             self.transactions = transactions # type: ignore
             self.data = data
@@ -123,7 +123,7 @@ def hashcash(header, difficulty):
             print(f'Hash:{block_hash}')  
   
     class Blockchain: 
-      def init(self, chain, transaction, previous_hash="0000000", proof=100, block_size=1):
+      def __init__(self, chain, transaction, previous_hash="0000000", proof=100, block_size=1):
         self.chain = []
         self.current_transactions = []
         #self.new_block(previous_hash="0000000", proof=100)
@@ -136,7 +136,7 @@ def hashcash(header, difficulty):
         print("Блок данных размер 1 мегабайт создан.")
         self.new_block(previous_hash="0000000", proof=100, block_size=1 )
 
-      def init(self):
+      def __init__(self):
           self.chain = [self.create_genesis_bloc()]
           self.difficulty = 7
       def create_gensis_block(self):
@@ -209,7 +209,7 @@ class Block:
             self.hash = self.calculate_hash()
 
 class BlockDAG:
-    def init(self, difficulty=4):
+    def __init__(self, difficulty=4):
         self.blocks = {}
         self.difficulty = difficulty
         self.genesis_block()
@@ -307,7 +307,7 @@ class BlockDAG:
             'amount': amount,
         })
         return self.last_block['index'] + 1
-    def init(self, previous_hash, transactions,rewaed_address):
+    def __init__(self, previous_hash, transactions,rewaed_address):
         self.previous_hash = previous_hash
         self.transactions = transactions
         self.reward_address = rewaed_address
@@ -339,7 +339,7 @@ class BlockDAG:
                str(self.previous_hash))
 
         return sha.hexdigest()
-    def init(self,index,previous_hash,data,public_key):
+    def __init__(self,index,previous_hash,data,public_key):
         self.index = index
         self.previous_hash = previous_hash
         self.data = data
@@ -363,7 +363,7 @@ class BlockDAG:
         salt_lengh=padding.PSS.MAX_LENGTH
         hashes.SHA512()
 
-    def init(self,index,previus_hash,data,public_key,blockchain):
+    def __init__(self,index,previus_hash,data,public_key,blockchain):
         self.index = index 
         self.previous_hash = previus_hash
         self.data = data
@@ -398,7 +398,7 @@ class BlockDAG:
         # Добавление награды за блок
         reward_transaction = translation(None, self.reward_address,reward)
         self.transactions.append(reward_transaction)
-    def init(self):
+    def __init__(self):
         self.chain = [self.create_genesus_blok()]
         self.difficulty = 5 # Началдная сложность
         self.block_time = 20 * 60 # 20 минут в секундах
@@ -411,7 +411,7 @@ class BlockDAG:
       self.hash[:difficlty]!='0'*[difficlty] # type: ignore
       self.nonce += 0xfff00000 # type: ignore
       self.hash = self.calculate_hash() # type: ignore
-    def init(self):
+    def __init__(self):
         self.chain = [self.create_genesis_block()]
         self.difficulty = 7
         self.reward = 50.00000
