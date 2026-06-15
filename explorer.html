@@ -57,6 +57,14 @@
            autocomplete="off">
     <button onclick="search()">Поиск</button>
   </div>
+  <div class="card">
+    <h3>⛏ Майнинг</h3>
+    <div class="search" style="margin:0">
+      <input id="miner" placeholder="Адрес майнера (BHY…)" autocomplete="off">
+      <button onclick="mine()">Майнить блок</button>
+    </div>
+    <div id="mineMsg" class="muted" style="margin-top:8px"></div>
+  </div>
   <div id="detail"></div>
   <div class="card">
     <h3>Последние блоки</h3>
@@ -153,6 +161,20 @@ async function showAddress(addr) {
 
 function showError(msg) {
   $('detail').innerHTML = `<div class="card err">Не найдено: ${esc(msg)}</div>`;
+}
+
+async function mine() {
+  const m = $('miner').value.trim();
+  if (!m) { $('mineMsg').innerHTML = '<span class="err">Введите адрес майнера</span>'; return; }
+  $('mineMsg').textContent = 'Майнинг…';
+  const r = await fetch('/api/mine', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({miner: m})
+  });
+  const j = await r.json();
+  if (j.error) { $('mineMsg').innerHTML = `<span class="err">Ошибка: ${esc(j.error)}</span>`; }
+  else { $('mineMsg').innerHTML = `<span class="out">Добыт блок #${j.index} (${j.transactions} tx)</span>`; }
+  loadStats(); loadBlocks();
 }
 
 async function search() {
