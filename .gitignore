@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Состояние блокчейна B-hydra (генерируется при работе CLI)
+bhydra_chain.json
+qrcode.png
+
+# Среды разработки / IDE (Visual Studio, VS Code, JetBrains)
+.vs/
+*.sln
+*.suo
+*.user
+*.vsidx
+*.lnk
+slnx.sqlite
+ProjectSettings.json
+VSWorkspaceState.json
+CppProperties.json
+.idea/
+.vscode/
+
+# Прочее
+*.gch
+*.log
