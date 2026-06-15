@@ -50,13 +50,32 @@ https://github.com/vladislav957/B-hydra.git
 cd B-hydra
 
 Пример использования :
-После запуска программы вы можете начать майнинг или создать транзакции. Пример кода для добавления блока:
+После запуска программы вы можете начать майнинг или создать транзакции.
 
-from b_hydra import Blockchain
+Быстрый старт (полная демонстрация жизненного цикла):
+
+    python manig.py
+
+Пример кода для добавления блока:
+
+from Blockchain import Blockchain
 
 blockchain = Blockchain()
 blockchain.add_block(data="Пример транзакции")
 print(blockchain.chain)
+
+Командная строка (CLI) — состояние хранится в bhydra_chain.json:
+
+    python cli.py wallet                       # создать кошелёк
+    python cli.py init                         # инициализировать цепочку
+    python cli.py mine <АДРЕС_МАЙНЕРА>         # добыть блок (награда 50 BHY)
+    python cli.py send <ПРИВ_КЛЮЧ> <АДРЕС> 10 --fee 0.5   # перевод
+    python cli.py mine <АДРЕС_МАЙНЕРА>         # подтвердить транзакцию в блоке
+    python cli.py balance <АДРЕС>             # проверить баланс
+    python cli.py chain                        # показать цепочку
+
+Параметры сети B-hydra: хеш SHA-512, консенсус Proof-of-Work, награда 50 BHY,
+интервал халвинга 310 000 блоков, максимальная эмиссия 31 000 000 BHY.
 
 Планы на будущее :
 Добавление интерфейса командной строки для системы управления.
@@ -113,13 +132,32 @@ git clone
 https://github.com/vladislav957/B-hydra.git
 cd B-hydra
 
-Example of usage: After running the program, you can start mining or create transactions. Example code for adding a block:
+Example of usage: After running the program, you can start mining or create transactions.
 
-from b_hydra import Blockchain
+Quick start (full lifecycle demo):
+
+    python manig.py
+
+Example code for adding a block:
+
+from Blockchain import Blockchain
 
 blockchain = Blockchain()
 blockchain.add_block(data="Пример транзакции")
 print(blockchain.chain)
+
+Command line (CLI) — state is stored in bhydra_chain.json:
+
+    python cli.py wallet                       # create a wallet
+    python cli.py init                         # initialise the chain
+    python cli.py mine <MINER_ADDRESS>         # mine a block (50 BHY reward)
+    python cli.py send <PRIV_KEY> <ADDRESS> 10 --fee 0.5   # transfer
+    python cli.py mine <MINER_ADDRESS>         # confirm the tx in a block
+    python cli.py balance <ADDRESS>           # check balance
+    python cli.py chain                        # show the chain
+
+B-hydra network parameters: SHA-512 hashing, Proof-of-Work consensus, 50 BHY
+reward, halving interval 310,000 blocks, maximum supply 31,000,000 BHY.
 
 Future plans: Adding a command line interface for the management system. Implementation of the automatic complexity adjustment function. Improving performance through multi-precision. Integration with other payment services.
  ---

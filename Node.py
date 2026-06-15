@@ -9,6 +9,8 @@ Node.py — узел сети B-hydra.
 модуль импортировался без побочных эффектов.
 """
 
+import json
+
 from Blockchain import Blockchain, DEFAULT_DIFFICULTY
 from Transactinons import Transaction, TransactionPool, coinbase
 
@@ -64,6 +66,29 @@ class BHydraNode:
 
     def is_valid(self) -> bool:
         return self.blockchain.is_chain_valid()
+
+    # --- Сохранение / загрузка ------------------------------------------
+    def save(self, path: str) -> None:
+        """Сохраняет цепочку и мемпул в JSON-файл."""
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(
+                {"difficulty": self.blockchain.difficulty,
+                 "chain": self.blockchain.to_dicts(),
+                 "mempool": [tx.to_dict() for tx in self.mempool.transactions]},
+                f, ensure_ascii=False, indent=2,
+            )
+
+    @classmethod
+    def load(cls, path: str) -> "BHydraNode":
+        """Загружает узел из JSON-файла с цепочкой и мемпулом."""
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        node = cls.__new__(cls)
+        node.blockchain = Blockchain.from_dicts(data["chain"], data["difficulty"])
+        node.mempool = TransactionPool()
+        for tx_dict in data.get("mempool", []):
+            node.mempool.transactions.append(Transaction.from_dict(tx_dict))
+        return node
 
 
 if __name__ == "__main__":

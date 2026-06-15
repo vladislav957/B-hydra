@@ -100,6 +100,19 @@ class Block:
             "hash": self.hash,
         }
 
+    @classmethod
+    def from_dict(cls, data):
+        """Восстанавливает блок из словаря без повторного майнинга."""
+        block = cls.__new__(cls)
+        block.index = data["index"]
+        block.previous_hash = data["previous_hash"]
+        block.data = data["data"]
+        block.timestamp = data["timestamp"]
+        block.nonce = data["nonce"]
+        block.merkle_root = data["merkle_root"]
+        block.hash = data["hash"]
+        return block
+
     def __repr__(self):
         return f"<Block #{self.index} hash={self.hash[:16]}…>"
 
@@ -160,8 +173,19 @@ class Blockchain:
                 return False
         return True
 
+    def to_dicts(self):
+        return [b.to_dict() for b in self.chain]
+
     def to_json(self):
-        return json.dumps([b.to_dict() for b in self.chain], ensure_ascii=False, indent=2)
+        return json.dumps(self.to_dicts(), ensure_ascii=False, indent=2)
+
+    @classmethod
+    def from_dicts(cls, chain_dicts, difficulty=DEFAULT_DIFFICULTY):
+        """Восстанавливает блокчейн из списка словарей (например, из файла)."""
+        blockchain = cls.__new__(cls)
+        blockchain.difficulty = difficulty
+        blockchain.chain = [Block.from_dict(d) for d in chain_dicts]
+        return blockchain
 
 
 if __name__ == "__main__":
