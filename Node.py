@@ -10,7 +10,7 @@ Node.py — узел сети B-hydra (модель UTXO).
 
 import json
 
-from Blockchain import Blockchain, DEFAULT_DIFFICULTY
+from Blockchain import Block, Blockchain, DEFAULT_DIFFICULTY
 from Transactinons import (
     Transaction, TxInput, TxOutput, TransactionPool, coinbase,
 )
@@ -175,6 +175,65 @@ class BHydraNode:
 
     def is_valid(self) -> bool:
         return self.blockchain.is_chain_valid()
+
+    # --- Синхронизация P2P ----------------------------------------------
+    @property
+    def height(self) -> int:
+        return len(self.blockchain.chain)
+
+    def _prune_mempool(self):
+        """Убирает из мемпула транзакции, уже попавшие в цепочку или ставшие
+        невалидными (например, их входы потрачены)."""
+        in_chain = {tx["txid"] for block in self.blockchain.chain
+                    for tx in self._block_transactions(block)}
+        utxos = self.utxo_set()
+        reserved, kept = set(), []
+        for tx in self.mempool.transactions:
+            if tx.txid in in_chain:
+                continue
+            if self.validate_transaction(tx, utxos=utxos, reserved=reserved):
+                for inp in tx.vin:
+                    reserved.add(inp.outpoint)
+                kept.append(tx)
+        self.mempool.transactions = kept
+
+    def receive_block(self, block_dict) -> bool:
+        """
+        Принимает одиночный блок от пира. Добавляет его, только если он
+        продолжает нашу цепочку (его prev = наш последний хеш) и валиден.
+        Возвращает False, если блок не подходит (нужна полная синхронизация).
+        """
+        block = Block.from_dict(block_dict)
+        last = self.blockchain.last_block
+        if block.previous_hash != last.hash or block.index != self.height:
+            return False
+        if block.merkle_root != block._calculate_merkle_root():
+            return False
+        if block.hash != block.calculate_hash():
+            return False
+        if block.difficulty != self.blockchain.expected_difficulty(block.index):
+            return False
+        if not block.hash.startswith("0" * block.difficulty):
+            return False
+        self.blockchain.chain.append(block)
+        self._prune_mempool()
+        return True
+
+    def replace_chain(self, chain_dicts) -> bool:
+        """
+        Правило консенсуса: принять чужую цепочку, если она длиннее нашей,
+        валидна и имеет тот же генезис. Возвращает True, если заменили.
+        """
+        if len(chain_dicts) <= self.height:
+            return False
+        candidate = Blockchain.from_dicts(chain_dicts, self.blockchain.difficulty)
+        if candidate.chain[0].hash != self.blockchain.chain[0].hash:
+            return False  # другой генезис — это другая сеть
+        if not candidate.is_chain_valid():
+            return False
+        self.blockchain = candidate
+        self._prune_mempool()
+        return True
 
     # --- Обозреватель блоков (read-only) --------------------------------
     def get_block(self, index: int):
