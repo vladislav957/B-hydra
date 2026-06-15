@@ -10,3 +10,6 @@ cryptography>=42.0
 
 # QR.py — генерация QR-кода для адреса
 qrcode[pil]>=7.4
+
+# Для запуска автотестов (необязательно): pip install pytest && pytest
+pytest>=8.0

@@ -4,6 +4,7 @@ __pycache__/
 *.egg-info/
 .venv/
 venv/
+.pytest_cache/
 
 # Состояние блокчейна B-hydra (генерируется при работе CLI)
 bhydra_chain.json

@@ -165,6 +165,10 @@ class Blockchain:
             current = self.chain[i]
             previous = self.chain[i - 1]
 
+            # Корень Меркла должен соответствовать данным блока: иначе
+            # подмена транзакций осталась бы незамеченной.
+            if current.merkle_root != current._calculate_merkle_root():
+                return False
             if current.hash != current.calculate_hash():
                 return False
             if current.previous_hash != previous.hash:
