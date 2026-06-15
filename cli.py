@@ -126,7 +126,11 @@ def build_parser():
 def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
-    args.func(args)
+    try:
+        args.func(args)
+    except BrokenPipeError:
+        # Вывод оборвали (например, через `| head`) — это не ошибка.
+        pass
 
 
 if __name__ == "__main__":

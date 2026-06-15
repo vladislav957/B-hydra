@@ -26,9 +26,10 @@ class HashTable:
         return False
 
 # Пример использования
-hash_table = HashTable(10)
-hash_table.insert(12, "Alice")
-hash_table.insert(25, "Bob")
-print(hash_table.search(12))  # Output: Alice
-hash_table.delete(12)
-print(hash_table.search(12))  # Output: None
+if __name__ == "__main__":
+    hash_table = HashTable(10)
+    hash_table.insert(12, "Alice")
+    hash_table.insert(25, "Bob")
+    print(hash_table.search(12))  # Output: Alice
+    hash_table.delete(12)
+    print(hash_table.search(12))  # Output: None
