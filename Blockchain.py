@@ -29,7 +29,27 @@ INITIAL_REWARD = 50            # Начальная награда за блок
 HALVING_INTERVAL = 310_000     # Каждые 310 000 блоков награда делится пополам
 MAX_SUPPLY = 31_000_000        # Максимальная эмиссия монет
 BLOCK_TIME_SECONDS = 120       # Целевое время генерации блока (2 минуты)
-DEFAULT_DIFFICULTY = 4         # Кол-во ведущих нулей в хеше блока (PoW)
+DEFAULT_DIFFICULTY = 4         # Базовое кол-во ведущих нулей в хеше блока (PoW)
+
+# Динамическая сложность: чем больше участников (майнеров) в сети, тем выше
+# сложность. Каждые PARTICIPANTS_PER_LEVEL разных майнеров добавляют +1 нуль.
+PARTICIPANTS_PER_LEVEL = 2     # сколько новых майнеров повышают сложность на 1
+MAX_DIFFICULTY = 8             # верхний предел сложности (чтобы не «застрять»)
+
+
+def difficulty_for_participants(participants, base=DEFAULT_DIFFICULTY,
+                                per_level=PARTICIPANTS_PER_LEVEL,
+                                cap=MAX_DIFFICULTY):
+    """
+    Требуемая сложность в зависимости от числа участников сети.
+
+    Чем больше разных майнеров — тем труднее найти nonce:
+        0–1 майнер  → base
+        2–3 майнера → base + 1
+        4–5         → base + 2 … и так до cap.
+    """
+    level = max(0, participants) // per_level
+    return min(base + level, cap)
 
 
 def sha512d(data: bytes) -> bytes:
@@ -58,12 +78,14 @@ def merkle_root(hashes):
 class Block:
     """Блок цепочки B-hydra."""
 
-    def __init__(self, index, previous_hash, data, timestamp=None, nonce=0):
+    def __init__(self, index, previous_hash, data, timestamp=None, nonce=0,
+                 difficulty=DEFAULT_DIFFICULTY):
         self.index = index
         self.previous_hash = previous_hash
         self.data = data
         self.timestamp = timestamp if timestamp is not None else time.time()
         self.nonce = nonce
+        self.difficulty = difficulty            # сложность, на которой добыт блок
         self.merkle_root = self._calculate_merkle_root()
         self.hash = self.calculate_hash()
 
@@ -74,16 +96,16 @@ class Block:
         return merkle_root(leaves)
 
     def calculate_hash(self):
-        """SHA-512 от содержимого заголовка блока."""
+        """SHA-512 от содержимого заголовка блока (включая сложность)."""
         header = (
             f"{self.index}{self.previous_hash}{self.merkle_root}"
-            f"{self.timestamp}{self.nonce}"
+            f"{self.timestamp}{self.difficulty}{self.nonce}"
         )
         return hashlib.sha512(header.encode("utf-8")).hexdigest()
 
-    def mine_block(self, difficulty):
+    def mine_block(self):
         """Proof-of-Work: подбираем nonce, пока хеш не начнётся с N нулей."""
-        target = "0" * difficulty
+        target = "0" * self.difficulty
         while not self.hash.startswith(target):
             self.nonce += 1
             self.hash = self.calculate_hash()
@@ -96,6 +118,7 @@ class Block:
             "data": self.data,
             "timestamp": self.timestamp,
             "nonce": self.nonce,
+            "difficulty": self.difficulty,
             "merkle_root": self.merkle_root,
             "hash": self.hash,
         }
@@ -109,6 +132,7 @@ class Block:
         block.data = data["data"]
         block.timestamp = data["timestamp"]
         block.nonce = data["nonce"]
+        block.difficulty = data.get("difficulty", DEFAULT_DIFFICULTY)
         block.merkle_root = data["merkle_root"]
         block.hash = data["hash"]
         return block
@@ -126,13 +150,40 @@ class Blockchain:
 
     def create_genesis_block(self):
         """Генезис-блок сети B-hydra."""
-        genesis = Block(0, "0" * 128, "B-hydra Genesis Block")
-        genesis.mine_block(self.difficulty)
+        genesis = Block(0, "0" * 128, "B-hydra Genesis Block",
+                        difficulty=self.difficulty)
+        genesis.mine_block()
         return genesis
 
     @property
     def last_block(self):
         return self.chain[-1]
+
+    # --- Динамическая сложность от числа участников ----------------------
+    @staticmethod
+    def _miner_of(block):
+        """Адрес майнера блока (получатель coinbase) или None."""
+        data = block.data
+        if isinstance(data, list) and data and isinstance(data[0], dict):
+            vout = data[0].get("vout")
+            if vout and isinstance(vout[0], dict):
+                return vout[0].get("address")
+        return None
+
+    def distinct_miners(self, upto=None):
+        """Множество разных майнеров в цепочке (до блока upto, не включая)."""
+        blocks = self.chain[:upto] if upto is not None else self.chain
+        miners = set()
+        for block in blocks:
+            miner = self._miner_of(block)
+            if miner:
+                miners.add(miner)
+        return miners
+
+    def expected_difficulty(self, height):
+        """Сложность, требуемая для блока на данной высоте (детерминирована)."""
+        participants = len(self.distinct_miners(upto=height))
+        return difficulty_for_participants(participants, base=self.difficulty)
 
     def block_reward(self, height):
         """Награда за блок с учётом халвинга (Bitcoin-подобная схема)."""
@@ -148,19 +199,24 @@ class Blockchain:
         return min(supply, MAX_SUPPLY)
 
     def add_block(self, data):
-        """Создаёт, майнит и добавляет новый блок в цепочку."""
+        """Создаёт, майнит и добавляет новый блок в цепочку.
+
+        Сложность выбирается динамически: чем больше разных майнеров уже
+        участвовало в сети, тем выше требуемая сложность.
+        """
+        height = len(self.chain)
         new_block = Block(
-            index=len(self.chain),
+            index=height,
             previous_hash=self.last_block.hash,
             data=data,
+            difficulty=self.expected_difficulty(height),
         )
-        new_block.mine_block(self.difficulty)
+        new_block.mine_block()
         self.chain.append(new_block)
         return new_block
 
     def is_chain_valid(self):
-        """Проверяет целостность цепочки и корректность PoW."""
-        target = "0" * self.difficulty
+        """Проверяет целостность цепочки, PoW и корректность сложности."""
         for i in range(1, len(self.chain)):
             current = self.chain[i]
             previous = self.chain[i - 1]
@@ -173,7 +229,11 @@ class Blockchain:
                 return False
             if current.previous_hash != previous.hash:
                 return False
-            if not current.hash.startswith(target):
+            # Сложность блока должна совпадать с детерминированно ожидаемой…
+            if current.difficulty != self.expected_difficulty(i):
+                return False
+            # …и хеш — реально удовлетворять этой сложности (PoW).
+            if not current.hash.startswith("0" * current.difficulty):
                 return False
         return True
 

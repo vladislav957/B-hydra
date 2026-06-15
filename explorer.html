@@ -86,8 +86,9 @@ async function loadStats() {
   const i = await api('/api/info');
   $('stats').innerHTML = `
     <div class="stat"><b>${i.height}</b>блоков</div>
-    <div class="stat"><b>${i.next_block_reward}</b>награда BHY</div>
+    <div class="stat"><b>${i.participants}</b>участников</div>
     <div class="stat"><b>${i.difficulty}</b>сложность</div>
+    <div class="stat"><b>${i.next_block_reward}</b>награда BHY</div>
     <div class="stat"><b>${i.hash_algorithm}</b>${i.model}</div>`;
 }
 
@@ -130,6 +131,7 @@ async function showBlock(index) {
     <div class="row"><span>hash</span><span class="mono">${short(b.hash,16)}</span></div>
     <div class="row"><span>пред. блок</span><span class="mono">${short(b.previous_hash,16)}</span></div>
     <div class="row"><span>merkle root</span><span class="mono">${short(b.merkle_root,16)}</span></div>
+    <div class="row"><span>сложность</span><span>${b.difficulty}</span></div>
     <div class="row"><span>nonce</span><span>${b.nonce}</span></div>
     <div class="row"><span>время</span><span>${date(b.timestamp)}</span></div>
   </div>${txs}`;

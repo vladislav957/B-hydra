@@ -119,7 +119,9 @@ class BHydraAPI(BaseHTTPRequestHandler):
                 self._send(200, {
                     "network": "B-hydra",
                     "height": len(bc.chain),
-                    "difficulty": bc.difficulty,
+                    "base_difficulty": bc.difficulty,
+                    "difficulty": bc.expected_difficulty(len(bc.chain)),
+                    "participants": len(bc.distinct_miners()),
                     "next_block_reward": bc.block_reward(len(bc.chain)),
                     "hash_algorithm": "SHA-512",
                     "model": "UTXO",
