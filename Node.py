@@ -176,6 +176,53 @@ class BHydraNode:
     def is_valid(self) -> bool:
         return self.blockchain.is_chain_valid()
 
+    # --- Обозреватель блоков (read-only) --------------------------------
+    def get_block(self, index: int):
+        """Блок по высоте (dict) или None."""
+        if 0 <= index < len(self.blockchain.chain):
+            return self.blockchain.chain[index].to_dict()
+        return None
+
+    def _resolve_output(self, txid, index):
+        """Находит выход (txid, index) в цепочке — для подписи входов."""
+        for block in self.blockchain.chain:
+            for tx in self._block_transactions(block):
+                if tx["txid"] == txid:
+                    vout = tx.get("vout", [])
+                    if 0 <= index < len(vout):
+                        return vout[index]
+        return None
+
+    def find_transaction(self, txid: str):
+        """Транзакция по txid вместе с номером блока, или None."""
+        for block in self.blockchain.chain:
+            for tx in self._block_transactions(block):
+                if tx["txid"] == txid:
+                    return {"transaction": tx, "block_index": block.index}
+        return None
+
+    def address_history(self, address: str):
+        """История транзакций адреса: получено/потрачено по каждой транзакции."""
+        history = []
+        for block in self.blockchain.chain:
+            for tx in self._block_transactions(block):
+                received = sum(o["amount"] for o in tx.get("vout", [])
+                               if o["address"] == address)
+                sent = 0.0
+                for inp in tx.get("vin", []):
+                    ref = self._resolve_output(inp.get("txid"), inp.get("index"))
+                    if ref and ref["address"] == address:
+                        sent += ref["amount"]
+                if received or sent:
+                    history.append({
+                        "txid": tx["txid"],
+                        "block_index": block.index,
+                        "timestamp": tx.get("timestamp"),
+                        "received": received,
+                        "sent": sent,
+                    })
+        return history
+
     # --- Сохранение / загрузка ------------------------------------------
     def save(self, path: str) -> None:
         """Сохраняет цепочку и мемпул в JSON-файл."""

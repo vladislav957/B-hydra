@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>B-hydra — обозреватель блоков</title>
+<style>
+  :root { --bg:#0d1117; --card:#161b22; --line:#30363d; --fg:#e6edf3;
+          --muted:#8b949e; --accent:#3fb950; --link:#58a6ff; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:-apple-system,Segoe UI,Roboto,sans-serif;
+         background:var(--bg); color:var(--fg); line-height:1.5; }
+  header { padding:18px 16px; border-bottom:1px solid var(--line);
+           background:var(--card); }
+  h1 { margin:0; font-size:20px; }
+  h1 span { color:var(--accent); }
+  .wrap { max-width:880px; margin:0 auto; padding:16px; }
+  .stats { display:flex; flex-wrap:wrap; gap:10px; margin-top:10px; }
+  .stat { background:var(--card); border:1px solid var(--line); border-radius:8px;
+          padding:8px 12px; font-size:13px; }
+  .stat b { display:block; font-size:16px; color:var(--accent); }
+  .search { display:flex; gap:8px; margin:16px 0; }
+  input { flex:1; padding:10px 12px; border-radius:8px; border:1px solid var(--line);
+          background:var(--card); color:var(--fg); font-size:14px; }
+  button { padding:10px 16px; border:0; border-radius:8px; background:var(--accent);
+           color:#04140a; font-weight:600; cursor:pointer; font-size:14px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px;
+          padding:14px; margin-bottom:12px; }
+  .card h3 { margin:0 0 10px; font-size:15px; }
+  .row { display:flex; justify-content:space-between; gap:10px; padding:4px 0;
+         border-bottom:1px solid var(--line); font-size:13px; }
+  .row:last-child { border-bottom:0; }
+  .row span:first-child { color:var(--muted); flex-shrink:0; }
+  .mono { font-family:ui-monospace,Menlo,Consolas,monospace; word-break:break-all; }
+  a.link { color:var(--link); cursor:pointer; text-decoration:none; }
+  a.link:hover { text-decoration:underline; }
+  .blocklist .row { cursor:pointer; }
+  .blocklist .row:hover { background:#1f2630; }
+  .badge { background:#1f6feb33; color:var(--link); border-radius:6px;
+           padding:1px 7px; font-size:12px; }
+  .in { color:#f85149; } .out { color:var(--accent); }
+  .muted { color:var(--muted); font-size:12px; }
+  .err { color:#f85149; }
+</style>
+</head>
+<body>
+<header>
+  <div class="wrap">
+    <h1>B-<span>hydra</span> · обозреватель блоков</h1>
+    <div class="stats" id="stats"></div>
+  </div>
+</header>
+
+<div class="wrap">
+  <div class="search">
+    <input id="q" placeholder="Высота блока, txid или адрес (BHY…)"
+           autocomplete="off">
+    <button onclick="search()">Поиск</button>
+  </div>
+  <div id="detail"></div>
+  <div class="card">
+    <h3>Последние блоки</h3>
+    <div class="blocklist" id="blocks"></div>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+async function api(path) {
+  const r = await fetch(path);
+  return r.json();
+}
+function esc(s){ return String(s).replace(/[&<>]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+function short(s, n=20){ s=String(s); return s.length>2*n ? s.slice(0,n)+'…'+s.slice(-n) : s; }
+function date(ts){ return new Date(ts*1000).toLocaleString(); }
+
+async function loadStats() {
+  const i = await api('/api/info');
+  $('stats').innerHTML = `
+    <div class="stat"><b>${i.height}</b>блоков</div>
+    <div class="stat"><b>${i.next_block_reward}</b>награда BHY</div>
+    <div class="stat"><b>${i.difficulty}</b>сложность</div>
+    <div class="stat"><b>${i.hash_algorithm}</b>${i.model}</div>`;
+}
+
+async function loadBlocks() {
+  const data = await api('/api/chain');
+  const blocks = data.chain.slice().reverse();
+  $('blocks').innerHTML = blocks.map(b => {
+    const n = Array.isArray(b.data) ? b.data.length : 1;
+    return `<div class="row" onclick="showBlock(${b.index})">
+      <span>#${b.index} <span class="badge">${n} tx</span></span>
+      <span class="mono">${short(b.hash,12)}</span></div>`;
+  }).join('');
+}
+
+function txCard(tx, blockIndex) {
+  const vin = (tx.vin||[]).map(i => i.txid && i.txid.startsWith('0'.repeat(20))
+    ? `<div class="row"><span class="out">coinbase (эмиссия)</span><span></span></div>`
+    : `<div class="row"><span class="in">вход</span>
+       <span class="mono">${short(i.txid,10)}:${i.index}</span></div>`).join('');
+  const vout = (tx.vout||[]).map((o,idx) => `<div class="row">
+       <span class="out">→ #${idx}</span>
+       <span><a class="link" onclick="showAddress('${esc(o.address)}')">${short(o.address,10)}</a>
+       &nbsp; <b>${o.amount}</b> BHY</span></div>`).join('');
+  return `<div class="card">
+    <h3>Транзакция</h3>
+    <div class="row"><span>txid</span><span class="mono">${short(tx.txid,16)}</span></div>
+    ${blockIndex!=null?`<div class="row"><span>блок</span><span><a class="link" onclick="showBlock(${blockIndex})">#${blockIndex}</a></span></div>`:''}
+    <div class="row"><span>время</span><span>${date(tx.timestamp)}</span></div>
+    <div style="margin-top:8px"><span class="muted">Входы</span>${vin||'<div class="muted">нет</div>'}</div>
+    <div style="margin-top:8px"><span class="muted">Выходы</span>${vout}</div>
+  </div>`;
+}
+
+async function showBlock(index) {
+  const b = await api('/api/block/' + index);
+  if (b.error) return showError(b.error);
+  const txs = (Array.isArray(b.data)?b.data:[]).map(tx => txCard(tx, null)).join('');
+  $('detail').innerHTML = `<div class="card">
+    <h3>Блок #${b.index}</h3>
+    <div class="row"><span>hash</span><span class="mono">${short(b.hash,16)}</span></div>
+    <div class="row"><span>пред. блок</span><span class="mono">${short(b.previous_hash,16)}</span></div>
+    <div class="row"><span>merkle root</span><span class="mono">${short(b.merkle_root,16)}</span></div>
+    <div class="row"><span>nonce</span><span>${b.nonce}</span></div>
+    <div class="row"><span>время</span><span>${date(b.timestamp)}</span></div>
+  </div>${txs}`;
+  window.scrollTo(0,0);
+}
+
+async function showTx(txid) {
+  const r = await api('/api/tx/' + txid);
+  if (r.error) return showError(r.error);
+  $('detail').innerHTML = txCard(r.transaction, r.block_index);
+  window.scrollTo(0,0);
+}
+
+async function showAddress(addr) {
+  const r = await api('/api/address/' + addr);
+  const hist = (r.history||[]).slice().reverse().map(h => `<div class="row">
+     <span><a class="link" onclick="showTx('${h.txid}')">${short(h.txid,10)}</a>
+       <span class="muted">блок #${h.block_index}</span></span>
+     <span>${h.received?`<span class="out">+${h.received}</span> `:''}${h.sent?`<span class="in">-${h.sent}</span>`:''}</span>
+   </div>`).join('') || '<div class="muted">нет транзакций</div>';
+  $('detail').innerHTML = `<div class="card">
+    <h3>Адрес</h3>
+    <div class="row"><span>адрес</span><span class="mono">${esc(addr)}</span></div>
+    <div class="row"><span>баланс</span><span><b>${r.balance}</b> BHY</span></div>
+    <div style="margin-top:8px"><span class="muted">История</span>${hist}</div>
+  </div>`;
+  window.scrollTo(0,0);
+}
+
+function showError(msg) {
+  $('detail').innerHTML = `<div class="card err">Не найдено: ${esc(msg)}</div>`;
+}
+
+async function search() {
+  const q = $('q').value.trim();
+  if (!q) { $('detail').innerHTML=''; return; }
+  if (/^\d+$/.test(q)) return showBlock(parseInt(q));
+  if (q.startsWith('BHY')) return showAddress(q);
+  return showTx(q);                       // считаем txid
+}
+$('q').addEventListener('keydown', e => { if (e.key==='Enter') search(); });
+
+loadStats(); loadBlocks();
+setInterval(() => { loadStats(); loadBlocks(); }, 10000);   // автообновление
+</script>
+</body>
+</html>

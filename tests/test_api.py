@@ -95,3 +95,44 @@ def test_utxos_endpoint(server):
     utxos = w.utxos()
     assert len(utxos) == 1
     assert utxos[0]["amount"] == 50.0
+
+
+def _get(url, path):
+    return urllib.request.urlopen(url + path, timeout=5).read().decode("utf-8")
+
+
+def test_explorer_html_served(server):
+    html = _get(server, "/")
+    assert "обозреватель блоков" in html
+    assert "<html" in html.lower()
+
+
+def test_block_endpoint(server):
+    w = MobileWallet(server)
+    _post(server, "/api/mine", {"miner": w.address})
+    block = json.loads(_get(server, "/api/block/1"))
+    assert block["index"] == 1
+    assert block["hash"].startswith("000")
+
+
+def test_block_not_found(server):
+    with pytest.raises(urllib.error.HTTPError) as exc:
+        _get(server, "/api/block/999")
+    assert exc.value.code == 404
+
+
+def test_tx_and_address_endpoints(server):
+    alice = MobileWallet(server)
+    bob = MobileWallet(server)
+    _post(server, "/api/mine", {"miner": alice.address})
+    alice.send(bob.address, 10, fee=0.5)
+    _post(server, "/api/mine", {"miner": bob.address})
+
+    block2 = json.loads(_get(server, "/api/block/2"))
+    txid = block2["data"][1]["txid"]
+    found = json.loads(_get(server, "/api/tx/" + txid))
+    assert found["block_index"] == 2
+
+    addr = json.loads(_get(server, "/api/address/" + alice.address))
+    assert addr["balance"] == 39.5
+    assert len(addr["history"]) == 2

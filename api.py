@@ -6,29 +6,34 @@ api.py — REST API узла B-hydra (для мобильных кошелько
 (на телефоне), а на сервер приходит уже подписанная транзакция.
 
 Эндпоинты:
+    GET  /                       — веб-обозреватель блоков (HTML)
     GET  /api/info               — параметры сети и высота цепочки
     GET  /api/balance/<address>  — баланс адреса (сумма UTXO)
     GET  /api/utxos/<address>    — непотраченные выходы адреса (для входов)
     GET  /api/chain              — вся цепочка блоков
+    GET  /api/block/<index>      — блок по высоте
+    GET  /api/tx/<txid>          — транзакция по идентификатору
+    GET  /api/address/<address>  — баланс и история транзакций адреса
     GET  /api/mempool            — число неподтверждённых транзакций
     POST /api/transaction        — отправить ПОДПИСАННУЮ транзакцию (vin/vout)
     POST /api/mine               — добыть блок {"miner": "<address>"}
 
 Запуск:
-    python api.py            # http://0.0.0.0:8000  (открой с телефона по Wi-Fi)
+    python api.py            # http://0.0.0.0:8000  (обозреватель + API)
 """
 
 import json
 import os
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse
+from urllib.parse import urlparse, unquote
 
 from Node import BHydraNode
 from Transactinons import Transaction
 
 DEFAULT_STATE = "bhydra_chain.json"
 DEFAULT_DIFFICULTY = 3
+_EXPLORER_HTML = os.path.join(os.path.dirname(os.path.abspath(__file__)), "explorer.html")
 
 
 class BHydraAPI(BaseHTTPRequestHandler):
@@ -54,6 +59,14 @@ class BHydraAPI(BaseHTTPRequestHandler):
             return {}
         return json.loads(self.rfile.read(length).decode("utf-8"))
 
+    def _send_html(self, code, html):
+        body = html.encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def _save(self):
         if self.state_file:
             self.node.save(self.state_file)
@@ -73,6 +86,34 @@ class BHydraAPI(BaseHTTPRequestHandler):
     def do_GET(self):
         parts = [p for p in urlparse(self.path).path.strip("/").split("/") if p]
         try:
+            # Обозреватель блоков (веб-страница).
+            if parts in ([], ["explorer"], ["index.html"]):
+                try:
+                    with open(_EXPLORER_HTML, encoding="utf-8") as fh:
+                        self._send_html(200, fh.read())
+                except OSError:
+                    self._send_html(404, "<h1>explorer.html not found</h1>")
+                return
+            if parts == ["api", "block"] or (len(parts) == 3 and parts[:2] == ["api", "block"]):
+                index = int(parts[2]) if len(parts) == 3 else -1
+                block = self.node.get_block(index)
+                self._send(200 if block else 404,
+                           block or {"error": "block not found"})
+                return
+            if len(parts) == 3 and parts[:2] == ["api", "tx"]:
+                found = self.node.find_transaction(unquote(parts[2]))
+                self._send(200 if found else 404,
+                           found or {"error": "transaction not found"})
+                return
+            if len(parts) == 3 and parts[:2] == ["api", "address"]:
+                addr = unquote(parts[2])
+                self._send(200, {
+                    "address": addr,
+                    "balance": self.node.get_balance(addr),
+                    "history": self.node.address_history(addr),
+                })
+                return
+
             if parts == ["api", "info"]:
                 bc = self.node.blockchain
                 self._send(200, {
@@ -155,8 +196,9 @@ def main():
     args = parser.parse_args()
 
     server = make_server(args.host, args.port, args.file)
-    print(f"B-hydra REST API: http://{args.host}:{args.port}  (Ctrl+C — стоп)")
-    print(f"Состояние цепочки: {args.file}")
+    print(f"B-hydra обозреватель: http://{args.host}:{args.port}/")
+    print(f"REST API           : http://{args.host}:{args.port}/api/info")
+    print(f"Состояние цепочки  : {args.file}   (Ctrl+C — стоп)")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
