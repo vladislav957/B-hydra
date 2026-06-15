@@ -19,7 +19,6 @@ import argparse
 import os
 
 from Node import BHydraNode
-from Transactinons import Transaction
 from wallet import Wallet, generate_wallet
 
 DEFAULT_FILE = "bhydra_chain.json"
@@ -62,15 +61,18 @@ def cmd_mine(args):
 def cmd_send(args):
     node = _load_or_init(args.file)
     sender = Wallet.from_private_hex(args.private_key)
-    tx = Transaction(sender.address, args.to, amount=args.amount, fee=args.fee)
-    tx.sign(sender)
+    tx = node.create_transaction(sender, args.to, amount=args.amount, fee=args.fee)
+    if tx is None:
+        print("Недостаточно средств (UTXO) для отправки.")
+        return
     if node.add_transaction(tx):
         node.save(args.file)
         print("Транзакция добавлена в мемпул (ожидает майнинга).")
         print(f"  txid: {tx.txid[:32]}…")
+        print(f"  входов: {len(tx.vin)} | выходов: {len(tx.vout)} (включая сдачу)")
         print(f"  {sender.address[:16]}… → {args.to[:16]}…  {args.amount} BHY (fee {args.fee})")
     else:
-        print("Транзакция отклонена (недостаточно средств или неверная подпись).")
+        print("Транзакция отклонена (неверная подпись или двойная трата).")
 
 
 def cmd_balance(args):

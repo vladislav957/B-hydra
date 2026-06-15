@@ -10,7 +10,6 @@ manig.py — главный модуль B-hydra (точка входа).
 """
 
 from Node import BHydraNode
-from Transactinons import Transaction
 from wallet import generate_wallet
 
 
@@ -31,13 +30,13 @@ def run_demo(difficulty: int = 3):
     node.mine_pending(alice.address)
     print(f"    Баланс Alice: {node.get_balance(alice.address)} BHY")
 
-    # 2. Alice отправляет Bob 10 BHY (подписанная транзакция).
+    # 2. Alice отправляет Bob 10 BHY (UTXO-транзакция: вход + выходы со сдачей).
     print("\n[2] Alice отправляет Bob 10 BHY…")
-    tx = Transaction(alice.address, bob.address, amount=10, fee=0.5)
-    tx.sign(alice)
+    tx = node.create_transaction(alice, bob.address, amount=10, fee=0.5)
     accepted = node.add_transaction(tx)
     print(f"    Транзакция принята в мемпул: {accepted}")
     print(f"    txid: {tx.txid[:32]}…")
+    print(f"    входов: {len(tx.vin)} | выходов: {len(tx.vout)} (получатель + сдача)")
 
     # 3. Bob майнит блок с этой транзакцией (награда + комиссия).
     print("\n[3] Bob майнит блок с транзакцией…")

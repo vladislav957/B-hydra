@@ -86,6 +86,18 @@ def _ripemd160(data: bytes) -> bytes:
         return hashlib.sha256(data).digest()[:20]
 
 
+def address_from_public_key_bytes(pub_bytes: bytes) -> str:
+    """Адрес B-hydra из несжатого публичного ключа (байты)."""
+    payload = b"\x1f" + _ripemd160(hashlib.sha512(pub_bytes).digest())
+    checksum = hashlib.sha512(hashlib.sha512(payload).digest()).digest()[:4]
+    return "BHY" + _b58encode(payload + checksum)
+
+
+def address_from_public_key(public_key_hex: str) -> str:
+    """Адрес B-hydra из публичного ключа (hex)."""
+    return address_from_public_key_bytes(bytes.fromhex(public_key_hex))
+
+
 class Wallet:
     """Кошелёк B-hydra: пара ключей ECDSA (secp256k1) + адрес."""
 
@@ -114,9 +126,12 @@ class Wallet:
     @property
     def address(self) -> str:
         """Адрес = 'BHY' + Base58(version || RIPEMD160(SHA-512(pub)) || checksum)."""
-        payload = b"\x1f" + _ripemd160(hashlib.sha512(self.public_key_bytes).digest())
-        checksum = hashlib.sha512(hashlib.sha512(payload).digest()).digest()[:4]
-        return "BHY" + _b58encode(payload + checksum)
+        return address_from_public_key_bytes(self.public_key_bytes)
+
+    @staticmethod
+    def address_from_public_key(public_key_hex: str) -> str:
+        """Вычисляет адрес по публичному ключу (hex) — для проверки входов."""
+        return address_from_public_key(public_key_hex)
 
     # --- Подпись / проверка ----------------------------------------------
     def sign(self, payload: bytes) -> str:

@@ -1,9 +1,13 @@
 """
-Transactinons.py — транзакции B-hydra и мемпул.
+Transactinons.py — транзакции B-hydra по модели UTXO (входы и выходы).
 
-Транзакция переводит средства от отправителя (его публичный ключ) к получателю
-(адрес) и подписывается приватным ключом отправителя. Подпись проверяется
-публичным ключом, что доказывает право распоряжаться средствами.
+Как в Bitcoin, транзакция состоит из:
+  * входов (vin)  — ссылок на непотраченные выходы прошлых транзакций (UTXO);
+  * выходов (vout) — новых сумм, заблокированных на адрес получателя.
+
+Каждый вход подписывается владельцем расходуемого выхода. Сумма входов должна
+быть не меньше суммы выходов; разница — комиссия майнеру. Награда за блок
+оформляется специальной coinbase-транзакцией без реальных входов.
 
 Имя файла исторически содержит опечатку (Transactinons) — оно сохранено,
 поскольку на него ссылаются другие модули проекта.
@@ -13,31 +17,80 @@ import hashlib
 import json
 import time
 
-# Условный адрес «эмиссии»: с него приходит награда за блок (coinbase).
-COINBASE_SENDER = "B-HYDRA-COINBASE"
+# Псевдо-идентификатор «ниоткуда» для входа coinbase-транзакции.
+NULL_TXID = "0" * 128
+
+
+class TxOutput:
+    """Выход транзакции: сумма, заблокированная на адрес получателя."""
+
+    def __init__(self, amount, address):
+        self.amount = float(amount)
+        self.address = address
+
+    def to_dict(self):
+        return {"amount": self.amount, "address": self.address}
+
+    @classmethod
+    def from_dict(cls, data):
+        return cls(amount=data["amount"], address=data["address"])
+
+    def __repr__(self):
+        return f"<TxOut {self.amount} BHY → {self.address[:12]}…>"
+
+
+class TxInput:
+    """Вход транзакции: ссылка на конкретный выход (txid, index) + подпись."""
+
+    def __init__(self, txid, index, public_key=None, signature=None):
+        self.txid = txid            # id транзакции, чей выход расходуется
+        self.index = index          # номер выхода в той транзакции (vout)
+        self.public_key = public_key  # hex публичного ключа владельца
+        self.signature = signature    # hex подписи входа
+
+    @property
+    def outpoint(self):
+        """Уникальная ссылка на расходуемый выход."""
+        return (self.txid, self.index)
+
+    def to_dict(self):
+        return {
+            "txid": self.txid,
+            "index": self.index,
+            "public_key": self.public_key,
+            "signature": self.signature,
+        }
+
+    @classmethod
+    def from_dict(cls, data):
+        return cls(
+            txid=data["txid"],
+            index=data["index"],
+            public_key=data.get("public_key"),
+            signature=data.get("signature"),
+        )
+
+    def __repr__(self):
+        return f"<TxIn {self.txid[:12]}…:{self.index}>"
 
 
 class Transaction:
-    """Перевод средств в сети B-hydra."""
+    """Транзакция UTXO: набор входов (vin) и выходов (vout)."""
 
-    def __init__(self, sender, recipient, amount, fee=0.0, timestamp=None,
-                 public_key=None, signature=None):
-        self.sender = sender            # адрес/идентификатор отправителя
-        self.recipient = recipient      # адрес получателя
-        self.amount = float(amount)
-        self.fee = float(fee)
+    def __init__(self, vin=None, vout=None, timestamp=None):
+        self.vin = vin or []        # список TxInput
+        self.vout = vout or []      # список TxOutput
         self.timestamp = timestamp if timestamp is not None else time.time()
-        self.public_key = public_key    # hex публичного ключа отправителя
-        self.signature = signature      # hex подписи
 
     # --- Идентификация и сериализация ------------------------------------
     def signing_payload(self) -> bytes:
-        """Канонические байты, которые подписываются и хешируются."""
+        """
+        Канонические байты для подписи и txid: только outpoints входов и
+        выходы (без подписей и публичных ключей), плюс временная метка.
+        """
         payload = {
-            "sender": self.sender,
-            "recipient": self.recipient,
-            "amount": self.amount,
-            "fee": self.fee,
+            "vin": [{"txid": i.txid, "index": i.index} for i in self.vin],
+            "vout": [o.to_dict() for o in self.vout],
             "timestamp": self.timestamp,
         }
         return json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
@@ -50,64 +103,53 @@ class Transaction:
     def to_dict(self):
         return {
             "txid": self.txid,
-            "sender": self.sender,
-            "recipient": self.recipient,
-            "amount": self.amount,
-            "fee": self.fee,
+            "vin": [i.to_dict() for i in self.vin],
+            "vout": [o.to_dict() for o in self.vout],
             "timestamp": self.timestamp,
-            "public_key": self.public_key,
-            "signature": self.signature,
         }
 
     @classmethod
     def from_dict(cls, data):
         return cls(
-            sender=data["sender"],
-            recipient=data["recipient"],
-            amount=data["amount"],
-            fee=data.get("fee", 0.0),
+            vin=[TxInput.from_dict(i) for i in data.get("vin", [])],
+            vout=[TxOutput.from_dict(o) for o in data.get("vout", [])],
             timestamp=data.get("timestamp"),
-            public_key=data.get("public_key"),
-            signature=data.get("signature"),
         )
 
-    # --- Подпись и проверка ----------------------------------------------
+    # --- Суммы -----------------------------------------------------------
+    @property
+    def total_output(self) -> float:
+        return sum(o.amount for o in self.vout)
+
+    # --- Подпись ---------------------------------------------------------
     def sign(self, wallet):
-        """Подписывает транзакцию кошельком-отправителем."""
-        self.public_key = wallet.public_key_hex
-        self.signature = wallet.sign(self.signing_payload())
+        """Подписывает все входы транзакции кошельком-владельцем."""
+        payload = self.signing_payload()
+        sig = wallet.sign(payload)
+        for inp in self.vin:
+            inp.public_key = wallet.public_key_hex
+            inp.signature = sig
         return self
 
     @property
     def is_coinbase(self) -> bool:
-        return self.sender == COINBASE_SENDER
-
-    def is_valid(self) -> bool:
-        """Проверяет корректность транзакции и её подписи."""
-        if self.amount <= 0 or self.fee < 0:
-            return False
-        if self.is_coinbase:
-            # Награда за блок не имеет отправителя и подписи.
-            return True
-        if not self.public_key or not self.signature:
-            return False
-        # Импорт здесь, чтобы избежать циклической зависимости с wallet.
-        from wallet import Wallet
-        return Wallet.verify(self.public_key, self.signing_payload(), self.signature)
+        return len(self.vin) == 1 and self.vin[0].txid == NULL_TXID
 
     def __repr__(self):
-        return (f"<Tx {self.sender[:10]}…→{self.recipient[:10]}… "
-                f"{self.amount} BHY (fee {self.fee})>")
+        kind = "coinbase" if self.is_coinbase else "tx"
+        return f"<{kind} {self.txid[:12]}… in={len(self.vin)} out={len(self.vout)}>"
 
 
-def coinbase(recipient, reward, fee_total=0.0):
-    """Создаёт coinbase-транзакцию (награда майнеру + собранные комиссии)."""
-    return Transaction(
-        sender=COINBASE_SENDER,
-        recipient=recipient,
-        amount=reward + fee_total,
-        fee=0.0,
-    )
+def coinbase(recipient, reward, fee_total=0.0, height=0, message="B-hydra"):
+    """
+    Создаёт coinbase-транзакцию (награда майнеру + собранные комиссии).
+
+    Вход — фиктивный (NULL_TXID); `height` в поле index делает txid уникальным
+    для каждого блока. Подпись не требуется.
+    """
+    vin = [TxInput(txid=NULL_TXID, index=height, public_key=message)]
+    vout = [TxOutput(amount=reward + fee_total, address=recipient)]
+    return Transaction(vin=vin, vout=vout)
 
 
 class TransactionPool:
@@ -117,12 +159,18 @@ class TransactionPool:
         self.transactions = []
 
     def add(self, transaction: Transaction) -> bool:
-        if not transaction.is_valid():
-            return False
         if any(t.txid == transaction.txid for t in self.transactions):
             return False  # дубликат
         self.transactions.append(transaction)
         return True
+
+    def spent_outpoints(self):
+        """Все outpoints, уже расходуемые транзакциями в мемпуле."""
+        spent = set()
+        for tx in self.transactions:
+            for inp in tx.vin:
+                spent.add(inp.outpoint)
+        return spent
 
     def take_all(self):
         """Забирает все транзакции из пула (для включения в блок)."""
@@ -139,6 +187,8 @@ Transactions = Transaction
 
 
 if __name__ == "__main__":
-    tx = Transaction("Alice", "Bob", 10, fee=0.1)
-    print("txid:", tx.txid[:32], "…")
-    print("coinbase valid:", coinbase("Miner", 50).is_valid())
+    cb = coinbase("BHYminer", 50, fee_total=0.5, height=1)
+    print("coinbase:", cb)
+    print("  is_coinbase:", cb.is_coinbase)
+    print("  txid:", cb.txid[:32], "…")
+    print("  выход:", cb.vout[0])

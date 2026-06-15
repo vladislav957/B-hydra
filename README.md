@@ -74,7 +74,8 @@ print(blockchain.chain)
     python cli.py balance <АДРЕС>             # проверить баланс
     python cli.py chain                        # показать цепочку
 
-Параметры сети B-hydra: хеш SHA-512, консенсус Proof-of-Work, награда 50 BHY,
+Параметры сети B-hydra: хеш SHA-512, консенсус Proof-of-Work, модель UTXO
+(транзакции со входами и выходами, как в Bitcoin), награда 50 BHY,
 интервал халвинга 310 000 блоков, максимальная эмиссия 31 000 000 BHY.
 
 Планы на будущее :
@@ -156,8 +157,9 @@ Command line (CLI) — state is stored in bhydra_chain.json:
     python cli.py balance <ADDRESS>           # check balance
     python cli.py chain                        # show the chain
 
-B-hydra network parameters: SHA-512 hashing, Proof-of-Work consensus, 50 BHY
-reward, halving interval 310,000 blocks, maximum supply 31,000,000 BHY.
+B-hydra network parameters: SHA-512 hashing, Proof-of-Work consensus, UTXO
+model (transactions with inputs and outputs, like Bitcoin), 50 BHY reward,
+halving interval 310,000 blocks, maximum supply 31,000,000 BHY.
 
 Future plans: Adding a command line interface for the management system. Implementation of the automatic complexity adjustment function. Improving performance through multi-precision. Integration with other payment services.
  ---
