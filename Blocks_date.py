@@ -1,50 +1,38 @@
-import hashcash
-import time
-import json
-import Blockchain
-import manig
+"""
+Blocks_date.py — работа с временными метками блоков B-hydra.
 
-class Block:
-    def __init__(self, index, previous_hash, data, timestamp=None):
-        self.index = index
-        self.previous_hash = previous_hash
-        self.data = data
-        self.timestamp = timestamp or time.time()
-        self.hash = self.calculate_hash()
+Утилиты для перевода timestamp блока в человекочитаемую дату и сбора
+краткой сводки по блокам цепочки.
+"""
 
-    def calculate_hash(self):
-        block_string = f"{self.index}{self.previous_hash}{self.data}{self.timestamp}"
-        return hashcash.sha512(block_string.encode()).hexdigest()
+from datetime import datetime, timezone
 
-    def to_dict(self):
-        return {
-            "index": self.index,
-            "previous_hash": self.previous_hash,
-            "data": self.data,
-            "timestamp": self.timestamp,
-            "hash": self.hash
-        }
 
-class Blockchain:
-    def __init__(self):
-        self.chain = [self.create_genesis_block()]
+def format_timestamp(timestamp: float) -> str:
+    """Переводит unix-время блока в строку UTC."""
+    return datetime.fromtimestamp(timestamp, tz=timezone.utc).strftime(
+        "%Y-%m-%d %H:%M:%S UTC"
+    )
 
-    def create_genesis_block(self):
-        return Block(0, "0", "Genesis Block")
 
-    def add_block(self, data):
-        #last_block = self.chain[-1]
-        #new_block = Block(len(self.chain), last_block.hash, data)
-        #self.chain.append(new_block)
-        #return new_block
+def block_date(block) -> str:
+    """Дата конкретного блока."""
+    return format_timestamp(block.timestamp)
 
-     def get_blocks_data(self):
-        return [block.to_dict() for block in self.chain]
 
-# Пример использования
-blockchain = Blockchain()
-blockchain.add_block("Первый блок данных")
-blockchain.add_block("Второй блок данных")
+def chain_dates(blockchain):
+    """Список (index, дата, hash) по всем блокам цепочки."""
+    return [
+        (block.index, format_timestamp(block.timestamp), block.hash)
+        for block in blockchain.chain
+    ]
 
-# Вывод всех блоков
-#print(json.dumps(blockchain.get_blocks_data(), indent=4, ensure_ascii=False))
+
+if __name__ == "__main__":
+    from Blockchain import Blockchain
+
+    chain = Blockchain(difficulty=2)
+    chain.add_block("Первый блок данных")
+    chain.add_block("Второй блок данных")
+    for index, date, block_hash in chain_dates(chain):
+        print(f"Блок #{index} | {date} | {block_hash[:16]}…")

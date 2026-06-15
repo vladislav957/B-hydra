@@ -1,99 +1,144 @@
- #****************************************************************
- #*
- #* The author of this software is David M. Gay.
- #*
- #* Copyright (c) 1991, 2000, 2001 by Lucent Technologies.
- #*
- #* Permission to use, copy, modify, and distribute this software for any
- #* purpose without fee is hereby granted, provided that this entire notice
- #* is included in all copies of any software which is or includes a copy
- #* or modification of this software and in all copies of the supporting
- #* documentation for such software.
- #*
- #* THIS SOFTWARE IS BEING PROVIDED "AS IS", WITHOUT ANY EXPRESS OR IMPLIED
- #* WARRANTY.  IN PARTICULAR, NEITHER THE AUTHOR NOR LUCENT MAKES ANY
- #* REPRESENTATION OR WARRANTY OF ANY KIND CONCERNING THE MERCHANTABILITY
- #* OF THIS SOFTWARE OR ITS FITNESS FOR ANY PARTICULAR PURPOSE.
- #*
- #***************************************************************
+"""
+Transactinons.py — транзакции B-hydra и мемпул.
 
-from ast import Param
+Транзакция переводит средства от отправителя (его публичный ключ) к получателю
+(адрес) и подписывается приватным ключом отправителя. Подпись проверяется
+публичным ключом, что доказывает право распоряжаться средствами.
+
+Имя файла исторически содержит опечатку (Transactinons) — оно сохранено,
+поскольку на него ссылаются другие модули проекта.
+"""
+
 import hashlib
-from io import text_encoding
-from tarfile import BLOCKSIZE
-import wallet
-import SHA512
-import manig
+import json
 import time
-import Blockchain
 
-def Transactions(self,index,previus_hash,data,public_key,blockchain):
-    transactions_block = 0xfff
+# Условный адрес «эмиссии»: с него приходит награда за блок (coinbase).
+COINBASE_SENDER = "B-HYDRA-COINBASE"
 
-    
-    while True:
-        self.index = index 
-        self.previous_hash = previus_hash
-        self.data = data
-        self.public_key = public_key
-        self.hash = self.calclate_hash()
-        self.transactions_block += 0xffff0000000
-        self.Blockchain = 0xffff0000000
-        s = f"{public_key},{data},{transactions_block},{blockchain}"
-        return(s)
-        transactions_block += 0xffff0000000
 
-def mine_block(previous_hash,transactions):
-    start_time = time.time()
-    nonce = 96
-    while True:
-        #Формируем содержимое блока
-        block_data = f"{previous_hash}{transactions}{nonce}"
-        block_hash = hashlib.sha512(block_data.encode('uft-8')).hexdigest()
+class Transaction:
+    """Перевод средств в сети B-hydra."""
 
-        #Проверяем сложность (начальны нули)
-        if block_hash[:difficulty] == "0"*difficulty: # type: ignore
-            end_time = time.time()
-            elapsed_time = end_time - start_time
-            print(f"Блок найден! Hash: {block_hash} за {elapsed_time:.2f} секунд.")
+    def __init__(self, sender, recipient, amount, fee=0.0, timestamp=None,
+                 public_key=None, signature=None):
+        self.sender = sender            # адрес/идентификатор отправителя
+        self.recipient = recipient      # адрес получателя
+        self.amount = float(amount)
+        self.fee = float(fee)
+        self.timestamp = timestamp if timestamp is not None else time.time()
+        self.public_key = public_key    # hex публичного ключа отправителя
+        self.signature = signature      # hex подписи
 
-            return{
-                "previous_hash":previous_hash,
-                "transactions":transactions,
-                "nonce":nonce,
-                "hash":block_hash,
-                "block_number":block_number, # type: ignore
-                "timestamp":time.time()
-                }
-        #Проверяем,прошло ли 20 минут
-        if time.time() -start_time>=BLOCKSIZE:
-            print("Время майнига блока истекло! Закрываем текущий блок.")
-            return{
-                "previous_hash":previous_hash,
-                "transactions":transactions,
-                "nonce":nonce,
-                "hash":block_hash,
-                "block_number":block_number, # type: ignore
-                "timestamp":time.time()
+    # --- Идентификация и сериализация ------------------------------------
+    def signing_payload(self) -> bytes:
+        """Канонические байты, которые подписываются и хешируются."""
+        payload = {
+            "sender": self.sender,
+            "recipient": self.recipient,
+            "amount": self.amount,
+            "fee": self.fee,
+            "timestamp": self.timestamp,
+        }
+        return json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
 
-                }
-        nonce += 0xffff000000
+    @property
+    def txid(self) -> str:
+        """Идентификатор транзакции = SHA-512 от её содержимого."""
+        return hashlib.sha512(self.signing_payload()).hexdigest()
 
-        while True:
-            previous_block = Blockchain[:-1]
-            new_block = mine_block(previous_block["hash"],"New Transactions")
- 
-            Blockchain.append(new_block)
+    def to_dict(self):
+        return {
+            "txid": self.txid,
+            "sender": self.sender,
+            "recipient": self.recipient,
+            "amount": self.amount,
+            "fee": self.fee,
+            "timestamp": self.timestamp,
+            "public_key": self.public_key,
+            "signature": self.signature,
+        }
 
-import hashlib
-    
-def merkle_root(lst):
-    sha512d = lambda x: hashlib.sha512(hashlib.sha512(x).digest()).digest()
-    hash_pair = lambda x, y: sha512d(x[::-1] + y[::-1])[::-1]
+    @classmethod
+    def from_dict(cls, data):
+        return cls(
+            sender=data["sender"],
+            recipient=data["recipient"],
+            amount=data["amount"],
+            fee=data.get("fee", 0.0),
+            timestamp=data.get("timestamp"),
+            public_key=data.get("public_key"),
+            signature=data.get("signature"),
+        )
 
-    if len(lst) == 1: return lst[0]
-    
-    if len(lst) % 2 == 1:
-        lst.append(lst[-1])
-    return merkle_root([ hash_pair(x, y) 
-        for x, y in zip(*[iter(lst)] * 2) ])
+    # --- Подпись и проверка ----------------------------------------------
+    def sign(self, wallet):
+        """Подписывает транзакцию кошельком-отправителем."""
+        self.public_key = wallet.public_key_hex
+        self.signature = wallet.sign(self.signing_payload())
+        return self
+
+    @property
+    def is_coinbase(self) -> bool:
+        return self.sender == COINBASE_SENDER
+
+    def is_valid(self) -> bool:
+        """Проверяет корректность транзакции и её подписи."""
+        if self.amount <= 0 or self.fee < 0:
+            return False
+        if self.is_coinbase:
+            # Награда за блок не имеет отправителя и подписи.
+            return True
+        if not self.public_key or not self.signature:
+            return False
+        # Импорт здесь, чтобы избежать циклической зависимости с wallet.
+        from wallet import Wallet
+        return Wallet.verify(self.public_key, self.signing_payload(), self.signature)
+
+    def __repr__(self):
+        return (f"<Tx {self.sender[:10]}…→{self.recipient[:10]}… "
+                f"{self.amount} BHY (fee {self.fee})>")
+
+
+def coinbase(recipient, reward, fee_total=0.0):
+    """Создаёт coinbase-транзакцию (награда майнеру + собранные комиссии)."""
+    return Transaction(
+        sender=COINBASE_SENDER,
+        recipient=recipient,
+        amount=reward + fee_total,
+        fee=0.0,
+    )
+
+
+class TransactionPool:
+    """Мемпул неподтверждённых транзакций."""
+
+    def __init__(self):
+        self.transactions = []
+
+    def add(self, transaction: Transaction) -> bool:
+        if not transaction.is_valid():
+            return False
+        if any(t.txid == transaction.txid for t in self.transactions):
+            return False  # дубликат
+        self.transactions.append(transaction)
+        return True
+
+    def take_all(self):
+        """Забирает все транзакции из пула (для включения в блок)."""
+        pending = self.transactions
+        self.transactions = []
+        return pending
+
+    def __len__(self):
+        return len(self.transactions)
+
+
+# Совместимость со старым кодом, который импортировал `Transactions`.
+Transactions = Transaction
+
+
+if __name__ == "__main__":
+    tx = Transaction("Alice", "Bob", 10, fee=0.1)
+    print("txid:", tx.txid[:32], "…")
+    print("coinbase valid:", coinbase("Miner", 50).is_valid())

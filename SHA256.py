@@ -1,28 +1,33 @@
-from Crypto.Hash import SHA512
+"""
+SHA256.py — вспомогательные SHA-256 утилиты B-hydra.
+
+Сеть работает на SHA-512, но SHA-256 используется в адресах и контрольных
+суммах, поэтому оставлена отдельная аккуратная обёртка.
+"""
+
 import hashlib
-import time
-import random
-import Blockchain
-import datetime as data
 
 
-# Комбинируем текущий момнт времени и случайное значение
-input_data = str(time.time()) + str(random.randint(0, 31000000))
-
-# Xешируем комбинировованные данные
-result = hashlib.sha512(input_data.encode('UTF-8')).hexdigest()
-previous_hash = '000.000.000.001'
-
-# Пример строки
-data ='{[]}'
-
-# Создаем объект хеширования и обновляем его данными
-sha512_hash = SHA512.new(data.encode('utf-8'))
-
-# Получаем хеш в виде шестнадцатеричной строки
-hash_hex = sha512_hash.hexdigest()
-print(f"B-hydra Block: #\b # has been added to the blockhain!")
-print(f"Hash:  \a",result)  
-print(f"Miner: ? \n")
+def sha256(data) -> str:
+    """SHA-256 в виде hex-строки. Принимает str или bytes."""
+    if isinstance(data, str):
+        data = data.encode("utf-8")
+    return hashlib.sha256(data).hexdigest()
 
 
+def sha256_bytes(data) -> bytes:
+    """SHA-256 в виде сырых байтов."""
+    if isinstance(data, str):
+        data = data.encode("utf-8")
+    return hashlib.sha256(data).digest()
+
+
+def double_sha256(data) -> bytes:
+    """Двойной SHA-256."""
+    if isinstance(data, str):
+        data = data.encode("utf-8")
+    return hashlib.sha256(hashlib.sha256(data).digest()).digest()
+
+
+if __name__ == "__main__":
+    print("sha256('B-hydra') =", sha256("B-hydra"))

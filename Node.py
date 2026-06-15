@@ -1,53 +1,89 @@
-from os import name
-import socket
-import threading
-import Blockchain
+"""
+Node.py — узел сети B-hydra.
+
+Узел хранит копию блокчейна и мемпул, принимает транзакции, майнит блоки
+(с coinbase-наградой) и считает балансы адресов. Это связующее звено между
+кошельками, транзакциями и блокчейном.
+
+Сетевую (сокетную) часть см. в P2P.py — здесь только логика узла, чтобы
+модуль импортировался без побочных эффектов.
+"""
+
+from Blockchain import Blockchain, DEFAULT_DIFFICULTY
+from Transactinons import Transaction, TransactionPool, coinbase
 
 
 class BHydraNode:
-    def __init__(self,host="0.0.0.0", port=5000):
-        self.host = host
-        self.port = port
-        self.peers = peers #Списак подключенных узлов
+    """Логический узел B-hydra (блокчейн + мемпул)."""
 
-    def handle_client(self, conn, addr):
-        print(f"[Новый узел подключен] {addr}")
-        while True:
-            try:
-                data = conn.recv(1024).decode()
-                if not data:
-                    break
-                print(f"[Сообщение от {addr}] {data}")
-                conn.send("Принято".encode())  # Ответ клиенту
-            except ConnectionResetError:
-                break
-        conn.close()
-        print(f"[Отключен] {addr}")
+    def __init__(self, difficulty=DEFAULT_DIFFICULTY):
+        self.blockchain = Blockchain(difficulty=difficulty)
+        self.mempool = TransactionPool()
 
-    def start_server(self):
-        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        server.bind((self.host, self.port))
-        server.listen(5)
-        print(f"[Сервер запущен] {self.host}:{self.port}")
+    # --- Транзакции ------------------------------------------------------
+    def add_transaction(self, transaction: Transaction) -> bool:
+        """Добавляет транзакцию в мемпул после проверки баланса и подписи."""
+        if not transaction.is_valid():
+            return False
+        if not transaction.is_coinbase:
+            available = self.get_balance(transaction.sender)
+            if available < transaction.amount + transaction.fee:
+                return False  # недостаточно средств
+        return self.mempool.add(transaction)
 
-        while True:
-            conn, addr = server.accept()
-            self.peers.append(addr)
-            thread = threading.Thread(target=self.handle_client, args=(conn, addr))
-            thread.start()
+    # --- Майнинг ---------------------------------------------------------
+    def mine_pending(self, miner_address: str):
+        """Собирает транзакции из мемпула в блок и майнит его."""
+        pending = self.mempool.take_all()
+        fees = sum(tx.fee for tx in pending)
+        reward = self.blockchain.block_reward(len(self.blockchain.chain))
+        reward_tx = coinbase(miner_address, reward, fees)
 
-if name == "main":
-    node = BHydraNode()
-    node.start_server()
-    
-    import socket
+        data = [reward_tx.to_dict()] + [tx.to_dict() for tx in pending]
+        return self.blockchain.add_block(data=data)
 
-def connect_to_node(host, port, message):
-    client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    client.connect((host, port))
-    client.send(message.encode())
-    response = client.recv(1024).decode()
-    print(f"[Ответ от ноды] {response}")
-    client.close()
+    # --- Балансы ---------------------------------------------------------
+    def get_balance(self, address: str) -> float:
+        """Считает баланс адреса по всей цепочке."""
+        balance = 0.0
+        for block in self.blockchain.chain:
+            for tx in self._block_transactions(block):
+                if tx.get("recipient") == address:
+                    balance += tx.get("amount", 0)
+                if tx.get("sender") == address:
+                    balance -= tx.get("amount", 0) + tx.get("fee", 0)
+        return balance
 
-connect_to_node("127.0.0.1", 5000, "Привет, нода B-Hydra!")
+    @staticmethod
+    def _block_transactions(block):
+        """Возвращает список dict-транзакций блока (или пустой список)."""
+        data = block.data
+        if isinstance(data, (list, tuple)):
+            return [tx for tx in data if isinstance(tx, dict)]
+        return []
+
+    def is_valid(self) -> bool:
+        return self.blockchain.is_chain_valid()
+
+
+if __name__ == "__main__":
+    from wallet import generate_wallet
+
+    node = BHydraNode(difficulty=3)
+    alice = generate_wallet()
+    bob = generate_wallet()
+
+    # Алиса добывает первый блок и получает награду.
+    node.mine_pending(alice.address)
+    print(f"Баланс Алисы после майнинга: {node.get_balance(alice.address)} BHY")
+
+    # Алиса переводит 10 BHY Бобу.
+    tx = Transaction(alice.address, bob.address, 10, fee=0.5)
+    tx.sign(alice)
+    print("Транзакция принята:", node.add_transaction(tx))
+
+    # Боб майнит блок с этой транзакцией.
+    node.mine_pending(bob.address)
+    print(f"Баланс Алисы: {node.get_balance(alice.address)} BHY")
+    print(f"Баланс Боба : {node.get_balance(bob.address)} BHY")
+    print("Цепочка валидна:", node.is_valid())

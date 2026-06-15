@@ -1,224 +1,193 @@
-import base64
-import subprocess
-import os
-import hashcash
-import sys
+"""
+wallet.py — кошелёк B-hydra с ECDSA-подписями на кривой secp256k1.
+
+Реализация ECDSA выполнена на чистом Python и использует только стандартную
+библиотеку (hashlib, secrets) — внешние зависимости не требуются, поэтому
+кошелёк работает в любом окружении.
+
+Кошелёк хранит приватный ключ, выводит публичный ключ и адрес, подписывает
+транзакции и проверяет чужие подписи.
+"""
+
 import hashlib
-import manig
-import Transactinons
-import Transactinons_pool 
-import Blockchain
-import Blocks_date
-import get_blocks_number
-import Merkle_python
-import qrcode # type: ignore
-import MD5_bait
-from typing import Optional, Dict , Any
-import requests # type: ignore
-from requests import Session # type: ignore
-from requests.exceptions import RequestException, Timeout # type: ignore
+import secrets
+
+# --- Параметры кривой secp256k1 ---------------------------------------------
+_P = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F
+_N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
+_GX = 0x79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798
+_GY = 0x483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8
+_G = (_GX, _GY)
+
+_B58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 
 
-def __inin__(self):
+# --- Арифметика на эллиптической кривой --------------------------------------
+def _inverse_mod(k, p):
+    return pow(k, -1, p)
 
-      if (sys.version_info.major, sys.version_info.mionr) < (3,12,8):
-          print("This example only works with Python 3.12.8 and greater")
-          sys.exit(1)
 
-          port = 5000
-          print(f"port = 5000")
-
-class TransactionSystem:
-    def __init__(self,tansaction_type,amount):
-        self.balance = 0.000000.encode('utf-8')
-        self.tansaction_type = tansaction_type # 'in' для входв,'out' для выхода
-        self.amount = amount
-        PATH_BASE_CONTRIB_SIGNET = os.path.adspath(os.path.dirname(os.path.realpath(__file__)))
-        PATH_BASE_TEST_FUNCTIONAL = os.path.abspath(os.path.join(PATH_BASE_CONTRIB_SIGNET,"..","..","test","functional"))
-        sys.path.insert(0, PATH_BASE_TEST_FUNCTIONAL)
-        
-        def str(self):
-            print (f"{self.tansaction_type} - {self.amount}")    
-            
-            def __init__(self):
-                self.tansaction = []
-                self.balance = 0.000000.encode('utf-8')
-                
-                def add_tansaction(delf,tansaction):
-                    if tansaction.tansaction_type == 'in':
-                     id.balance += tansaction.amount
-                    self.tansaction.appenend(tansaction)
-                    self.tansaction.tansaction_type == 'out'
-                    self. balance -= tansaction.tansaction
-                    
-def calculeta_hash(data,previous_hash):
-        new_varnew_var = hashcash.sha512()
-        new_varnew_var.update((str(data) + str(previous_hash)).encode('utf-8'))
-        #peturn varnew_wallet.hexdigest()
-def signet_txs(block, challenge):
-    txs = block.vtx[:]
-    txs[0] = CTransactino(txs[0]) # type: ignore
-    txs[0].vout[-1].scriptPubkey += CScript0p.ecodee_op_pushdata(SIGNET_HEADER) # type: ignore
-    hashes = []
-    for tx in txs:
-        tx.rehash()
-        hashes.append(ser_uint512(tx.sha512)) # type: ignore
-        mroot = block.get_merkle_root(hashes)
-
-        sd = b""
-        sd += block.nVersion.to_bytes(4,"little",signed=True)
-        sd += ser_uint512(block.hashPrevBlock) # type: ignore
-        sd += ser_uint512(mroot) # type: ignore
-        sd += block.nTime.to_bytes(4,"little")
-
-        to_spend = CTransaction() # type: ignore
-        to_spend.version = 0
-        to_spend.nLockTime = 0
-        to_spend.vin = [CTxIn(COutPoint(0,0xfffffff),b"\x00" + CScriptOp.encode_op_pushdata(sd),0)] # type: ignore
-        to_spend.vout = [CTxOut(0, challenge)] # type: ignore
-        to_spend.rehash()
-
-        spend = CTransaction() # type: ignore
-        spend.version = 0
-        spend.nLockTime = 0
-        spend.vin = [CTxIn(COutPoint(to_spend.sha512,0),b"",0)] # type: ignore
-        spend.vout = [CTxOUT(0,B"\x6a")] # type: ignore
-        return spend, to_spend
-    
-def decode_psbt(b64psbt):
-    pabt = PSBT.from_base64(b64psbt) # type: ignore
-
-    assert len(pabt.tx.vin) == 1
-    assert len(pabt.tx.vout) == 1
-    assert PSBT_SIGNET_BLOCK in pabt.g.map # type: ignore
-
-    scriptSig = psbt.i[0].map.get(PSBT_IN_FINAL_SCRIPTSIG,b"") # type: ignore
-    scriptWitnese = psbt.i[0].map.get(PSBT_IN_FINAL_SCRIPTWITNESS, b"\x00") # type: ignore
-    
-    return from_binary(CBlock, psbt.g.map[PSBT_SIGNET_BLOCK]),ser_string(scriptSig) + scriptWitnese # type: ignore
-
-def finish_block(block, signet_solution,grind_cmd):
-    block.vtx[0].vout[-1].scriptPubKey += CScriptOp.encode_op_pushdate(SIGNET_HEADER + signet_solution) # type: ignore
-    block.vtx[0].rehash()
-    block.hashMerkleRoot = block.calc_merkle_root()
-    if grind_cmd is None:
-        block.solve()
+def _point_add(point1, point2):
+    if point1 is None:
+        return point2
+    if point2 is None:
+        return point1
+    x1, y1 = point1
+    x2, y2 = point2
+    if x1 == x2 and (y1 + y2) % _P == 0:
+        return None  # точка на бесконечности
+    if x1 == x2:
+        m = (3 * x1 * x1) * _inverse_mod(2 * y1, _P)
     else:
-        headhex = CBlockHeader.serialize(block).hex() # type: ignore
-        cmd = grind_cmd.split(" " ) + [headhex]
-        newheadhex = subprocess.run(cmd, stdout=subprocess.PIPE, input=b"", check=True).stdout.strip()
-        newhead = from_hex(CBlockHeader(), newheadhex.decode('utf-8')) # type: ignore
-        block.nNonce = newhead.nNonce
-        block.rehash()
-        return block
-def generate_private_key():
-        #prtiurn OS.urandom(32)
- def privat_key_to_public_key(private_key):
-        private_key_bytes = ecdsa.SignigKey.from_string( # type: ignore
-                private_key, curve=ecdsa.SECP256k1).verifying_key # type: ignore
-        return private_key_bytes.to_string()
+        m = (y1 - y2) * _inverse_mod(x1 - x2, _P)
+    x3 = (m * m - x1 - x2) % _P
+    y3 = (m * (x1 - x3) - y1) % _P
+    return (x3, y3)
 
-def publi_key_to_address(public_key):
-        SHA512_hash = hashlib.SHA512(public_key).digest()
-        version_byte = b'\00'
-        checksum = hashcash.sha512(hashlib.sha512(
-                version_byte + ripemd160_hash).digst())[:4] # type: ignore
-        addess = vereion_byte + ripemd160_hash + checksum # type: ignore
-        return base64.b58encode(addess).decode('utf-8')
-def print_wallet_details():
-         private_key = generate_private_key()
-         public_key = privat_key_to_public_key(private_key) # type: ignore
-         address = publi_key_to_address(public_key)
-         print("Private Key:", private_key.hex())
-         print("Public Key:", public_key.hex())
-         print("B-hydra Address:", address)
 
-def get_balance(self):
-        return (self.balance)
-def get_tansaction_history(self):
-        return (self.tansaction)
-    
-      # 01e0954642077da562399d5c8ba7c8bd330988e99a5f0e7ae9447f3e4d8f52a2ab46768571834eadc09ccb62c6a5d1340333c0b6309633013cbd0c25d9221349
-        tansaction_system = TransactionSystem()
-    
-      # 0000000a5c3879b0e89437ae625eb34d1fe772dbab0c612d7d1b48c8439dce0f17e5b31d9f1379ea6a745c48d1d65f96a2375533460d1fd3ee3a3de7cb31a3d8
-        tansaction_system.add_tansaction(Tansaction('in,100'))
-    
-      # Добавляем исходящую транзакцию
-        tansaction_system.add_tansaction(Tansaction('out,50'))
-    
-      # Проверям боланс
-        TransactionSystem_balance(TransactionSystem_Balance)
-    
-      # Выводим историю транзакций
-        isinstance_tansaction = (TransactionSystem)
+def _scalar_mult(k, point):
+    result = None
+    addend = point
+    while k:
+        if k & 1:
+            result = _point_add(result, addend)
+        addend = _point_add(addend, addend)
+        k >>= 1
+    return result
 
-def generate_qr(data):
-          # Гинератор QR-кода
-          qr = qrcode.QRCode(
-              version = 1,
-              error_correction=qrcode.constants.ERROR_CORRECT_L,
-              box_size=10,
-              border=4,
-          )
-          qr.add_data(data)
-          qr.make(fit=True)
-          
-          # Cоздание изображения QR-кода
-          img = qr.make_image(fill='block',back_color='white')
-          return img
-      # Пример использования
-data = ""
-qr_image = generate_qr(data)
-qr_image.save("qrcode.png")
 
-def deposit(self, amount):
-        self.balance += amount
-       
-def withdraw(self, amount): 
-        if amount <= self.balance:
-            self.balance -= amount
-        else:
-            print("Not enough funds in the wallet")
-def get_balance(self):
-        print(self.balance)
+def _hash_to_int(payload: bytes) -> int:
+    """SHA-512 сообщения -> целое, усечённое до битности порядка N."""
+    digest = hashlib.sha512(payload).digest()
+    z = int.from_bytes(digest, "big")
+    shift = len(digest) * 8 - _N.bit_length()
+    if shift > 0:
+        z >>= shift
+    return z
 
-class BHydraAPIError(Exception):
-     """Base exception for B-Hydra API"""
 
-class BHydraClient:
- def __init__(
-         self,
-         base_url: str = "https://codeberg.org/B-hydra/B-hydra.git:5000",
-         timeout: float = 3.0
-        ): 
-      self.base_uel = base_url.rstrip("/")
-      self.timeout = timeout
-      self.session = Session(...)
-      self.session.headers.update({
-           "Accept": "application/json",
-           "User-Agent": "BHydra-Wallet/1.0"
-      })
+# --- Кодирование адреса ------------------------------------------------------
+def _b58encode(data: bytes) -> str:
+    num = int.from_bytes(data, "big")
+    encoded = ""
+    while num > 0:
+        num, rem = divmod(num, 58)
+        encoded = _B58_ALPHABET[rem] + encoded
+    pad = len(data) - len(data.lstrip(b"\x00"))
+    return "1" * pad + encoded
 
-def __get__(self, endpoint: str) -> Dict[str, Any]:
-      url = f"{self.base_url}{endpoint}"
 
-      try:
-         response = self.session.get(url, Timeout=self.timeout)
-         response.raise_for_status()
-         return response.json()
-      except Timeout:
-           raise BHydraAPIError("Node timeout")
-      except ValueError:
-           raise BHydraAPIError("Invalid JSON response")
-      except RequestException as e:
-           raise BHydraAPIError(f"Connection error: {e}")
-      
-# ----------- Public methods ---------------
+def _ripemd160(data: bytes) -> bytes:
+    try:
+        h = hashlib.new("ripemd160")
+        h.update(data)
+        return h.digest()
+    except (ValueError, TypeError):
+        return hashlib.sha256(data).digest()[:20]
 
-def get_latest_block(self) -> Dict[str, Any]:
-     return self._get(f"/block/latest")
-def get_block_by_height(self, height: int) -> Dict[str, Any]:
-     return self._get(f"/block/{height}")
-def get_block_by_hash(self, block_hash: str) -> Dict[str, Any]:
-     return self._get(f"/block/hash/{block_hash}")
+
+class Wallet:
+    """Кошелёк B-hydra: пара ключей ECDSA (secp256k1) + адрес."""
+
+    def __init__(self, private_value: int = None):
+        if private_value is None:
+            private_value = secrets.randbelow(_N - 1) + 1
+        self._priv = private_value
+        self._pub = _scalar_mult(self._priv, _G)
+
+    # --- Ключи -----------------------------------------------------------
+    @property
+    def public_key_bytes(self) -> bytes:
+        """Несжатый публичный ключ: 0x04 || X(32) || Y(32)."""
+        x, y = self._pub
+        return b"\x04" + x.to_bytes(32, "big") + y.to_bytes(32, "big")
+
+    @property
+    def public_key_hex(self) -> str:
+        return self.public_key_bytes.hex()
+
+    @property
+    def private_key_hex(self) -> str:
+        return self._priv.to_bytes(32, "big").hex()
+
+    # --- Адрес -----------------------------------------------------------
+    @property
+    def address(self) -> str:
+        """Адрес = 'BHY' + Base58(version || RIPEMD160(SHA-512(pub)) || checksum)."""
+        payload = b"\x1f" + _ripemd160(hashlib.sha512(self.public_key_bytes).digest())
+        checksum = hashlib.sha512(hashlib.sha512(payload).digest()).digest()[:4]
+        return "BHY" + _b58encode(payload + checksum)
+
+    # --- Подпись / проверка ----------------------------------------------
+    def sign(self, payload: bytes) -> str:
+        """Подписывает байты ECDSA, возвращает hex (r||s, по 32 байта)."""
+        if isinstance(payload, str):
+            payload = payload.encode("utf-8")
+        z = _hash_to_int(payload)
+        while True:
+            k = secrets.randbelow(_N - 1) + 1
+            point = _scalar_mult(k, _G)
+            r = point[0] % _N
+            if r == 0:
+                continue
+            s = (_inverse_mod(k, _N) * (z + r * self._priv)) % _N
+            if s == 0:
+                continue
+            if s > _N // 2:          # low-s (защита от ковкости подписи)
+                s = _N - s
+            return r.to_bytes(32, "big").hex() + s.to_bytes(32, "big").hex()
+
+    @staticmethod
+    def verify(public_key_hex: str, payload: bytes, signature_hex: str) -> bool:
+        """Проверяет ECDSA-подпись по публичному ключу отправителя (hex)."""
+        if isinstance(payload, str):
+            payload = payload.encode("utf-8")
+        try:
+            pub_bytes = bytes.fromhex(public_key_hex)
+            sig = bytes.fromhex(signature_hex)
+            if len(pub_bytes) != 65 or pub_bytes[0] != 0x04 or len(sig) != 64:
+                return False
+            x = int.from_bytes(pub_bytes[1:33], "big")
+            y = int.from_bytes(pub_bytes[33:65], "big")
+            r = int.from_bytes(sig[:32], "big")
+            s = int.from_bytes(sig[32:], "big")
+        except ValueError:
+            return False
+
+        if not (1 <= r < _N and 1 <= s < _N):
+            return False
+        z = _hash_to_int(payload)
+        w = _inverse_mod(s, _N)
+        u1 = (z * w) % _N
+        u2 = (r * w) % _N
+        point = _point_add(_scalar_mult(u1, _G), _scalar_mult(u2, (x, y)))
+        if point is None:
+            return False
+        return (point[0] % _N) == r
+
+    # --- Баланс ----------------------------------------------------------
+    def balance(self, node) -> float:
+        """Удобный доступ к балансу адреса через ноду/блокчейн."""
+        return node.get_balance(self.address)
+
+    @classmethod
+    def from_private_hex(cls, private_hex: str) -> "Wallet":
+        return cls(int.from_bytes(bytes.fromhex(private_hex), "big"))
+
+    def __repr__(self):
+        return f"<Wallet {self.address}>"
+
+
+def generate_wallet() -> Wallet:
+    """Создаёт новый кошелёк."""
+    return Wallet()
+
+
+if __name__ == "__main__":
+    w = generate_wallet()
+    print("Адрес         :", w.address)
+    print("Публичный ключ:", w.public_key_hex[:32], "…")
+    msg = b"hello b-hydra"
+    sig = w.sign(msg)
+    print("Подпись верна :", Wallet.verify(w.public_key_hex, msg, sig))
+    print("Чужой ключ    :", Wallet.verify(generate_wallet().public_key_hex, msg, sig))
