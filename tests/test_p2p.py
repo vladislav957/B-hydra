@@ -5,9 +5,9 @@ import time
 
 import pytest
 
-from Node import BHydraNode
-from P2P import P2PNode
-from wallet import generate_wallet
+from b_hydra.node import BHydraNode
+from b_hydra.p2p import P2PNode
+from b_hydra.wallet import generate_wallet
 
 
 def _free_port():

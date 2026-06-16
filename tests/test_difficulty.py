@@ -1,8 +1,8 @@
 """Тесты динамической сложности: чем больше участников, тем сложнее."""
 
-from Blockchain import difficulty_for_participants
-from Node import BHydraNode
-from wallet import generate_wallet
+from b_hydra.blockchain import difficulty_for_participants
+from b_hydra.node import BHydraNode
+from b_hydra.wallet import generate_wallet
 
 
 def test_difficulty_grows_with_participants():

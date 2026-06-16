@@ -1,7 +1,7 @@
 """Тесты экономики: награда за блок, халвинг, потолок эмиссии."""
 
-from Blockchain import HALVING_INTERVAL, MAX_SUPPLY, TARGET_END_YEAR
-from cripta import (
+from b_hydra.blockchain import HALVING_INTERVAL, MAX_SUPPLY, TARGET_END_YEAR
+from b_hydra.economics import (
     block_reward, emission_schedule, mining_end_year, total_supply_after,
 )
 

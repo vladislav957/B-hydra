@@ -1,6 +1,6 @@
 """Тесты кошелька: генерация ключей, адрес, ECDSA-подпись."""
 
-from wallet import Wallet, address_from_public_key, generate_wallet
+from b_hydra.wallet import Wallet, address_from_public_key, generate_wallet
 
 
 def test_keypair_sizes():

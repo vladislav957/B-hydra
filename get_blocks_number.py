@@ -5,7 +5,7 @@ get_blocks_number.py — высота цепочки B-hydra.
 блоки и узнать их количество (высоту).
 """
 
-from Blockchain import Blockchain
+from b_hydra.blockchain import Blockchain
 
 
 def get_blocks_number(blockchain) -> int:

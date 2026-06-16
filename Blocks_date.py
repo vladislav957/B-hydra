@@ -29,7 +29,7 @@ def chain_dates(blockchain):
 
 
 if __name__ == "__main__":
-    from Blockchain import Blockchain
+    from b_hydra.blockchain import Blockchain
 
     chain = Blockchain(difficulty=2)
     chain.add_block("Первый блок данных")

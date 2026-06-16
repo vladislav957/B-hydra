@@ -58,7 +58,7 @@ cd B-hydra
 
 Пример кода для добавления блока:
 
-from Blockchain import Blockchain
+from b_hydra import Blockchain
 
 blockchain = Blockchain()
 blockchain.add_block(data="Пример транзакции")
@@ -83,6 +83,27 @@ print(blockchain.chain)
 Выпуск новых монет (как халвинги Bitcoin) продолжается примерно до 3010 года —
 время блока подобрано так, чтобы потолок 31 млн BHY, награда 50 и делимость
 1e-8 сошлись к завершению майнинга в 3010 году.
+
+Структура проекта — ядро оформлено как Python-пакет b_hydra/:
+
+    b_hydra/
+      hashing.py / sha2.py   — хеши SHA-512 (обёртки) и SHA-2 «с нуля»
+      merkle.py, hashcash.py — дерево Меркла и proof-of-work
+      wallet.py              — ключи ECDSA secp256k1 и адреса
+      transaction.py         — UTXO-транзакции (входы/выходы), мемпул
+      blockchain.py          — блоки, PoW, динамическая сложность
+      economics.py           — награда, халвинг, конец эмиссии (3010)
+      node.py                — узел: UTXO, балансы, майнинг, синхронизация
+      p2p.py, tcp.py         — одноранговая сеть
+      api.py, mobile_client.py — REST API и мобильный кошелёк
+      contract.py            — смарт-контракт и эскроу
+    cli.py, api.py, P2P.py, manig.py — точки входа (запускалки)
+    explorer.html            — веб-обозреватель блоков
+    tests/                   — автотесты (pytest)
+
+Импорт из пакета:
+
+    from b_hydra import Blockchain, BHydraNode, Wallet, Transaction
 
 Мобильный кошелёк (REST API) + веб-обозреватель блоков — узел отдаёт JSON по
 HTTP и страницу обозревателя; телефон подписывает транзакции локально
@@ -170,7 +191,7 @@ Quick start (full lifecycle demo):
 
 Example code for adding a block:
 
-from Blockchain import Blockchain
+from b_hydra import Blockchain
 
 blockchain = Blockchain()
 blockchain.add_block(data="Пример транзакции")

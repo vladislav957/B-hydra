@@ -2,9 +2,9 @@
 
 import pytest
 
-from Node import BHydraNode
-from Transactinons import Transaction, TxInput, TxOutput
-from wallet import generate_wallet
+from b_hydra.node import BHydraNode
+from b_hydra.transaction import Transaction, TxInput, TxOutput
+from b_hydra.wallet import generate_wallet
 
 
 @pytest.fixture

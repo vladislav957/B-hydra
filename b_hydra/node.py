@@ -10,11 +10,11 @@ Node.py — узел сети B-hydra (модель UTXO).
 
 import json
 
-from Blockchain import Block, Blockchain, DEFAULT_DIFFICULTY
-from Transactinons import (
+from .blockchain import Block, Blockchain, DEFAULT_DIFFICULTY
+from .transaction import (
     Transaction, TxInput, TxOutput, TransactionPool, coinbase,
 )
-from wallet import Wallet
+from .wallet import Wallet
 
 
 class BHydraNode:
@@ -307,7 +307,7 @@ class BHydraNode:
 
 
 if __name__ == "__main__":
-    from wallet import generate_wallet
+    from .wallet import generate_wallet
 
     node = BHydraNode(difficulty=3)
     alice = generate_wallet()

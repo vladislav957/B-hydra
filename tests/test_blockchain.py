@@ -1,6 +1,6 @@
 """Тесты блокчейна: PoW, связность, обнаружение подделки, сериализация."""
 
-from Blockchain import Blockchain
+from b_hydra.blockchain import Blockchain
 
 
 def test_genesis_block_mined():

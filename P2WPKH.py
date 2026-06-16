@@ -8,7 +8,7 @@ P2WPKH.py — деривация адреса B-hydra из публичного 
 
 import hashlib
 
-from wallet import Wallet
+from b_hydra.wallet import Wallet
 
 
 def witness_program(public_key_bytes: bytes) -> bytes:

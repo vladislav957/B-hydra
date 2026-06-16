@@ -1,6 +1,6 @@
 """Тесты транзакций UTXO: txid, coinbase, мемпул, сериализация."""
 
-from Transactinons import (
+from b_hydra.transaction import (
     Transaction, TransactionPool, TxInput, TxOutput, coinbase,
 )
 

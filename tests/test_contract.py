@@ -1,7 +1,7 @@
 """Тесты смарт-контракта и эскроу."""
 
-from Contract import SmartContract
-from SmartCheck import SmartCheck
+from b_hydra.contract import SmartContract
+from b_hydra.contract import SmartCheck
 
 
 def test_deposit_and_withdraw():

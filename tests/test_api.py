@@ -9,8 +9,8 @@ import urllib.request
 
 import pytest
 
-from api import make_server
-from mobile_client import MobileWallet
+from b_hydra.api import make_server
+from b_hydra.mobile_client import MobileWallet
 
 
 def _free_port():

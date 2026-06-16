@@ -9,8 +9,8 @@ manig.py — главный модуль B-hydra (точка входа).
     python manig.py
 """
 
-from Node import BHydraNode
-from wallet import generate_wallet
+from b_hydra.node import BHydraNode
+from b_hydra.wallet import generate_wallet
 
 
 def short(address: str) -> str:

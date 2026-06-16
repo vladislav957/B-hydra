@@ -11,7 +11,7 @@ cripta.py — экономика эмиссии B-hydra.
 подобрано так, чтобы эта цель сошлась с потолком 31 млн и наградой 50.
 """
 
-from Blockchain import (
+from .blockchain import (
     INITIAL_REWARD, HALVING_INTERVAL, MAX_SUPPLY, DECIMALS,
     BLOCK_TIME_SECONDS, SECONDS_PER_YEAR, GENESIS_YEAR,
     MINING_END_HEIGHT,

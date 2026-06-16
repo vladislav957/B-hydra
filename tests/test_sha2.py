@@ -3,7 +3,7 @@
 import hashlib
 import os
 
-import sha2
+from b_hydra import sha2
 
 
 def test_sha256_nist_vectors():
