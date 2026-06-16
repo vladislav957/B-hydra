@@ -28,6 +28,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, unquote
 
+from Blockchain import MAX_SUPPLY
 from Node import BHydraNode
 from Transactinons import Transaction
 
@@ -115,6 +116,7 @@ class BHydraAPI(BaseHTTPRequestHandler):
                 return
 
             if parts == ["api", "info"]:
+                from cripta import mining_end_year
                 bc = self.node.blockchain
                 self._send(200, {
                     "network": "B-hydra",
@@ -123,6 +125,8 @@ class BHydraAPI(BaseHTTPRequestHandler):
                     "difficulty": bc.expected_difficulty(len(bc.chain)),
                     "participants": len(bc.distinct_miners()),
                     "next_block_reward": bc.block_reward(len(bc.chain)),
+                    "max_supply": MAX_SUPPLY,
+                    "mining_end_year": round(mining_end_year()),
                     "hash_algorithm": "SHA-512",
                     "model": "UTXO",
                 })

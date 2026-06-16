@@ -28,7 +28,31 @@ import time
 INITIAL_REWARD = 50            # Начальная награда за блок, BHY
 HALVING_INTERVAL = 310_000     # Каждые 310 000 блоков награда делится пополам
 MAX_SUPPLY = 31_000_000        # Максимальная эмиссия монет
-BLOCK_TIME_SECONDS = 120       # Целевое время генерации блока (2 минуты)
+DECIMALS = 8                   # Делимость монеты: наименьшая единица = 1e-8 BHY
+
+# Выпуск новых монет (награда за блок) продолжается до ~этого года — как
+# халвинги Bitcoin до ~2140. Время блока ВЫВОДИТСЯ из этой цели, чтобы все
+# параметры (награда 50, потолок 31 млн, делимость 1e-8) сошлись к завершению
+# майнинга в 3010 году.
+GENESIS_YEAR = 2026
+TARGET_END_YEAR = 3010
+SECONDS_PER_YEAR = 365.25 * 24 * 3600
+
+
+def _effective_halvings():
+    """Сколько халвингов проходит, прежде чем награда станет меньше 1e-DECIMALS."""
+    halvings = 0
+    while round(INITIAL_REWARD / (2 ** halvings), DECIMALS) > 0:
+        halvings += 1
+    return halvings
+
+
+# Высота блока, на которой выпуск новых монет прекращается.
+MINING_END_HEIGHT = _effective_halvings() * HALVING_INTERVAL
+# Время блока подбирается так, чтобы майнинг закончился в TARGET_END_YEAR.
+BLOCK_TIME_SECONDS = ((TARGET_END_YEAR - GENESIS_YEAR) * SECONDS_PER_YEAR
+                      / MINING_END_HEIGHT)
+
 DEFAULT_DIFFICULTY = 4         # Базовое кол-во ведущих нулей в хеше блока (PoW)
 
 # Динамическая сложность: чем больше участников (майнеров) в сети, тем выше
@@ -191,11 +215,16 @@ class Blockchain:
         return difficulty_for_participants(participants, base=self.difficulty)
 
     def block_reward(self, height):
-        """Награда за блок с учётом халвинга (Bitcoin-подобная схема)."""
+        """Награда за блок с учётом халвинга (Bitcoin-подобная схема).
+
+        Награда округляется до делимости монеты (DECIMALS) и становится 0,
+        как только опускается ниже наименьшей единицы — это и задаёт конец
+        выпуска монет (примерно в TARGET_END_YEAR).
+        """
         halvings = height // HALVING_INTERVAL
-        if halvings >= 64:          # После 64 халвингов награда обнуляется.
-            return 0
-        return INITIAL_REWARD / (2 ** halvings)
+        if halvings >= 64:
+            return 0.0
+        return round(INITIAL_REWARD / (2 ** halvings), DECIMALS)
 
     @property
     def total_supply(self):

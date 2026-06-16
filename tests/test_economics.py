@@ -1,7 +1,9 @@
 """Тесты экономики: награда за блок, халвинг, потолок эмиссии."""
 
-from Blockchain import HALVING_INTERVAL, MAX_SUPPLY
-from cripta import block_reward, emission_schedule, total_supply_after
+from Blockchain import HALVING_INTERVAL, MAX_SUPPLY, TARGET_END_YEAR
+from cripta import (
+    block_reward, emission_schedule, mining_end_year, total_supply_after,
+)
 
 
 def test_initial_reward():
@@ -24,3 +26,8 @@ def test_total_emission_hits_cap():
 
 def test_supply_capped():
     assert total_supply_after(10 ** 9) <= MAX_SUPPLY
+
+
+def test_mining_ends_at_target_year():
+    # Выпуск новых монет завершается примерно в 3010 году.
+    assert round(mining_end_year()) == TARGET_END_YEAR == 3010
