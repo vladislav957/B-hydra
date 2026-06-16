@@ -133,11 +133,17 @@ class Block:
         return hashlib.sha512(header.encode("utf-8")).hexdigest()
 
     def mine_block(self):
-        """Proof-of-Work: подбираем nonce, пока хеш не начнётся с N нулей."""
+        """Proof-of-Work: перебираем nonce, пока хеш не начнётся с N нулей.
+
+        Запоминает число перебранных хешей в self.mining_attempts — это и есть
+        проделанная майнером работа за найденный блок.
+        """
         target = "0" * self.difficulty
+        self.mining_attempts = 1          # первый хеш уже посчитан в __init__
         while not self.hash.startswith(target):
-            self.nonce += 1
-            self.hash = self.calculate_hash()
+            self.nonce += 1               # перебираем nonce…
+            self.hash = self.calculate_hash()   # …и пересчитываем SHA-512
+            self.mining_attempts += 1
         return self.hash
 
     def to_dict(self):

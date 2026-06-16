@@ -189,7 +189,8 @@ async function mine() {
   });
   const j = await r.json();
   if (j.error) { $('mineMsg').innerHTML = `<span class="err">Ошибка: ${esc(j.error)}</span>`; }
-  else { $('mineMsg').innerHTML = `<span class="out">Добыт блок #${j.index} (${j.transactions} tx)</span>`; }
+  else { $('mineMsg').innerHTML = `<span class="out">Добыт блок #${j.index}</span> · ` +
+         `сложность ${j.difficulty} · перебрано ${Number(j.attempts).toLocaleString()} хешей · nonce ${j.nonce}`; }
   loadStats(); loadBlocks();
 }
 

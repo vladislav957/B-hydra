@@ -174,6 +174,9 @@ class BHydraAPI(BaseHTTPRequestHandler):
                 self._send(200, {
                     "index": block.index,
                     "hash": block.hash,
+                    "difficulty": block.difficulty,
+                    "nonce": block.nonce,
+                    "attempts": getattr(block, "mining_attempts", None),
                     "transactions": len(block.data) if isinstance(block.data, list) else 1,
                 })
             else:

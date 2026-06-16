@@ -54,6 +54,8 @@ def cmd_mine(args):
     node.save(args.file)
     n_tx = len(block.data) if isinstance(block.data, list) else 1
     print(f"Блок #{block.index} добыт (транзакций: {n_tx})")
+    print(f"  сложность : {block.difficulty} (хеш начинается с {block.difficulty} нулей)")
+    print(f"  перебрано : {block.mining_attempts:,} хешей → найден nonce {block.nonce}")
     print(f"  hash : {block.hash[:32]}…")
     print(f"  Баланс {args.address[:16]}…: {node.get_balance(args.address):.4f} BHY")
 
