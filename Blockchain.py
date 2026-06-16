@@ -258,19 +258,45 @@ class Blockchain:
 
 
 if __name__ == "__main__":
-    # Демонстрация работы сети B-hydra.
-    blockchain = Blockchain(difficulty=3)
+    # Демонстрация: участники сети (майнеры) помогают блокчейну и получают
+    # награду в BHY. В блоках хранятся ТОЛЬКО адреса B-hydra и суммы — без имён.
+    from Node import BHydraNode
+    from Transactinons import NULL_TXID
+    from wallet import generate_wallet
 
-    print("Майнинг блока #1 …")
-    blockchain.add_block(data="Alice -> Bob: 10 BHY")
+    node = BHydraNode(difficulty=3)
+    miner_a = generate_wallet()
+    miner_b = generate_wallet()
 
-    print("Майнинг блока #2 …")
-    blockchain.add_block(data=["Bob -> Carol: 5 BHY", "Carol -> Dave: 2 BHY"])
+    # Майнеры добывают блоки и получают награду на свой адрес.
+    node.mine_pending(miner_a.address)
+    node.mine_pending(miner_b.address)
 
-    for block in blockchain.chain:
-        print(f"Блок #{block.index} | nonce={block.nonce} | hash={block.hash[:24]}…")
+    # Перевод между адресами (попадёт в следующий блок).
+    tx = node.create_transaction(miner_a, miner_b.address, amount=10, fee=0.5)
+    node.add_transaction(tx)
+    node.mine_pending(miner_a.address)
 
-    print(f"\nДлина цепочки   : {len(blockchain.chain)}")
-    print(f"Эмиссия (BHY)   : {blockchain.total_supply}")
-    print(f"Награда блока #1 : {blockchain.block_reward(1)} BHY")
-    print(f"Цепочка валидна : {blockchain.is_chain_valid()}")
+    def short(addr):
+        return addr if len(addr) <= 18 else addr[:10] + "…" + addr[-6:]
+
+    print("Содержимое блоков (только адреса B-hydra и суммы):\n")
+    for block in node.blockchain.chain:
+        print(f"Блок #{block.index}  (сложность {block.difficulty})")
+        txs = block.data if isinstance(block.data, list) else []
+        if not txs:
+            print("    — генезис —")
+        for t in txs:
+            out = t["vout"]
+            if t["vin"] and t["vin"][0]["txid"] == NULL_TXID:
+                print(f"    награда: → {short(out[0]['address'])}  +{out[0]['amount']} BHY")
+            else:
+                moves = ", ".join(f"→ {short(o['address'])} {o['amount']} BHY" for o in out)
+                print(f"    перевод: {len(t['vin'])} вход(ов)  {moves}")
+        print()
+
+    print("Балансы по адресам:")
+    print(f"  {short(miner_a.address)}: {node.get_balance(miner_a.address)} BHY")
+    print(f"  {short(miner_b.address)}: {node.get_balance(miner_b.address)} BHY")
+    print(f"\nВсего выпущено  : {node.blockchain.total_supply} BHY")
+    print(f"Цепочка валидна : {node.is_valid()}")
