@@ -92,14 +92,23 @@ async function loadStats() {
     <div class="stat"><b>${i.hash_algorithm}</b>${i.model}</div>`;
 }
 
+function minerOf(b) {
+  // Майнер блока = получатель первой (coinbase) транзакции.
+  if (Array.isArray(b.data) && b.data.length && b.data[0].vout)
+    return b.data[0].vout[0].address;
+  return null;
+}
+
 async function loadBlocks() {
   const data = await api('/api/chain');
   const blocks = data.chain.slice().reverse();
   $('blocks').innerHTML = blocks.map(b => {
     const n = Array.isArray(b.data) ? b.data.length : 1;
+    const m = minerOf(b);
+    const miner = m ? `<a class="link" onclick="event.stopPropagation();showAddress('${esc(m)}')">${short(m,8)}</a>` : '<span class="muted">генезис</span>';
     return `<div class="row" onclick="showBlock(${b.index})">
       <span>#${b.index} <span class="badge">${n} tx</span></span>
-      <span class="mono">${short(b.hash,12)}</span></div>`;
+      <span>⛏ ${miner} &nbsp; <span class="mono muted">${short(b.hash,8)}</span></span></div>`;
   }).join('');
 }
 
@@ -126,8 +135,13 @@ async function showBlock(index) {
   const b = await api('/api/block/' + index);
   if (b.error) return showError(b.error);
   const txs = (Array.isArray(b.data)?b.data:[]).map(tx => txCard(tx, null)).join('');
+  const m = minerOf(b);
+  const minerRow = m
+    ? `<div class="row"><span>майнер</span><span><a class="link" onclick="showAddress('${esc(m)}')">${short(m,14)}</a></span></div>`
+    : '';
   $('detail').innerHTML = `<div class="card">
     <h3>Блок #${b.index}</h3>
+    ${minerRow}
     <div class="row"><span>hash</span><span class="mono">${short(b.hash,16)}</span></div>
     <div class="row"><span>пред. блок</span><span class="mono">${short(b.previous_hash,16)}</span></div>
     <div class="row"><span>merkle root</span><span class="mono">${short(b.merkle_root,16)}</span></div>
