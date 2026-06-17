@@ -10,7 +10,12 @@ Node.py — узел сети B-hydra (модель UTXO).
 
 import json
 
-from .blockchain import Block, Blockchain, DEFAULT_DIFFICULTY
+import time
+
+from .blockchain import (
+    Block, Blockchain, DEFAULT_DIFFICULTY,
+    MAX_BLOCK_TRANSACTIONS, MAX_FUTURE_DRIFT,
+)
 from .transaction import (
     NULL_TXID, Transaction, TxInput, TxOutput, TransactionPool, coinbase,
 )
@@ -222,6 +227,12 @@ class BHydraNode:
         txs = self._block_transactions(block)
         if not txs:
             return True  # генезис / блок со строковыми данными
+        if len(txs) > MAX_BLOCK_TRANSACTIONS:
+            return False  # анти-DoS: слишком большой блок
+        # Запрет дублей транзакций (двойное включение / malleability Меркла).
+        txids = [Transaction.from_dict(t).txid for t in txs]
+        if len(set(txids)) != len(txids):
+            return False
         if not _is_coinbase_dict(txs[0]):
             return False
 
@@ -271,6 +282,9 @@ class BHydraNode:
         """Полная проверка цепочки: структура (PoW/Меркл/связность) + транзакции."""
         if not blockchain.is_chain_valid():
             return False
+        # Вершина цепочки не должна быть из далёкого будущего.
+        if blockchain.last_block.timestamp > time.time() + MAX_FUTURE_DRIFT:
+            return False
         utxos: dict = {}
         for height, block in enumerate(blockchain.chain):
             if not self._validate_block_transactions(block, height, utxos):
@@ -288,6 +302,11 @@ class BHydraNode:
         block = Block.from_dict(block_dict)
         last = self.blockchain.last_block
         if block.previous_hash != last.hash or block.index != self.height:
+            return False
+        # Время блока: не из будущего и не раньше предыдущего.
+        if block.timestamp > time.time() + MAX_FUTURE_DRIFT:
+            return False
+        if block.timestamp < last.timestamp:
             return False
         if block.merkle_root != block._calculate_merkle_root():
             return False

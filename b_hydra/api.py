@@ -34,6 +34,7 @@ from .transaction import Transaction
 
 DEFAULT_STATE = "bhydra_chain.json"
 DEFAULT_DIFFICULTY = 3
+MAX_BODY_SIZE = 16 * 1024 * 1024   # анти-DoS: предел размера тела запроса (16 МБ)
 # explorer.html лежит в корне репозитория (на уровень выше пакета).
 _EXPLORER_HTML = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "explorer.html"
@@ -61,6 +62,8 @@ class BHydraAPI(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", 0) or 0)
         if not length:
             return {}
+        if length > MAX_BODY_SIZE:
+            raise ValueError("request body too large")  # анти-DoS
         return json.loads(self.rfile.read(length).decode("utf-8"))
 
     def _send_html(self, code, html):

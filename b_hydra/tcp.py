@@ -27,12 +27,18 @@ def recv_exactly(sock: socket.socket, n: int) -> bytes:
     return bytes(chunks)
 
 
+# Анти-DoS: верхний предел размера одного сообщения (32 МБ).
+MAX_MESSAGE_SIZE = 32 * 1024 * 1024
+
+
 def recv_message(sock: socket.socket) -> bytes:
-    """Читает одно сообщение с префиксом длины."""
+    """Читает одно сообщение с префиксом длины (с лимитом размера)."""
     header = recv_exactly(sock, 4)
     if not header:
         return b""
     (length,) = struct.unpack(">I", header)
+    if length > MAX_MESSAGE_SIZE:
+        return b""  # отвергаем подозрительно большое сообщение (защита от DoS)
     return recv_exactly(sock, length)
 
 

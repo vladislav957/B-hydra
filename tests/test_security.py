@@ -4,7 +4,11 @@
 цепочку/блок: с напечатанным из воздуха coinbase или с тратой чужих средств.
 """
 
-from b_hydra.blockchain import Block
+import struct
+import time
+
+from b_hydra import tcp
+from b_hydra.blockchain import Block, MAX_BLOCK_TRANSACTIONS
 from b_hydra.node import BHydraNode
 from b_hydra.transaction import Transaction, TxInput, TxOutput, coinbase
 from b_hydra.wallet import generate_wallet
@@ -83,3 +87,69 @@ def test_replace_chain_accepts_honest_longer_chain():
     assert honest.replace_chain(other.blockchain.to_dicts()) is True
     assert honest.height == other.height
     assert honest.is_valid()
+
+
+def test_receive_block_rejects_future_timestamp():
+    node = BHydraNode(difficulty=1)
+    cb = coinbase(generate_wallet().address, 50, height=1)
+    block = Block(index=1, previous_hash=node.blockchain.last_block.hash,
+                  data=[cb.to_dict()], timestamp=time.time() + 10 * 3600,
+                  difficulty=node.blockchain.expected_difficulty(1))
+    block.mine_block()
+    assert node.receive_block(block.to_dict()) is False     # из будущего
+
+
+def test_replace_chain_rejects_time_travel():
+    honest = BHydraNode(difficulty=1)
+    attacker = BHydraNode(difficulty=1)
+    now = time.time()
+    cb1 = coinbase(generate_wallet().address, 50, height=1)
+    b1 = Block(1, attacker.blockchain.last_block.hash, [cb1.to_dict()],
+               timestamp=now, difficulty=attacker.blockchain.expected_difficulty(1))
+    b1.mine_block()
+    attacker.blockchain.chain.append(b1)
+    cb2 = coinbase(generate_wallet().address, 50, height=2)
+    b2 = Block(2, b1.hash, [cb2.to_dict()], timestamp=now - 3600,  # время назад
+               difficulty=attacker.blockchain.expected_difficulty(2))
+    b2.mine_block()
+    attacker.blockchain.chain.append(b2)
+    assert attacker.blockchain.is_chain_valid() is False
+    assert honest.replace_chain(attacker.blockchain.to_dicts()) is False
+
+
+def test_block_rejects_duplicate_transaction():
+    node = BHydraNode(difficulty=1)
+    payer = generate_wallet()
+    node.mine_pending(payer.address)                       # у payer есть 50 BHY
+    spend = node.create_transaction(payer, generate_wallet().address, 5)
+    cb = coinbase(generate_wallet().address, 50, height=node.height)
+    data = [cb.to_dict(), spend.to_dict(), spend.to_dict()]   # дубль транзакции
+    block = Block(node.height, node.blockchain.last_block.hash, data,
+                  difficulty=node.blockchain.expected_difficulty(node.height))
+    block.mine_block()
+    assert node.receive_block(block.to_dict()) is False
+
+
+def test_block_rejects_too_many_transactions():
+    node = BHydraNode(difficulty=1)
+
+    class _FakeBlock:
+        data = [{"vin": [{"txid": "0" * 128, "index": 0}],
+                 "vout": [{"amount": 1, "address": "x"}],
+                 "timestamp": 0}] * (MAX_BLOCK_TRANSACTIONS + 1)
+
+    assert node._validate_block_transactions(_FakeBlock(), 1, {}) is False
+
+
+def test_tcp_rejects_oversize_message():
+    class _FakeSock:
+        def __init__(self, data):
+            self.buf = data
+
+        def recv(self, n):
+            chunk = self.buf[:n]
+            self.buf = self.buf[n:]
+            return chunk
+
+    header = struct.pack(">I", tcp.MAX_MESSAGE_SIZE + 1)
+    assert tcp.recv_message(_FakeSock(header)) == b""
