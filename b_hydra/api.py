@@ -188,12 +188,13 @@ class BHydraAPI(BaseHTTPRequestHandler):
             self._send(500, {"error": str(exc)})
 
 
-def make_server(host="0.0.0.0", port=8000, state_file=DEFAULT_STATE):
+def make_server(host="0.0.0.0", port=8000, state_file=DEFAULT_STATE,
+                difficulty=DEFAULT_DIFFICULTY):
     """Создаёт HTTP-сервер с загруженным (или новым) узлом B-hydra."""
     if state_file and os.path.exists(state_file):
         node = BHydraNode.load(state_file)
     else:
-        node = BHydraNode(difficulty=DEFAULT_DIFFICULTY)
+        node = BHydraNode(difficulty=difficulty)
     BHydraAPI.node = node
     BHydraAPI.state_file = state_file
     return ThreadingHTTPServer((host, port), BHydraAPI)

@@ -195,6 +195,16 @@ class Blockchain:
     def last_block(self):
         return self.chain[-1]
 
+    @property
+    def total_work(self) -> int:
+        """Суммарная работа цепочки = Σ 16^сложность по всем блокам.
+
+        Консенсус выбирает цепочку с НАИБОЛЬШЕЙ работой, а не самую длинную:
+        иначе атакующий мог бы обогнать честную сеть длинной цепочкой
+        «дешёвых» блоков низкой сложности.
+        """
+        return sum(16 ** block.difficulty for block in self.chain)
+
     # --- Динамическая сложность от числа участников ----------------------
     @staticmethod
     def _miner_of(block):

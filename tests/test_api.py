@@ -35,7 +35,9 @@ def _post(url, path, body):
 @pytest.fixture
 def server(tmp_path):
     port = _free_port()
-    srv = make_server("127.0.0.1", port, str(tmp_path / "state.json"))
+    # Низкая сложность: майнинг быстрый даже на чистом Python SHA.
+    srv = make_server("127.0.0.1", port, str(tmp_path / "state.json"),
+                      difficulty=1)
     thread = threading.Thread(target=srv.serve_forever, daemon=True)
     thread.start()
     time.sleep(0.2)
@@ -112,7 +114,7 @@ def test_block_endpoint(server):
     _post(server, "/api/mine", {"miner": w.address})
     block = json.loads(_get(server, "/api/block/1"))
     assert block["index"] == 1
-    assert block["hash"].startswith("000")
+    assert block["hash"].startswith("0" * block["difficulty"])  # PoW выполнен
 
 
 def test_block_not_found(server):

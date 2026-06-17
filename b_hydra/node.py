@@ -12,9 +12,18 @@ import json
 
 from .blockchain import Block, Blockchain, DEFAULT_DIFFICULTY
 from .transaction import (
-    Transaction, TxInput, TxOutput, TransactionPool, coinbase,
+    NULL_TXID, Transaction, TxInput, TxOutput, TransactionPool, coinbase,
 )
 from .wallet import Wallet
+
+# Допуск для сравнения сумм с плавающей точкой.
+_EPS = 1e-9
+
+
+def _is_coinbase_dict(tx: dict) -> bool:
+    """coinbase-транзакция: единственный вход «ниоткуда» (NULL_TXID)."""
+    vin = tx.get("vin", [])
+    return len(vin) == 1 and vin[0].get("txid") == NULL_TXID
 
 
 class BHydraNode:
@@ -197,11 +206,84 @@ class BHydraNode:
                 kept.append(tx)
         self.mempool.transactions = kept
 
+    # --- Полная проверка транзакций (безопасность) ----------------------
+    def _validate_block_transactions(self, block, height, utxos) -> bool:
+        """
+        Проверяет транзакции блока против набора UTXO (НЕ мутирует его):
+          * первая транзакция — coinbase, остальные — нет;
+          * каждый вход ссылается на непотраченный выход, подпись верна,
+            публичный ключ соответствует адресу выхода;
+          * сумма входов >= суммы выходов;
+          * выпуск coinbase <= награда за блок + собранные комиссии.
+
+        Это закрывает атаки «фальшивый coinbase» (печать монет) и трату
+        чужих средств в блоках, полученных от других узлов.
+        """
+        txs = self._block_transactions(block)
+        if not txs:
+            return True  # генезис / блок со строковыми данными
+        if not _is_coinbase_dict(txs[0]):
+            return False
+
+        fees = 0.0
+        spent: set = set()
+        for raw in txs[1:]:
+            if _is_coinbase_dict(raw):
+                return False  # только одна coinbase на блок
+            tx = Transaction.from_dict(raw)
+            if not tx.vin or not tx.vout or any(o.amount <= 0 for o in tx.vout):
+                return False
+            payload = tx.signing_payload()
+            total_in = 0.0
+            for inp in tx.vin:
+                outpoint = inp.outpoint
+                if outpoint in spent or outpoint not in utxos:
+                    return False  # двойная трата / несуществующий выход
+                spent.add(outpoint)
+                utxo = utxos[outpoint]
+                if not inp.public_key or not inp.signature:
+                    return False
+                if Wallet.address_from_public_key(inp.public_key) != utxo["address"]:
+                    return False
+                if not Wallet.verify(inp.public_key, payload, inp.signature):
+                    return False
+                total_in += utxo["amount"]
+            if total_in + _EPS < tx.total_output:
+                return False
+            fees += total_in - tx.total_output
+
+        coinbase_out = Transaction.from_dict(txs[0]).total_output
+        if coinbase_out > self.blockchain.block_reward(height) + fees + _EPS:
+            return False  # фальшивый coinbase — печать монет
+        return True
+
+    @staticmethod
+    def _apply_block_to_utxos(block, utxos) -> None:
+        """Применяет блок к набору UTXO: убирает потраченные, добавляет новые."""
+        for raw in BHydraNode._block_transactions(block):
+            tx = Transaction.from_dict(raw)
+            for inp in tx.vin:
+                utxos.pop(inp.outpoint, None)
+            for idx, out in enumerate(tx.vout):
+                utxos[(tx.txid, idx)] = {"amount": out.amount, "address": out.address}
+
+    def _validate_chain(self, blockchain) -> bool:
+        """Полная проверка цепочки: структура (PoW/Меркл/связность) + транзакции."""
+        if not blockchain.is_chain_valid():
+            return False
+        utxos: dict = {}
+        for height, block in enumerate(blockchain.chain):
+            if not self._validate_block_transactions(block, height, utxos):
+                return False
+            self._apply_block_to_utxos(block, utxos)
+        return True
+
     def receive_block(self, block_dict) -> bool:
         """
         Принимает одиночный блок от пира. Добавляет его, только если он
-        продолжает нашу цепочку (его prev = наш последний хеш) и валиден.
-        Возвращает False, если блок не подходит (нужна полная синхронизация).
+        продолжает нашу цепочку (prev = наш последний хеш), структурно валиден
+        И его транзакции корректны (подписи, отсутствие двойных трат, честный
+        coinbase). Возвращает False, если блок не подходит.
         """
         block = Block.from_dict(block_dict)
         last = self.blockchain.last_block
@@ -215,22 +297,28 @@ class BHydraNode:
             return False
         if not block.hash.startswith("0" * block.difficulty):
             return False
+        # Проверка транзакций против текущего набора UTXO.
+        if not self._validate_block_transactions(block, block.index, self.utxo_set()):
+            return False
         self.blockchain.chain.append(block)
         self._prune_mempool()
         return True
 
     def replace_chain(self, chain_dicts) -> bool:
         """
-        Правило консенсуса: принять чужую цепочку, если она длиннее нашей,
-        валидна и имеет тот же генезис. Возвращает True, если заменили.
+        Правило консенсуса: принять чужую цепочку, если у неё БОЛЬШЕ суммарной
+        работы, она полностью валидна (структура + транзакции) и имеет тот же
+        генезис. Возвращает True, если заменили.
         """
-        if len(chain_dicts) <= self.height:
-            return False
         candidate = Blockchain.from_dicts(chain_dicts, self.blockchain.difficulty)
+        if not candidate.chain:
+            return False
         if candidate.chain[0].hash != self.blockchain.chain[0].hash:
             return False  # другой генезис — это другая сеть
-        if not candidate.is_chain_valid():
-            return False
+        if candidate.total_work <= self.blockchain.total_work:
+            return False  # консенсус по суммарной работе, не по длине
+        if not self._validate_chain(candidate):
+            return False  # отвергаем фальшивые транзакции/coinbase
         self.blockchain = candidate
         self._prune_mempool()
         return True
