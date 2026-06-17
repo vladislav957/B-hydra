@@ -78,18 +78,25 @@ async function api(path) {
   const r = await fetch(path);
   return r.json();
 }
-function esc(s){ return String(s).replace(/[&<>]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+// Экранирование для безопасной вставки в HTML-текст И в значения атрибутов
+// (включая кавычки) — защита от XSS через данные блоков/адресов.
+function esc(s){ return String(s).replace(/[&<>"']/g, c=>(
+  {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function short(s, n=20){ s=String(s); return s.length>2*n ? s.slice(0,n)+'…'+s.slice(-n) : s; }
 function date(ts){ return new Date(ts*1000).toLocaleString(); }
+// Кликабельная ссылка через data-атрибуты (без инлайн-JS из данных).
+function link(label, action, id){
+  return `<a class="link" data-action="${esc(action)}" data-id="${esc(id)}">${esc(label)}</a>`;
+}
 
 async function loadStats() {
   const i = await api('/api/info');
   $('stats').innerHTML = `
-    <div class="stat"><b>${i.height}</b>блоков</div>
-    <div class="stat"><b>${i.participants}</b>участников</div>
-    <div class="stat"><b>${i.difficulty}</b>сложность</div>
-    <div class="stat"><b>${i.next_block_reward}</b>награда BHY</div>
-    <div class="stat"><b>${i.hash_algorithm}</b>${i.model}</div>`;
+    <div class="stat"><b>${esc(i.height)}</b>блоков</div>
+    <div class="stat"><b>${esc(i.participants)}</b>участников</div>
+    <div class="stat"><b>${esc(i.difficulty)}</b>сложность</div>
+    <div class="stat"><b>${esc(i.next_block_reward)}</b>награда BHY</div>
+    <div class="stat"><b>${esc(i.hash_algorithm)}</b>${esc(i.model)}</div>`;
 }
 
 function minerOf(b) {
@@ -105,72 +112,72 @@ async function loadBlocks() {
   $('blocks').innerHTML = blocks.map(b => {
     const n = Array.isArray(b.data) ? b.data.length : 1;
     const m = minerOf(b);
-    const miner = m ? `<a class="link" onclick="event.stopPropagation();showAddress('${esc(m)}')">${short(m,8)}</a>` : '<span class="muted">генезис</span>';
-    return `<div class="row" onclick="showBlock(${b.index})">
-      <span>#${b.index} <span class="badge">${n} tx</span></span>
-      <span>⛏ ${miner} &nbsp; <span class="mono muted">${short(b.hash,8)}</span></span></div>`;
+    const miner = m ? link(short(m,8), 'address', m) : '<span class="muted">генезис</span>';
+    return `<div class="row" data-action="block" data-id="${esc(b.index)}">
+      <span>#${esc(b.index)} <span class="badge">${esc(n)} tx</span></span>
+      <span>⛏ ${miner} &nbsp; <span class="mono muted">${esc(short(b.hash,8))}</span></span></div>`;
   }).join('');
 }
 
 function txCard(tx, blockIndex) {
-  const vin = (tx.vin||[]).map(i => i.txid && i.txid.startsWith('0'.repeat(20))
+  const vin = (tx.vin||[]).map(i => i.txid && String(i.txid).startsWith('0'.repeat(20))
     ? `<div class="row"><span class="out">coinbase (эмиссия)</span><span></span></div>`
     : `<div class="row"><span class="in">вход</span>
-       <span class="mono">${short(i.txid,10)}:${i.index}</span></div>`).join('');
+       <span class="mono">${esc(short(i.txid,10))}:${esc(i.index)}</span></div>`).join('');
   const vout = (tx.vout||[]).map((o,idx) => `<div class="row">
-       <span class="out">→ #${idx}</span>
-       <span><a class="link" onclick="showAddress('${esc(o.address)}')">${short(o.address,10)}</a>
-       &nbsp; <b>${o.amount}</b> BHY</span></div>`).join('');
+       <span class="out">→ #${esc(idx)}</span>
+       <span>${link(short(o.address,10), 'address', o.address)}
+       &nbsp; <b>${esc(o.amount)}</b> BHY</span></div>`).join('');
   return `<div class="card">
     <h3>Транзакция</h3>
-    <div class="row"><span>txid</span><span class="mono">${short(tx.txid,16)}</span></div>
-    ${blockIndex!=null?`<div class="row"><span>блок</span><span><a class="link" onclick="showBlock(${blockIndex})">#${blockIndex}</a></span></div>`:''}
-    <div class="row"><span>время</span><span>${date(tx.timestamp)}</span></div>
+    <div class="row"><span>txid</span><span class="mono">${esc(short(tx.txid,16))}</span></div>
+    ${blockIndex!=null?`<div class="row"><span>блок</span><span>${link('#'+blockIndex,'block',blockIndex)}</span></div>`:''}
+    <div class="row"><span>время</span><span>${esc(date(tx.timestamp))}</span></div>
     <div style="margin-top:8px"><span class="muted">Входы</span>${vin||'<div class="muted">нет</div>'}</div>
     <div style="margin-top:8px"><span class="muted">Выходы</span>${vout}</div>
   </div>`;
 }
 
 async function showBlock(index) {
-  const b = await api('/api/block/' + index);
+  const b = await api('/api/block/' + encodeURIComponent(index));
   if (b.error) return showError(b.error);
   const txs = (Array.isArray(b.data)?b.data:[]).map(tx => txCard(tx, null)).join('');
   const m = minerOf(b);
   const minerRow = m
-    ? `<div class="row"><span>майнер</span><span><a class="link" onclick="showAddress('${esc(m)}')">${short(m,14)}</a></span></div>`
+    ? `<div class="row"><span>майнер</span><span>${link(short(m,14),'address',m)}</span></div>`
     : '';
   $('detail').innerHTML = `<div class="card">
-    <h3>Блок #${b.index}</h3>
+    <h3>Блок #${esc(b.index)}</h3>
     ${minerRow}
-    <div class="row"><span>hash</span><span class="mono">${short(b.hash,16)}</span></div>
-    <div class="row"><span>пред. блок</span><span class="mono">${short(b.previous_hash,16)}</span></div>
-    <div class="row"><span>merkle root</span><span class="mono">${short(b.merkle_root,16)}</span></div>
-    <div class="row"><span>сложность</span><span>${b.difficulty} (хеш с ${b.difficulty} нулями)</span></div>
-    <div class="row"><span>nonce</span><span>${b.nonce}</span></div>
-    <div class="row"><span>работа</span><span>перебрано ≈ ${(b.nonce + 1).toLocaleString()} хешей (ожидаемо ~${Math.pow(16, b.difficulty).toLocaleString()})</span></div>
-    <div class="row"><span>время</span><span>${date(b.timestamp)}</span></div>
+    <div class="row"><span>hash</span><span class="mono">${esc(short(b.hash,16))}</span></div>
+    <div class="row"><span>пред. блок</span><span class="mono">${esc(short(b.previous_hash,16))}</span></div>
+    <div class="row"><span>merkle root</span><span class="mono">${esc(short(b.merkle_root,16))}</span></div>
+    <div class="row"><span>сложность</span><span>${esc(b.difficulty)} (хеш с ${esc(b.difficulty)} нулями)</span></div>
+    <div class="row"><span>nonce</span><span>${esc(b.nonce)}</span></div>
+    <div class="row"><span>работа</span><span>перебрано ≈ ${esc((Number(b.nonce) + 1).toLocaleString())} хешей</span></div>
+    <div class="row"><span>время</span><span>${esc(date(b.timestamp))}</span></div>
   </div>${txs}`;
   window.scrollTo(0,0);
 }
 
 async function showTx(txid) {
-  const r = await api('/api/tx/' + txid);
+  const r = await api('/api/tx/' + encodeURIComponent(txid));
   if (r.error) return showError(r.error);
   $('detail').innerHTML = txCard(r.transaction, r.block_index);
   window.scrollTo(0,0);
 }
 
 async function showAddress(addr) {
-  const r = await api('/api/address/' + addr);
+  const r = await api('/api/address/' + encodeURIComponent(addr));
   const hist = (r.history||[]).slice().reverse().map(h => `<div class="row">
-     <span><a class="link" onclick="showTx('${h.txid}')">${short(h.txid,10)}</a>
-       <span class="muted">блок #${h.block_index}</span></span>
-     <span>${h.received?`<span class="out">+${h.received}</span> `:''}${h.sent?`<span class="in">-${h.sent}</span>`:''}</span>
+     <span>${link(short(h.txid,10),'tx',h.txid)}
+       <span class="muted">блок #${esc(h.block_index)}</span></span>
+     <span>${h.received?`<span class="out">+${esc(h.received)}</span> `:''}${h.sent?`<span class="in">-${esc(h.sent)}</span>`:''}</span>
    </div>`).join('') || '<div class="muted">нет транзакций</div>';
   $('detail').innerHTML = `<div class="card">
     <h3>Адрес</h3>
     <div class="row"><span>адрес</span><span class="mono">${esc(addr)}</span></div>
-    <div class="row"><span>баланс</span><span><b>${r.balance}</b> BHY</span></div>
+    <div class="row"><span>баланс</span><span><b>${esc(r.balance)}</b> BHY</span></div>
     <div style="margin-top:8px"><span class="muted">История</span>${hist}</div>
   </div>`;
   window.scrollTo(0,0);
@@ -190,8 +197,8 @@ async function mine() {
   });
   const j = await r.json();
   if (j.error) { $('mineMsg').innerHTML = `<span class="err">Ошибка: ${esc(j.error)}</span>`; }
-  else { $('mineMsg').innerHTML = `<span class="out">Добыт блок #${j.index}</span> · ` +
-         `сложность ${j.difficulty} · перебрано ${Number(j.attempts).toLocaleString()} хешей · nonce ${j.nonce}`; }
+  else { $('mineMsg').innerHTML = `<span class="out">Добыт блок #${esc(j.index)}</span> · ` +
+         `сложность ${esc(j.difficulty)} · перебрано ${esc(Number(j.attempts).toLocaleString())} хешей · nonce ${esc(j.nonce)}`; }
   loadStats(); loadBlocks();
 }
 
@@ -202,6 +209,16 @@ async function search() {
   if (q.startsWith('BHY')) return showAddress(q);
   return showTx(q);                       // считаем txid
 }
+
+// Делегирование кликов: данные передаются через data-атрибуты, а не инлайн-JS.
+document.addEventListener('click', e => {
+  const el = e.target.closest('[data-action]');
+  if (!el) return;
+  const id = el.dataset.id;
+  if (el.dataset.action === 'block') showBlock(parseInt(id, 10));
+  else if (el.dataset.action === 'tx') showTx(id);
+  else if (el.dataset.action === 'address') showAddress(id);
+});
 $('q').addEventListener('keydown', e => { if (e.key==='Enter') search(); });
 
 loadStats(); loadBlocks();

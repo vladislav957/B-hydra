@@ -19,7 +19,7 @@ from .blockchain import (
 from .transaction import (
     NULL_TXID, Transaction, TxInput, TxOutput, TransactionPool, coinbase,
 )
-from .wallet import Wallet
+from .wallet import Wallet, is_valid_address
 
 # Допуск для сравнения сумм с плавающей точкой.
 _EPS = 1e-9
@@ -129,8 +129,11 @@ class BHydraNode:
         Собирает подписанную транзакцию: выбирает UTXO отправителя на сумму
         amount + fee, формирует выход получателю и сдачу обратно отправителю.
 
-        Возвращает Transaction или None, если средств недостаточно.
+        Возвращает Transaction или None, если средств недостаточно или адрес
+        получателя некорректен.
         """
+        if not is_valid_address(recipient):
+            return None
         need = amount + fee
         reserved = self.mempool.spent_outpoints()
         chosen, gathered = [], 0.0

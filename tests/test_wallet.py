@@ -71,3 +71,15 @@ def test_rejects_out_of_range_private_key():
         Wallet(0)
     with pytest.raises(ValueError):
         Wallet(_N)
+
+
+def test_is_valid_address():
+    from b_hydra.wallet import is_valid_address
+
+    assert is_valid_address(generate_wallet().address)
+    # Инъекции и мусор отвергаются.
+    assert not is_valid_address("BHY<script>alert(1)</script>")
+    assert not is_valid_address("<svg onload=alert(1)>")
+    assert not is_valid_address("not-an-address")
+    assert not is_valid_address(generate_wallet().address + "x")  # битый checksum
+    assert not is_valid_address(123)

@@ -99,6 +99,11 @@ def test_utxos_endpoint(server):
     assert utxos[0]["amount"] == 50.0
 
 
+def test_mine_rejects_invalid_address(server):
+    res = _post(server, "/api/mine", {"miner": "<script>alert(1)</script>"})
+    assert "error" in res          # узел не принимает адрес с инъекцией
+
+
 def _get(url, path):
     return urllib.request.urlopen(url + path, timeout=5).read().decode("utf-8")
 

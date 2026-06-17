@@ -110,6 +110,38 @@ def address_from_public_key(public_key_hex: str) -> str:
     return address_from_public_key_bytes(bytes.fromhex(public_key_hex))
 
 
+def _b58decode(text: str) -> bytes:
+    num = 0
+    for ch in text:
+        num = num * 58 + _B58_ALPHABET.index(ch)   # ValueError, если символ чужой
+    body = num.to_bytes((num.bit_length() + 7) // 8, "big")
+    pad = len(text) - len(text.lstrip("1"))         # ведущие '1' → нулевые байты
+    return b"\x00" * pad + body
+
+
+def is_valid_address(address) -> bool:
+    """Проверяет, что строка — корректный адрес B-hydra (префикс + checksum).
+
+    Заодно отсекает любые посторонние символы (включая HTML/JS), поэтому узел
+    не принимает «адреса» с инъекциями.
+    """
+    if not isinstance(address, str) or not address.startswith("BHY"):
+        return False
+    body = address[3:]
+    if not body or any(ch not in _B58_ALPHABET for ch in body):
+        return False
+    try:
+        raw = _b58decode(body)
+    except ValueError:
+        return False
+    if len(raw) != 1 + 20 + 4:                       # версия + ripemd160 + checksum
+        return False
+    payload, checksum = raw[:-4], raw[-4:]
+    if payload[0] != 0x1f:
+        return False
+    return hashing.double_sha512(payload)[:4] == checksum
+
+
 class Wallet:
     """Кошелёк B-hydra: пара ключей ECDSA (secp256k1) + адрес."""
 

@@ -31,6 +31,7 @@ from urllib.parse import urlparse, unquote
 from .blockchain import MAX_SUPPLY
 from .node import BHydraNode
 from .transaction import Transaction
+from .wallet import is_valid_address
 
 DEFAULT_STATE = "bhydra_chain.json"
 DEFAULT_DIFFICULTY = 3
@@ -173,6 +174,9 @@ class BHydraAPI(BaseHTTPRequestHandler):
                 miner = data.get("miner")
                 if not miner:
                     self._send(400, {"error": "field 'miner' is required"})
+                    return
+                if not is_valid_address(miner):
+                    self._send(400, {"error": "invalid miner address"})
                     return
                 with self.lock:
                     block = self.node.mine_pending(miner)

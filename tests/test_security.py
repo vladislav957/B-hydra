@@ -141,6 +141,14 @@ def test_block_rejects_too_many_transactions():
     assert node._validate_block_transactions(_FakeBlock(), 1, {}) is False
 
 
+def test_node_rejects_malicious_recipient_address():
+    node = BHydraNode(difficulty=1)
+    payer = generate_wallet()
+    node.mine_pending(payer.address)
+    # Адрес-получатель с HTML/JS не принимается узлом (анти-XSS на источнике).
+    assert node.create_transaction(payer, "<script>alert(1)</script>", 5) is None
+
+
 def test_tcp_rejects_oversize_message():
     class _FakeSock:
         def __init__(self, data):
