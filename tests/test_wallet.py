@@ -46,3 +46,28 @@ def test_verify_fails_with_tampered_message():
 
 def test_unique_wallets():
     assert generate_wallet().address != generate_wallet().address
+
+
+def test_verify_rejects_off_curve_public_key():
+    """Подпись не должна проходить с публичным ключом не на кривой secp256k1."""
+    from b_hydra.wallet import _P
+
+    w = generate_wallet()
+    sig = w.sign(b"hello")
+    assert Wallet.verify(w.public_key_hex, b"hello", sig)        # валидный ключ
+
+    pub = bytes.fromhex(w.public_key_hex)
+    x = int.from_bytes(pub[1:33], "big")
+    y = int.from_bytes(pub[33:65], "big")
+    off_curve = b"\x04" + x.to_bytes(32, "big") + ((y + 1) % _P).to_bytes(32, "big")
+    assert not Wallet.verify(off_curve.hex(), b"hello", sig)     # точка не на кривой
+
+
+def test_rejects_out_of_range_private_key():
+    import pytest
+
+    from b_hydra.wallet import _N
+    with pytest.raises(ValueError):
+        Wallet(0)
+    with pytest.raises(ValueError):
+        Wallet(_N)

@@ -58,6 +58,16 @@ def _scalar_mult(k, point):
     return result
 
 
+def _is_on_curve(point) -> bool:
+    """Проверяет, что точка лежит на кривой secp256k1: y^2 = x^3 + 7 (mod P)."""
+    if point is None:
+        return False
+    x, y = point
+    if not (0 <= x < _P and 0 <= y < _P):
+        return False
+    return (y * y - (x * x * x + 7)) % _P == 0
+
+
 def _hash_to_int(payload: bytes) -> int:
     """SHA-512 сообщения -> целое, усечённое до битности порядка N."""
     digest = hashing.sha512_bytes(payload)
@@ -106,6 +116,8 @@ class Wallet:
     def __init__(self, private_value: int = None):
         if private_value is None:
             private_value = secrets.randbelow(_N - 1) + 1
+        if not 1 <= private_value < _N:
+            raise ValueError("private key out of range [1, N-1]")
         self._priv = private_value
         self._pub = _scalar_mult(self._priv, _G)
 
@@ -171,6 +183,10 @@ class Wallet:
         except ValueError:
             return False
 
+        # Публичный ключ обязан быть валидной точкой кривой (защита от
+        # invalid-curve атак), а r, s — лежать в допустимом диапазоне.
+        if not _is_on_curve((x, y)):
+            return False
         if not (1 <= r < _N and 1 <= s < _N):
             return False
         z = _hash_to_int(payload)
