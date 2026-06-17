@@ -105,6 +105,9 @@ print(blockchain.chain)
 
     from b_hydra import Blockchain, BHydraNode, Wallet, Transaction
 
+Полная карта системы (слои, консенсус, P2P-протокол, модель безопасности) —
+в ARCHITECTURE.md.
+
 Хеширование: по умолчанию весь проект использует реализацию SHA-256/512
 «с нуля» (b_hydra/sha2.py, без hashlib). Она применяется на всех уровнях —
 майнинг, дерево Меркла, txid, адреса. Значения хешей идентичны hashlib, меняется
