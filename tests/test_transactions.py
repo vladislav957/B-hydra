@@ -1,8 +1,10 @@
 """Тесты транзакций UTXO: txid, coinbase, мемпул, сериализация."""
 
+from b_hydra import transaction as txmod
 from b_hydra.transaction import (
     Transaction, TransactionPool, TxInput, TxOutput, coinbase,
 )
+from b_hydra.wallet import Wallet, generate_wallet
 
 
 def _sample_tx(ts=1.0):
@@ -50,3 +52,21 @@ def test_to_dict_from_dict_roundtrip():
     restored = Transaction.from_dict(tx.to_dict())
     assert restored.txid == tx.txid
     assert restored.is_coinbase
+
+
+def test_signing_payload_includes_chain_id():
+    assert b"chain_id" in _sample_tx().signing_payload()
+
+
+def test_chain_id_prevents_cross_network_replay(monkeypatch):
+    """Подпись с одним chain_id недействительна в сети с другим chain_id."""
+    wallet = generate_wallet()
+    tx = Transaction(vin=[TxInput("aa", 0)], vout=[TxOutput(5, "BHYx")],
+                     timestamp=1.0)
+    tx.sign(wallet)
+    sig, pub = tx.vin[0].signature, tx.vin[0].public_key
+    # В своей сети подпись валидна.
+    assert Wallet.verify(pub, tx.signing_payload(), sig)
+    # На другой сети (другой chain_id) та же транзакция уже не проходит.
+    monkeypatch.setattr(txmod, "CHAIN_ID", "other-network")
+    assert not Wallet.verify(pub, tx.signing_payload(), sig)

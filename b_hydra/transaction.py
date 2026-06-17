@@ -17,6 +17,7 @@ import json
 import time
 
 from . import hashing
+from .blockchain import CHAIN_ID
 
 # Псевдо-идентификатор «ниоткуда» для входа coinbase-транзакции.
 NULL_TXID = "0" * 128
@@ -86,10 +87,12 @@ class Transaction:
     # --- Идентификация и сериализация ------------------------------------
     def signing_payload(self) -> bytes:
         """
-        Канонические байты для подписи и txid: только outpoints входов и
-        выходы (без подписей и публичных ключей), плюс временная метка.
+        Канонические байты для подписи и txid: идентификатор сети (chain_id,
+        защита от replay), outpoints входов и выходы (без подписей и публичных
+        ключей), плюс временная метка.
         """
         payload = {
+            "chain_id": CHAIN_ID,
             "vin": [{"txid": i.txid, "index": i.index} for i in self.vin],
             "vout": [o.to_dict() for o in self.vout],
             "timestamp": self.timestamp,
