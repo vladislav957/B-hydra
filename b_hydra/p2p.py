@@ -26,6 +26,9 @@ class P2PNode:
         self.port = port
         self.node = node if node is not None else BHydraNode()
         self.peers = set()          # известные пиры: множество (host, port)
+        self.seen_tx = set()        # txid уже виденных транзакций (анти-петля)
+        self.seen_blocks = set()    # хеши уже виденных блоков (анти-петля)
+        self._seen_lock = threading.Lock()
         self._server = None
         self._running = False
 
@@ -65,16 +68,37 @@ class P2PNode:
         if mtype == "transaction":
             from .transaction import Transaction
             tx = Transaction.from_dict(message["transaction"])
+            with self._seen_lock:
+                first_seen = tx.txid not in self.seen_tx
+                self.seen_tx.add(tx.txid)
             accepted = self.node.add_transaction(tx)
+            if accepted and first_seen:
+                # Gossip: пересылаем транзакцию дальше (кроме отправителя).
+                origin = tuple(message["from"]) if message.get("from") else None
+                self._gossip({"type": "transaction",
+                              "transaction": message["transaction"],
+                              "from": [self.host, self.port]},
+                             exclude=origin, background=True)
             return self._json({"type": "ack", "accepted": accepted})
 
         if mtype == "block":
-            accepted = self.node.receive_block(message["block"])
-            if not accepted:
+            block_dict = message["block"]
+            bhash = block_dict.get("hash")
+            with self._seen_lock:
+                if bhash in self.seen_blocks:
+                    return self._json({"type": "ack", "accepted": False,
+                                       "height": self.node.height})
+                self.seen_blocks.add(bhash)
+            accepted = self.node.receive_block(block_dict)
+            origin = tuple(message["from"]) if message.get("from") else None
+            if accepted:
+                # Gossip: пересылаем блок дальше по сети (кроме отправителя).
+                self._gossip({"type": "block", "block": block_dict,
+                              "from": [self.host, self.port]},
+                             exclude=origin, background=True)
+            elif origin:
                 # Возможно, мы отстали — подтянуть цепочку у отправителя.
-                origin = message.get("from")
-                if origin:
-                    self._sync_from(tuple(origin))
+                self._sync_from(origin)
             return self._json({"type": "ack", "accepted": accepted,
                                "height": self.node.height})
 
@@ -131,12 +155,23 @@ class P2PNode:
             self.peers.add((host, port))
 
     def connect(self, host, port):
-        """Подключается к узлу, обменивается пирами и синхронизируется."""
+        """Подключается к узлу, обменивается пирами и синхронизируется.
+
+        Узел не только узнаёт пиров соседа, но и представляется им (hello),
+        чтобы сеть превращалась в связный меш, а не звезду.
+        """
         resp = self.send(host, port, {"type": "hello",
                                       "host": self.host, "port": self.port})
         self.add_peer(host, port)
         for h, p in resp.get("peers", []):
+            if (h, p) == (self.host, self.port) or (h, p) in self.peers:
+                continue
             self.add_peer(h, p)
+            try:                       # представиться новому пиру
+                self.send(h, p, {"type": "hello",
+                                 "host": self.host, "port": self.port})
+            except OSError:
+                continue
         self.sync()
 
     def broadcast(self, message: dict):
@@ -148,19 +183,45 @@ class P2PNode:
                 continue
         return results
 
+    def _gossip(self, message: dict, exclude=None, background: bool = False):
+        """Пересылает сообщение всем пирам, кроме `exclude`.
+
+        В обработчике входящих сообщений используется background=True, чтобы
+        пересылка шла в отдельном потоке и не блокировала ответ (и не
+        приводила к взаимоблокировке в кольцевых топологиях).
+        """
+        def _run():
+            for host, port in list(self.peers):
+                if (host, port) == exclude:
+                    continue
+                try:
+                    self.send(host, port, message)
+                except OSError:
+                    continue
+
+        if background:
+            threading.Thread(target=_run, daemon=True).start()
+        else:
+            _run()
+
     # --- Высокоуровневые операции ----------------------------------------
     def submit_transaction(self, tx) -> bool:
-        """Добавляет транзакцию локально и рассылает её пирам."""
+        """Добавляет транзакцию локально и распространяет её по сети."""
         accepted = self.node.add_transaction(tx)
         if accepted:
-            self.broadcast({"type": "transaction", "transaction": tx.to_dict()})
+            with self._seen_lock:
+                self.seen_tx.add(tx.txid)
+            self._gossip({"type": "transaction", "transaction": tx.to_dict(),
+                          "from": [self.host, self.port]})
         return accepted
 
     def mine(self, miner_address):
-        """Майнит блок и рассылает его пирам."""
+        """Майнит блок и распространяет его по сети."""
         block = self.node.mine_pending(miner_address)
-        self.broadcast({"type": "block", "block": block.to_dict(),
-                        "from": [self.host, self.port]})
+        with self._seen_lock:
+            self.seen_blocks.add(block.hash)
+        self._gossip({"type": "block", "block": block.to_dict(),
+                      "from": [self.host, self.port]})
         return block
 
     def sync(self) -> bool:
@@ -187,30 +248,36 @@ def _demo():
     import time
     from .wallet import generate_wallet
 
-    # Три узла на локальных портах.
-    a = P2PNode("127.0.0.1", 5101, BHydraNode(difficulty=3))
-    b = P2PNode("127.0.0.1", 5102, BHydraNode(difficulty=3))
-    c = P2PNode("127.0.0.1", 5103, BHydraNode(difficulty=3))
+    # Линейная топология: A — B — C. Узел C НЕ соединён с A напрямую,
+    # блок должен дойти до него «через» B (multi-hop gossip).
+    a = P2PNode("127.0.0.1", 5101, BHydraNode(difficulty=2))
+    b = P2PNode("127.0.0.1", 5102, BHydraNode(difficulty=2))
+    c = P2PNode("127.0.0.1", 5103, BHydraNode(difficulty=2))
     for n in (a, b, c):
         n.start()
     time.sleep(0.3)
 
-    # Узлы B и C подключаются к A — образуется сеть.
-    b.connect("127.0.0.1", 5101)
-    c.connect("127.0.0.1", 5101)
-    a.add_peer("127.0.0.1", 5102)
-    a.add_peer("127.0.0.1", 5103)
+    a.add_peer("127.0.0.1", 5102)          # A знает B
+    b.add_peer("127.0.0.1", 5101)          # B знает A
+    b.add_peer("127.0.0.1", 5103)          # B знает C
+    c.add_peer("127.0.0.1", 5102)          # C знает B  (A и C — НЕ соседи)
 
     miner = generate_wallet()
-    print("Узел A майнит 3 блока и рассылает их…")
+    print("Топология: A — B — C (C не соединён с A напрямую)")
+    print("Узел A майнит 3 блока…")
     for _ in range(3):
         a.mine(miner.address)
-    time.sleep(0.3)
 
-    print(f"Высота A: {a.node.height}")
-    print(f"Высота B: {b.node.height}  (синхронизирован: {b.node.height == a.node.height})")
-    print(f"Высота C: {c.node.height}  (синхронизирован: {c.node.height == a.node.height})")
-    print(f"Хеши вершин совпадают: "
+    # Ждём, пока gossip разнесёт блоки по сети.
+    deadline = time.time() + 5
+    while time.time() < deadline and not (
+            b.node.height == a.node.height and c.node.height == a.node.height):
+        time.sleep(0.1)
+
+    print(f"\nВысота A: {a.node.height}")
+    print(f"Высота B: {b.node.height}  (получил напрямую от A)")
+    print(f"Высота C: {c.node.height}  (получил ЧЕРЕЗ B — multi-hop!)")
+    print(f"Вершины совпадают у всех: "
           f"{a.node.blockchain.last_block.hash == b.node.blockchain.last_block.hash == c.node.blockchain.last_block.hash}")
 
     for n in (a, b, c):

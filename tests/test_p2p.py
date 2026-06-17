@@ -82,3 +82,49 @@ def test_shorter_chain_is_not_adopted(two_nodes):
     b.node.mine_pending(generate_wallet().address)        # B: высота 2
     a.sync()                                              # B короче — не принимаем
     assert a.node.height == 4
+
+
+def _wait_until(cond, timeout=5):
+    end = time.time() + timeout
+    while time.time() < end:
+        if cond():
+            return True
+        time.sleep(0.05)
+    return cond()
+
+
+@pytest.fixture
+def line_nodes():
+    """Линейная топология A — B — C (A и C НЕ соседи)."""
+    pa, pb, pc = _free_port(), _free_port(), _free_port()
+    a = P2PNode("127.0.0.1", pa, BHydraNode(difficulty=1))
+    b = P2PNode("127.0.0.1", pb, BHydraNode(difficulty=1))
+    c = P2PNode("127.0.0.1", pc, BHydraNode(difficulty=1))
+    for n in (a, b, c):
+        n.start()
+    time.sleep(0.2)
+    a.add_peer("127.0.0.1", pb)
+    b.add_peer("127.0.0.1", pa)
+    b.add_peer("127.0.0.1", pc)
+    c.add_peer("127.0.0.1", pb)
+    yield a, b, c
+    for n in (a, b, c):
+        n.stop()
+
+
+def test_block_propagates_multi_hop(line_nodes):
+    a, b, c = line_nodes
+    a.mine(generate_wallet().address)   # A не сосед C — блок дойдёт через B
+    assert _wait_until(lambda: c.node.height == a.node.height)
+    assert c.node.blockchain.last_block.hash == a.node.blockchain.last_block.hash
+
+
+def test_transaction_propagates_multi_hop(line_nodes):
+    a, b, c = line_nodes
+    miner = generate_wallet()
+    a.mine(miner.address)                                # фондируем + распространяем
+    assert _wait_until(lambda: c.node.height == a.node.height)
+    tx = a.node.create_transaction(miner, generate_wallet().address, 5)
+    a.submit_transaction(tx)
+    assert _wait_until(
+        lambda: any(t.txid == tx.txid for t in c.node.mempool.transactions))
