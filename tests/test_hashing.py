@@ -8,6 +8,7 @@ from b_hydra.merkle import MerkleTree, merkle_root
 
 def test_pure_backend_matches_hashlib():
     """Движок 'pure' (SHA с нуля) даёт те же хеши, что и hashlib."""
+    original = hashing.is_pure()
     try:
         hashing.use_pure_sha(True)
         assert hashing.backend() == "pure"
@@ -15,8 +16,12 @@ def test_pure_backend_matches_hashlib():
             assert hashing.sha256(data) == hashlib.sha256(data).hexdigest()
             assert hashing.sha512(data) == hashlib.sha512(data).hexdigest()
     finally:
-        hashing.use_pure_sha(False)  # вернуть быстрый движок по умолчанию
-    assert hashing.backend() == "hashlib"
+        hashing.use_pure_sha(original)  # восстановить исходный движок
+
+
+def test_default_backend_is_pure():
+    """По умолчанию проект использует SHA «с нуля»."""
+    assert hashing.backend() == "pure"
 
 
 def test_sha256_known_vector():

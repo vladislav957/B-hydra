@@ -105,6 +105,16 @@ print(blockchain.chain)
 
     from b_hydra import Blockchain, BHydraNode, Wallet, Transaction
 
+Хеширование: по умолчанию весь проект использует реализацию SHA-256/512
+«с нуля» (b_hydra/sha2.py, без hashlib). Она применяется на всех уровнях —
+майнинг, дерево Меркла, txid, адреса. Значения хешей идентичны hashlib, меняется
+только скорость (чистый Python заметно медленнее). Вернуть быстрый движок:
+
+    BHYDRA_PURE_SHA=0 python manig.py        # через окружение
+    # или в коде:
+    from b_hydra import hashing
+    hashing.use_pure_sha(False)
+
 Мобильный кошелёк (REST API) + веб-обозреватель блоков — узел отдаёт JSON по
 HTTP и страницу обозревателя; телефон подписывает транзакции локально
 (приватный ключ не покидает устройство):

@@ -21,8 +21,9 @@ import os
 
 from . import sha2
 
-# Движок по умолчанию: hashlib (быстрый). Можно переопределить окружением.
-_PURE = os.environ.get("BHYDRA_PURE_SHA", "0").lower() in ("1", "true", "yes", "on")
+# Движок по умолчанию: SHA «с нуля» (pure). Вернуть быстрый hashlib можно
+# переменной окружения BHYDRA_PURE_SHA=0 или вызовом use_pure_sha(False).
+_PURE = os.environ.get("BHYDRA_PURE_SHA", "1").lower() in ("1", "true", "yes", "on")
 
 
 def use_pure_sha(enabled: bool = True) -> None:
