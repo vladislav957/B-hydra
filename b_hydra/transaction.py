@@ -13,9 +13,10 @@ Transactinons.py — транзакции B-hydra по модели UTXO (вхо
 поскольку на него ссылаются другие модули проекта.
 """
 
-import hashlib
 import json
 import time
+
+from . import hashing
 
 # Псевдо-идентификатор «ниоткуда» для входа coinbase-транзакции.
 NULL_TXID = "0" * 128
@@ -98,7 +99,7 @@ class Transaction:
     @property
     def txid(self) -> str:
         """Идентификатор транзакции = SHA-512 от её содержимого."""
-        return hashlib.sha512(self.signing_payload()).hexdigest()
+        return hashing.sha512(self.signing_payload())
 
     def to_dict(self):
         return {

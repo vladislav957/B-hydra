@@ -5,11 +5,11 @@ Merkle_python.py — дерево Меркла B-hydra на двойном SHA-5
 меняет корень, а значит и хеш блока.
 """
 
-import hashlib
+from . import hashing
 
 
 def _sha512d(data: bytes) -> bytes:
-    return hashlib.sha512(hashlib.sha512(data).digest()).digest()
+    return hashing.double_sha512(data)
 
 
 def merkle_root(leaves) -> str:

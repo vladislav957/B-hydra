@@ -1,63 +1,90 @@
-"""Хеш-утилиты B-hydra поверх стандартной библиотеки.
+"""Хеш-утилиты B-hydra с переключаемым движком.
 
-Основной алгоритм сети — SHA-512; здесь собраны тонкие, типизированные обёртки,
-которыми пользуются остальные модули пакета. Реализация SHA-2 «с нуля» (без
-hashlib) находится в :mod:`b_hydra.sha2`.
+Все хеши в проекте проходят через этот модуль. Движок SHA-2 можно переключать:
+
+  * "hashlib"  — быстрая реализация из стандартной библиотеки (по умолчанию);
+  * "pure"     — реализация SHA-256/512 «с нуля» из :mod:`b_hydra.sha2`.
+
+Значения хешей у обоих движков ПОБИТОВО одинаковые, поэтому переключение не
+влияет на консенсус (блоки, адреса, txid) — меняется только скорость. Чистый
+Python в сотни раз медленнее, поэтому майнинг с движком "pure" будет медленным.
+
+Включить наш SHA «с нуля» можно:
+  * переменной окружения  BHYDRA_PURE_SHA=1
+  * или вызовом           hashing.use_pure_sha(True)
 """
 
 from __future__ import annotations
 
 import hashlib
+import os
 
-Data = "str | bytes"
+from . import sha2
+
+# Движок по умолчанию: hashlib (быстрый). Можно переопределить окружением.
+_PURE = os.environ.get("BHYDRA_PURE_SHA", "0").lower() in ("1", "true", "yes", "on")
+
+
+def use_pure_sha(enabled: bool = True) -> None:
+    """Включить (или выключить) SHA «с нуля» во всём проекте."""
+    global _PURE
+    _PURE = enabled
+
+
+def is_pure() -> bool:
+    """True, если используется реализация SHA «с нуля»."""
+    return _PURE
+
+
+def backend() -> str:
+    """Имя текущего движка: 'pure' или 'hashlib'."""
+    return "pure" if _PURE else "hashlib"
 
 
 def _to_bytes(data: "str | bytes") -> bytes:
     return data.encode("utf-8") if isinstance(data, str) else data
 
 
-def sha256(data: "str | bytes") -> str:
-    """SHA-256 в виде hex-строки."""
-    return hashlib.sha256(_to_bytes(data)).hexdigest()
-
-
+# --- SHA-256 -----------------------------------------------------------------
 def sha256_bytes(data: "str | bytes") -> bytes:
-    """SHA-256 в виде сырых байтов."""
-    return hashlib.sha256(_to_bytes(data)).digest()
+    raw = _to_bytes(data)
+    return sha2.sha256_bytes(raw) if _PURE else hashlib.sha256(raw).digest()
+
+
+def sha256(data: "str | bytes") -> str:
+    return sha256_bytes(data).hex()
 
 
 def double_sha256(data: "str | bytes") -> bytes:
-    """Двойной SHA-256."""
-    return hashlib.sha256(hashlib.sha256(_to_bytes(data)).digest()).digest()
+    return sha256_bytes(sha256_bytes(data))
+
+
+# --- SHA-512 -----------------------------------------------------------------
+def sha512_bytes(data: "str | bytes") -> bytes:
+    raw = _to_bytes(data)
+    return sha2.sha512_bytes(raw) if _PURE else hashlib.sha512(raw).digest()
 
 
 def sha512(data: "str | bytes") -> str:
-    """SHA-512 в виде hex-строки."""
-    return hashlib.sha512(_to_bytes(data)).hexdigest()
-
-
-def sha512_bytes(data: "str | bytes") -> bytes:
-    """SHA-512 в виде сырых байтов."""
-    return hashlib.sha512(_to_bytes(data)).digest()
+    return sha512_bytes(data).hex()
 
 
 def double_sha512(data: "str | bytes") -> bytes:
-    """Двойной SHA-512 (используется в дереве Меркла)."""
-    return hashlib.sha512(hashlib.sha512(_to_bytes(data)).digest()).digest()
+    return sha512_bytes(sha512_bytes(data))
 
 
+# --- RIPEMD-160 (не SHA; всегда из hashlib, с откатом) -----------------------
 def ripemd160(data: "str | bytes") -> bytes:
-    """RIPEMD-160 с откатом на усечённый SHA-256, если алгоритм недоступен."""
     raw = _to_bytes(data)
     try:
         digest = hashlib.new("ripemd160")
         digest.update(raw)
         return digest.digest()
     except (ValueError, TypeError):
-        # Некоторые сборки OpenSSL не содержат ripemd160.
-        return hashlib.sha256(raw).digest()[:20]
+        return sha256_bytes(raw)[:20]
 
 
 if __name__ == "__main__":
+    print("движок:", backend())
     print("sha256('B-hydra') =", sha256("B-hydra"))
     print("sha512('B-hydra') =", sha512("B-hydra"))

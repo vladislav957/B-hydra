@@ -12,6 +12,8 @@ wallet.py — кошелёк B-hydra с ECDSA-подписями на криво
 import hashlib
 import secrets
 
+from . import hashing
+
 # --- Параметры кривой secp256k1 ---------------------------------------------
 _P = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F
 _N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
@@ -58,7 +60,7 @@ def _scalar_mult(k, point):
 
 def _hash_to_int(payload: bytes) -> int:
     """SHA-512 сообщения -> целое, усечённое до битности порядка N."""
-    digest = hashlib.sha512(payload).digest()
+    digest = hashing.sha512_bytes(payload)
     z = int.from_bytes(digest, "big")
     shift = len(digest) * 8 - _N.bit_length()
     if shift > 0:
@@ -83,13 +85,13 @@ def _ripemd160(data: bytes) -> bytes:
         h.update(data)
         return h.digest()
     except (ValueError, TypeError):
-        return hashlib.sha256(data).digest()[:20]
+        return hashing.sha256_bytes(data)[:20]
 
 
 def address_from_public_key_bytes(pub_bytes: bytes) -> str:
     """Адрес B-hydra из несжатого публичного ключа (байты)."""
-    payload = b"\x1f" + _ripemd160(hashlib.sha512(pub_bytes).digest())
-    checksum = hashlib.sha512(hashlib.sha512(payload).digest()).digest()[:4]
+    payload = b"\x1f" + _ripemd160(hashing.sha512_bytes(pub_bytes))
+    checksum = hashing.double_sha512(payload)[:4]
     return "BHY" + _b58encode(payload + checksum)
 
 

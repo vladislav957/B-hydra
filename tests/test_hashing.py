@@ -1,7 +1,22 @@
 """Тесты хеширования: SHA-256/512, дерево Меркла, hashcash."""
 
+import hashlib
+
 from b_hydra import hashcash, hashing
 from b_hydra.merkle import MerkleTree, merkle_root
+
+
+def test_pure_backend_matches_hashlib():
+    """Движок 'pure' (SHA с нуля) даёт те же хеши, что и hashlib."""
+    try:
+        hashing.use_pure_sha(True)
+        assert hashing.backend() == "pure"
+        for data in (b"", b"abc", b"B-hydra block header", b"x" * 200):
+            assert hashing.sha256(data) == hashlib.sha256(data).hexdigest()
+            assert hashing.sha512(data) == hashlib.sha512(data).hexdigest()
+    finally:
+        hashing.use_pure_sha(False)  # вернуть быстрый движок по умолчанию
+    assert hashing.backend() == "hashlib"
 
 
 def test_sha256_known_vector():

@@ -6,8 +6,9 @@ hashcash.py — proof-of-work по схеме Hashcash на SHA-512.
 а здесь — общий механизм доказательства работы.
 """
 
-import hashlib
 import time
+
+from . import hashing
 
 
 def _leading_zero_bits(digest: bytes) -> int:
@@ -35,7 +36,7 @@ def mint(resource: str, bits: int = 20):
     start = time.time()
     while True:
         stamp = f"{prefix}{nonce}"
-        digest = hashlib.sha512(stamp.encode("utf-8")).digest()
+        digest = hashing.sha512_bytes(stamp)
         if _leading_zero_bits(digest) >= bits:
             return nonce, stamp, digest.hex()
         nonce += 1
@@ -54,7 +55,7 @@ def check(stamp: str, bits: int = 20, resource: str = None) -> bool:
         return False
     if int(claimed_bits) < bits:
         return False
-    digest = hashlib.sha512(stamp.encode("utf-8")).digest()
+    digest = hashing.sha512_bytes(stamp)
     return _leading_zero_bits(digest) >= bits
 
 
@@ -67,7 +68,7 @@ def proof_of_work(data: str, difficulty: int = 4):
     target = "0" * difficulty
     nonce = 0
     while True:
-        digest = hashlib.sha512(f"{data}{nonce}".encode("utf-8")).hexdigest()
+        digest = hashing.sha512(f"{data}{nonce}")
         if digest.startswith(target):
             return nonce, digest
         nonce += 1
