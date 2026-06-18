@@ -119,7 +119,8 @@ def test_block_endpoint(server):
     _post(server, "/api/mine", {"miner": w.address})
     block = json.loads(_get(server, "/api/block/1"))
     assert block["index"] == 1
-    assert block["hash"].startswith("0" * block["difficulty"])  # PoW выполнен
+    # PoW выполнен: хеш (как число) не больше target.
+    assert int(block["hash"], 16) <= int(block["target"], 16)
 
 
 def test_block_not_found(server):

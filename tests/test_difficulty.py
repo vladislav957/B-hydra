@@ -1,35 +1,51 @@
-"""Тесты динамической сложности: чем больше участников, тем сложнее."""
+"""Тесты пропорциональной сложности: чем больше майнеров, тем труднее блок."""
 
-from b_hydra.blockchain import difficulty_for_participants
+from b_hydra.blockchain import Blockchain, _HASH_SPACE
 from b_hydra.node import BHydraNode
 from b_hydra.wallet import generate_wallet
 
 
-def test_difficulty_grows_with_participants():
-    assert difficulty_for_participants(0, base=3) == 3
-    assert difficulty_for_participants(1, base=3) == 3
-    assert difficulty_for_participants(2, base=3) == 4
-    assert difficulty_for_participants(4, base=3) == 5
-
-
-def test_difficulty_capped():
-    assert difficulty_for_participants(10_000, base=3, cap=6) == 6
-
-
-def test_more_miners_increase_block_difficulty():
+def test_work_is_proportional_to_miner_count():
+    """Требуемая работа растёт линейно с числом разных майнеров."""
     node = BHydraNode(difficulty=2)
-    for miner in (generate_wallet() for _ in range(4)):
-        node.mine_pending(miner.address)
-    diffs = [b.difficulty for b in node.blockchain.chain]
-    # С появлением новых майнеров сложность поздних блоков выросла.
-    assert diffs[-1] > diffs[1]
+    base_target = node.blockchain.genesis_target
+    base_work = _HASH_SPACE // base_target
+
+    works = []
+    for _ in range(5):                       # каждый блок — новый майнер
+        node.mine_pending(generate_wallet().address)
+        target = node.blockchain.expected_target(node.height)
+        works.append(_HASH_SPACE // target)
+
+    # 1 майнер → base, 2 → 2×, 3 → 3× … строго пропорционально.
+    assert works[0] == base_work             # 1 майнер
+    assert works[1] == 2 * base_work          # 2 майнера
+    assert works[2] == 3 * base_work          # 3 майнера
+    assert works[-1] > works[0]               # больше майнеров — труднее
+
+
+def test_fewer_miners_is_easier():
+    """Меньше майнеров — проще (больше target = меньше работы)."""
+    node = BHydraNode(difficulty=2)
+    one = node.blockchain.genesis_target                    # 1 майнер (база)
+    node.mine_pending(generate_wallet().address)
+    node.mine_pending(generate_wallet().address)
+    two = node.blockchain.expected_target(node.height)      # 2 майнера
+    assert two < one                                        # target меньше → труднее
+
+
+def test_single_miner_stays_at_base():
+    node = BHydraNode(difficulty=2)
+    alice = generate_wallet()
+    for _ in range(3):
+        node.mine_pending(alice.address)     # один и тот же майнер
+    base = node.blockchain.genesis_target
+    assert all(b.target == base for b in node.blockchain.chain)
     assert node.is_valid()
 
 
-def test_single_participant_keeps_base_difficulty():
+def test_chain_with_many_miners_is_valid():
     node = BHydraNode(difficulty=2)
-    alice = generate_wallet()
-    node.mine_pending(alice.address)
-    node.mine_pending(alice.address)     # тот же майнер — участник один
-    assert all(b.difficulty == 2 for b in node.blockchain.chain)
+    for _ in range(5):
+        node.mine_pending(generate_wallet().address)
     assert node.is_valid()

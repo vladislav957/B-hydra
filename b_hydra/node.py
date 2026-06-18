@@ -315,9 +315,9 @@ class BHydraNode:
             return False
         if block.hash != block.calculate_hash():
             return False
-        if block.difficulty != self.blockchain.expected_difficulty(block.index):
+        if block.target != self.blockchain.expected_target(block.index):
             return False
-        if not block.hash.startswith("0" * block.difficulty):
+        if int(block.hash, 16) > block.target:
             return False
         # Проверка транзакций против текущего набора UTXO.
         if not self._validate_block_transactions(block, block.index, self.utxo_set()):

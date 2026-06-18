@@ -18,7 +18,7 @@ def _mine(blockchain, data):
     """Создаёт и майнит блок поверх цепочки (для конструирования атак)."""
     height = len(blockchain.chain)
     block = Block(index=height, previous_hash=blockchain.last_block.hash,
-                  data=data, difficulty=blockchain.expected_difficulty(height))
+                  data=data, target=blockchain.expected_target(height))
     block.mine_block()
     blockchain.chain.append(block)
     return block
@@ -41,7 +41,7 @@ def test_receive_block_rejects_inflated_coinbase():
     fake = coinbase(generate_wallet().address, 999, height=1)   # награда 50, а тут 999
     block = Block(index=1, previous_hash=node.blockchain.last_block.hash,
                   data=[fake.to_dict()],
-                  difficulty=node.blockchain.expected_difficulty(1))
+                  target=node.blockchain.expected_target(1))
     block.mine_block()
     assert node.receive_block(block.to_dict()) is False
 
@@ -94,7 +94,7 @@ def test_receive_block_rejects_future_timestamp():
     cb = coinbase(generate_wallet().address, 50, height=1)
     block = Block(index=1, previous_hash=node.blockchain.last_block.hash,
                   data=[cb.to_dict()], timestamp=time.time() + 10 * 3600,
-                  difficulty=node.blockchain.expected_difficulty(1))
+                  target=node.blockchain.expected_target(1))
     block.mine_block()
     assert node.receive_block(block.to_dict()) is False     # из будущего
 
@@ -105,12 +105,12 @@ def test_replace_chain_rejects_time_travel():
     now = time.time()
     cb1 = coinbase(generate_wallet().address, 50, height=1)
     b1 = Block(1, attacker.blockchain.last_block.hash, [cb1.to_dict()],
-               timestamp=now, difficulty=attacker.blockchain.expected_difficulty(1))
+               timestamp=now, target=attacker.blockchain.expected_target(1))
     b1.mine_block()
     attacker.blockchain.chain.append(b1)
     cb2 = coinbase(generate_wallet().address, 50, height=2)
     b2 = Block(2, b1.hash, [cb2.to_dict()], timestamp=now - 3600,  # время назад
-               difficulty=attacker.blockchain.expected_difficulty(2))
+               target=attacker.blockchain.expected_target(2))
     b2.mine_block()
     attacker.blockchain.chain.append(b2)
     assert attacker.blockchain.is_chain_valid() is False
@@ -125,7 +125,7 @@ def test_block_rejects_duplicate_transaction():
     cb = coinbase(generate_wallet().address, 50, height=node.height)
     data = [cb.to_dict(), spend.to_dict(), spend.to_dict()]   # дубль транзакции
     block = Block(node.height, node.blockchain.last_block.hash, data,
-                  difficulty=node.blockchain.expected_difficulty(node.height))
+                  target=node.blockchain.expected_target(node.height))
     block.mine_block()
     assert node.receive_block(block.to_dict()) is False
 

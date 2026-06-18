@@ -93,8 +93,8 @@ async function loadStats() {
   const i = await api('/api/info');
   $('stats').innerHTML = `
     <div class="stat"><b>${esc(i.height)}</b>блоков</div>
-    <div class="stat"><b>${esc(i.participants)}</b>участников</div>
     <div class="stat"><b>${esc(i.difficulty)}</b>сложность</div>
+    <div class="stat"><b>${esc(Number(i.block_work).toLocaleString())}</b>работа (хешей)</div>
     <div class="stat"><b>${esc(i.next_block_reward)}</b>награда BHY</div>
     <div class="stat"><b>${esc(i.hash_algorithm)}</b>${esc(i.model)}</div>`;
 }
@@ -154,7 +154,7 @@ async function showBlock(index) {
     <div class="row"><span>merkle root</span><span class="mono">${esc(short(b.merkle_root,16))}</span></div>
     <div class="row"><span>сложность</span><span>${esc(b.difficulty)} (хеш с ${esc(b.difficulty)} нулями)</span></div>
     <div class="row"><span>nonce</span><span>${esc(b.nonce)}</span></div>
-    <div class="row"><span>работа</span><span>перебрано ≈ ${esc((Number(b.nonce) + 1).toLocaleString())} хешей</span></div>
+    <div class="row"><span>работа</span><span>перебрано ${esc((Number(b.nonce) + 1).toLocaleString())} хешей (ожидаемо ~${esc(Number(b.work).toLocaleString())})</span></div>
     <div class="row"><span>время</span><span>${esc(date(b.timestamp))}</span></div>
   </div>${txs}`;
   window.scrollTo(0,0);

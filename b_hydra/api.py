@@ -124,13 +124,14 @@ class BHydraAPI(BaseHTTPRequestHandler):
 
             if parts == ["api", "info"]:
                 from .economics import mining_end_year
+                from .blockchain import TARGET_BLOCK_TIME
                 bc = self.node.blockchain
                 self._send(200, {
                     "network": "B-hydra",
                     "height": len(bc.chain),
-                    "base_difficulty": bc.difficulty,
-                    "difficulty": bc.expected_difficulty(len(bc.chain)),
-                    "participants": len(bc.distinct_miners()),
+                    "difficulty": bc.last_block.difficulty,
+                    "block_work": bc.last_block.work,
+                    "target_block_time_min": round(TARGET_BLOCK_TIME / 60, 1),
                     "next_block_reward": bc.block_reward(len(bc.chain)),
                     "max_supply": MAX_SUPPLY,
                     "mining_end_year": round(mining_end_year()),
