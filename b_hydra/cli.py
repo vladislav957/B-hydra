@@ -82,6 +82,29 @@ def cmd_balance(args):
     print(f"Баланс {args.address}: {node.get_balance(args.address):.4f} BHY")
 
 
+def cmd_address(args):
+    node = _load_or_init(args.file)
+    addr = args.address
+    utxos = node.find_spendable(addr)
+    history = node.address_history(addr)
+    print(f"Адрес: {addr}")
+    print(f"  Баланс            : {node.get_balance(addr):.4f} BHY")
+    print(f"  Непотрачено (UTXO): {len(utxos)} шт.")
+    if utxos:
+        shown = ", ".join(f"{amount} BHY" for _, amount in utxos[:5])
+        more = f" … (+{len(utxos) - 5})" if len(utxos) > 5 else ""
+        print(f"    {shown}{more}")
+    received = sum(h["received"] for h in history)
+    sent = sum(h["sent"] for h in history)
+    print(f"  История           : {len(history)} операций "
+          f"(получено {received:.1f}, потрачено {sent:.1f} BHY)")
+    for h in list(reversed(history))[: args.limit]:
+        rec = f"+{h['received']:.1f}" if h["received"] else ""
+        snt = f"-{h['sent']:.1f}" if h["sent"] else ""
+        print(f"    блок #{h['block_index']:<5} {rec:>9} {snt:>10}  "
+              f"tx {h['txid'][:16]}…")
+
+
 def cmd_chain(args):
     node = _load_or_init(args.file)
     for block in node.blockchain.chain:
@@ -120,6 +143,11 @@ def build_parser():
     p_bal = sub.add_parser("balance", help="баланс адреса")
     p_bal.add_argument("address")
     p_bal.set_defaults(func=cmd_balance)
+
+    p_addr = sub.add_parser("address", help="что внутри адреса: баланс, UTXO, история")
+    p_addr.add_argument("address")
+    p_addr.add_argument("--limit", type=int, default=8, help="сколько операций показать")
+    p_addr.set_defaults(func=cmd_address)
 
     sub.add_parser("chain", help="показать цепочку").set_defaults(func=cmd_chain)
     return parser
