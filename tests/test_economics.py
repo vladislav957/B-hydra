@@ -1,11 +1,8 @@
 """Тесты экономики: награда за блок, халвинг, потолок эмиссии."""
 
-from b_hydra.blockchain import (
-    GENESIS_YEAR, HALVING_INTERVAL, HALVING_YEARS, MAX_SUPPLY,
-)
+from b_hydra.blockchain import HALVING_INTERVAL, MAX_SUPPLY, TARGET_END_YEAR
 from b_hydra.economics import (
-    block_reward, blocks_per_year, emission_schedule, mining_end_year,
-    total_supply_after,
+    block_reward, emission_schedule, mining_end_year, total_supply_after,
 )
 
 
@@ -31,17 +28,12 @@ def test_supply_capped():
     assert total_supply_after(10 ** 9) <= MAX_SUPPLY
 
 
-def test_halving_happens_every_4_years():
-    # Награда строго 50, и каждые HALVING_YEARS лет делится пополам.
-    assert block_reward(0) == 50.0
-    # HALVING_INTERVAL блоков добываются ровно за HALVING_YEARS лет.
-    assert round(blocks_per_year() * HALVING_YEARS) == HALVING_INTERVAL
-    # …и на этой высоте награда падает с 50 до 25.
+def test_reward_halves_at_interval():
+    # Награда строго 50 и делится пополам на границе интервала халвинга.
     assert block_reward(HALVING_INTERVAL - 1) == 50.0
     assert block_reward(HALVING_INTERVAL) == 25.0
 
 
-def test_mining_ends_after_finite_time():
-    # Выпуск монет конечен (как у Bitcoin) — заканчивается в обозримом будущем.
-    assert mining_end_year() > GENESIS_YEAR
-    assert mining_end_year() < 3000
+def test_mining_ends_around_target_year():
+    # Майнеры получают награду примерно до TARGET_END_YEAR (~3000).
+    assert round(mining_end_year()) == TARGET_END_YEAR == 3000
