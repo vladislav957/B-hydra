@@ -15,10 +15,19 @@ gui.py — десктоп-приложение B-hydra (tkinter).
 
 from __future__ import annotations
 
+import os
 import queue
+import sys
 import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
+
+
+def _asset(name: str) -> str:
+    """Путь к ресурсу (работает и из исходников, и из сборки PyInstaller)."""
+    base = getattr(sys, "_MEIPASS",
+                   os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    return os.path.join(base, "assets", name)
 
 from . import __version__, hashing
 from .node import BHydraNode
@@ -36,6 +45,9 @@ class BHydraApp(tk.Tk):
         super().__init__()
         self.title("B-hydra — кошелёк · майнинг · сеть")
         self.geometry("680x560")
+        self._set_icon()
+        self._text_widgets: list[tk.Text] = []
+        self._dark = tk.BooleanVar(value=False)
 
         # --- Состояние ---
         import os
@@ -70,8 +82,12 @@ class BHydraApp(tk.Tk):
         except tk.TclError:
             pass
 
-        # Меню «Справка → О программе».
+        # Меню «Вид» (тёмная тема) и «Справка».
         menubar = tk.Menu(self)
+        viewm = tk.Menu(menubar, tearoff=0)
+        viewm.add_checkbutton(label="Тёмная тема", variable=self._dark,
+                              command=self._toggle_theme)
+        menubar.add_cascade(label="Вид", menu=viewm)
         helpm = tk.Menu(menubar, tearoff=0)
         helpm.add_command(label="О программе", command=self._about)
         menubar.add_cascade(label="Справка", menu=helpm)
@@ -89,6 +105,7 @@ class BHydraApp(tk.Tk):
         self._build_mining_tab(nb)
         self._build_network_tab(nb)
         self._build_blocks_tab(nb)
+        self._text_widgets = [self.mine_log, self.net_log, self.block_details]
 
     def _build_wallet_tab(self, nb: ttk.Notebook) -> None:
         tab = ttk.Frame(nb, padding=12)
@@ -452,6 +469,36 @@ class BHydraApp(tk.Tk):
         widget.insert("end", text + "\n")
         widget.see("end")
         widget.config(state="disabled")
+
+    def _set_icon(self) -> None:
+        """Ставит иконку окна (best-effort: если ресурса нет — пропускаем)."""
+        try:
+            self._icon_img = tk.PhotoImage(file=_asset("bhydra.png"))
+            self.iconphoto(True, self._icon_img)
+        except tk.TclError:
+            pass
+
+    def _toggle_theme(self) -> None:
+        self._apply_theme(self._dark.get())
+
+    def _apply_theme(self, dark: bool) -> None:
+        style = ttk.Style(self)
+        if dark:
+            bg, fg, field = "#1e1e1e", "#e6edf3", "#2a2a2a"
+        else:
+            bg, fg, field = "#f0f0f0", "#000000", "#ffffff"
+        self.configure(bg=bg)
+        for elem in (".", "TFrame", "TLabel", "TNotebook",
+                     "TLabelframe", "TLabelframe.Label"):
+            style.configure(elem, background=bg, foreground=fg)
+        style.configure("TButton", background=field, foreground=fg)
+        style.configure("TNotebook.Tab", background=field, foreground=fg)
+        style.configure("TEntry", fieldbackground=field, foreground=fg)
+        style.configure("Treeview", background=field, foreground=fg,
+                        fieldbackground=field)
+        style.configure("Treeview.Heading", background=bg, foreground=fg)
+        for widget in self._text_widgets:
+            widget.configure(bg=field, fg=fg, insertbackground=fg)
 
     def _about(self) -> None:
         messagebox.showinfo(
