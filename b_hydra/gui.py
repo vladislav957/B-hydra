@@ -59,9 +59,17 @@ class BHydraApp(tk.Tk):
         self._refresh_status()
         self._refresh_blocks()
         self.after(150, self._poll_queue)        # опрос событий из воркера
+        self.after(3000, self._auto_refresh)     # авто-обновление баланса/статуса
 
     # --- Интерфейс -------------------------------------------------------
     def _build_ui(self) -> None:
+        # Тема оформления (clam — аккуратнее и одинаково на всех ОС).
+        style = ttk.Style(self)
+        try:
+            style.theme_use("clam")
+        except tk.TclError:
+            pass
+
         # Верхняя строка статуса.
         self.status = tk.StringVar()
         bar = ttk.Label(self, textvariable=self.status, relief="sunken",
@@ -185,6 +193,8 @@ class BHydraApp(tk.Tk):
         top = ttk.Frame(tab)
         top.pack(fill="x")
         ttk.Button(top, text="Обновить", command=self._refresh_blocks).pack(side="left")
+        ttk.Button(top, text="Экспорт цепочки…",
+                   command=self._export_chain).pack(side="left", padx=6)
         self.blocks_info = tk.StringVar()
         ttk.Label(top, textvariable=self.blocks_info).pack(side="left", padx=10)
 
@@ -435,6 +445,25 @@ class BHydraApp(tk.Tk):
         widget.insert("end", text + "\n")
         widget.see("end")
         widget.config(state="disabled")
+
+    def _auto_refresh(self) -> None:
+        """Периодически обновляет баланс и статус (раз в 3 сек), кроме майнинга."""
+        if not self._mining:
+            self._refresh_status()
+        self.after(3000, self._auto_refresh)
+
+    def _export_chain(self) -> None:
+        path = filedialog.asksaveasfilename(
+            defaultextension=".json", initialfile="bhydra_chain_export.json",
+            filetypes=[("Цепочка B-hydra", "*.json"), ("Все файлы", "*.*")])
+        if not path:
+            return
+        try:
+            self.node.save(path)
+            messagebox.showinfo("Экспорт",
+                                f"Цепочка ({self.node.height} блоков) сохранена в:\n{path}")
+        except OSError as exc:
+            messagebox.showerror("Ошибка", str(exc))
 
     def _refresh_status(self) -> None:
         if self.wallet is not None:
