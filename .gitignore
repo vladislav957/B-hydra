@@ -7,6 +7,7 @@ venv/
 .pytest_cache/
 
 # Состояние блокчейна B-hydra (генерируется при работе CLI)
+wallet.key
 bhydra_chain.json
 qrcode.png
 
