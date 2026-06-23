@@ -15,6 +15,7 @@ gui.py — десктоп-приложение B-hydra (tkinter).
 
 from __future__ import annotations
 
+import queue
 import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -43,6 +44,10 @@ class BHydraApp(tk.Tk):
         self.wallet: Wallet | None = None
         self.p2p: P2PNode | None = None
         self._mining = False
+        # Очередь «фоновый поток → главный поток»: tkinter нельзя трогать из
+        # чужого потока, поэтому воркер кладёт события сюда, а главный поток
+        # забирает их в _poll_queue.
+        self._queue: queue.Queue = queue.Queue()
         if os.path.exists(WALLET_FILE):
             try:
                 self.wallet = Wallet.from_private_hex(
@@ -53,6 +58,7 @@ class BHydraApp(tk.Tk):
         self._build_ui()
         self._refresh_status()
         self._refresh_blocks()
+        self.after(150, self._poll_queue)        # опрос событий из воркера
 
     # --- Интерфейс -------------------------------------------------------
     def _build_ui(self) -> None:
@@ -136,7 +142,12 @@ class BHydraApp(tk.Tk):
         self.mine_info = tk.StringVar()
         ttk.Label(tab, textvariable=self.mine_info).pack(anchor="w", pady=6)
 
-        self.mine_log = tk.Text(tab, height=16, state="disabled")
+        self.mine_status = tk.StringVar()
+        ttk.Label(tab, textvariable=self.mine_status).pack(anchor="w")
+        self.progress = ttk.Progressbar(tab, mode="determinate")
+        self.progress.pack(fill="x", pady=4)
+
+        self.mine_log = tk.Text(tab, height=14, state="disabled")
         self.mine_log.pack(fill="both", expand=True)
 
     def _build_network_tab(self, nb: ttk.Notebook) -> None:
@@ -177,6 +188,16 @@ class BHydraApp(tk.Tk):
         self.blocks_info = tk.StringVar()
         ttk.Label(top, textvariable=self.blocks_info).pack(side="left", padx=10)
 
+        # Поиск по высоте / адресу (BHY…) / txid — как в кошельке Bitcoin.
+        srow = ttk.Frame(tab)
+        srow.pack(fill="x", pady=(4, 0))
+        ttk.Label(srow, text="Поиск:").pack(side="left")
+        self.search_var = tk.StringVar()
+        ent = ttk.Entry(srow, textvariable=self.search_var)
+        ent.pack(side="left", fill="x", expand=True, padx=4)
+        ent.bind("<Return>", lambda _e: self._search())
+        ttk.Button(srow, text="Найти", command=self._search).pack(side="left")
+
         cols = ("idx", "tx", "miner", "hash")
         self.blocks_tree = ttk.Treeview(tab, columns=cols, show="headings", height=12)
         for col, title, width in (("idx", "№", 50), ("tx", "tx", 40),
@@ -201,6 +222,36 @@ class BHydraApp(tk.Tk):
                         block.hash[:40] + "…"))
         self.blocks_info.set(f"всего блоков: {self.node.height} | "
                              f"эмиссия: {self.node.blockchain.total_supply:.0f} BHY")
+
+    def _search(self) -> None:
+        q = self.search_var.get().strip()
+        if not q:
+            return
+        if q.isdigit():                                   # высота блока
+            iid = str(int(q))
+            if self.blocks_tree.exists(iid):
+                self.blocks_tree.selection_set(iid)
+                self.blocks_tree.see(iid)
+                self._show_block_details()
+            else:
+                messagebox.showinfo("Поиск", f"Блока #{q} нет в цепочке.")
+        elif q.startswith("BHY"):                         # адрес
+            bal = self.node.get_balance(q)
+            hist = self.node.address_history(q)
+            messagebox.showinfo(
+                "Адрес", f"{q}\n\nБаланс: {bal:.4f} BHY\n"
+                         f"Операций в истории: {len(hist)}")
+        else:                                             # txid
+            found = self.node.find_transaction(q)
+            if found:
+                tx = found["transaction"]
+                outs = "\n".join(f"  {o['amount']} BHY → {o['address'][:24]}…"
+                                 for o in tx["vout"])
+                messagebox.showinfo(
+                    "Транзакция", f"txid {q[:24]}…\nв блоке #{found['block_index']}"
+                                  f"\n\nвыходы:\n{outs}")
+            else:
+                messagebox.showinfo("Поиск", "Транзакция с таким txid не найдена.")
 
     def _show_block_details(self, _event=None) -> None:
         sel = self.blocks_tree.selection()
@@ -303,26 +354,43 @@ class BHydraApp(tk.Tk):
             return messagebox.showerror("Ошибка", "Неверное число блоков.")
         self._mining = True
         self.mine_btn.config(state="disabled")
+        self.progress.config(maximum=count, value=0)
+        self.mine_status.set(f"Майнинг… 0/{count}")
         threading.Thread(target=self._mine_worker, args=(count,),
                          daemon=True).start()
 
     def _mine_worker(self, count: int) -> None:
-        for _ in range(count):
+        # Только майнинг и запись в очередь — НИКАКИХ обращений к tkinter.
+        for i in range(count):
             if self.p2p and self.p2p._running:
                 block = self.p2p.mine(self.wallet.address)   # майнит + рассылает
             else:
                 block = self.node.mine_pending(self.wallet.address)
-            self.after(0, self._log, self.mine_log,
-                       f"⛏ блок #{block.index} | перебрано "
-                       f"{block.mining_attempts} хешей | nonce {block.nonce}")
+            self._queue.put(("block", i + 1, count, block.index,
+                             block.mining_attempts, block.nonce))
         self.node.save(STATE_FILE)
-        self.after(0, self._mine_done)
+        self._queue.put(("done", count))
 
-    def _mine_done(self) -> None:
-        self._mining = False
-        self.mine_btn.config(state="normal")
-        self._refresh_status()
-        self._refresh_blocks()
+    def _poll_queue(self) -> None:
+        """Главный поток: забирает события воркера и обновляет интерфейс."""
+        try:
+            while True:
+                msg = self._queue.get_nowait()
+                if msg[0] == "block":
+                    _, done, total, idx, attempts, nonce = msg
+                    self.progress.config(value=done)
+                    self.mine_status.set(f"Майнинг… {done}/{total}")
+                    self._log(self.mine_log, f"⛏ блок #{idx} | перебрано "
+                                             f"{attempts} хешей | nonce {nonce}")
+                elif msg[0] == "done":
+                    self._mining = False
+                    self.mine_btn.config(state="normal")
+                    self.mine_status.set(f"Готово ✓ намайнено {msg[1]} блоков")
+                    self._refresh_status()
+                    self._refresh_blocks()
+        except queue.Empty:
+            pass
+        self.after(150, self._poll_queue)
 
     # --- Логика: сеть ----------------------------------------------------
     def _toggle_node(self) -> None:
