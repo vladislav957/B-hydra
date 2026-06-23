@@ -28,3 +28,8 @@ CppProperties.json
 # Прочее
 *.gch
 *.log
+
+# Сборка исполняемых файлов (PyInstaller)
+build/
+dist/
+*.spec

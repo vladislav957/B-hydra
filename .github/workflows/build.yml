@@ -1,0 +1,45 @@
+name: build
+
+on:
+  workflow_dispatch:          # запуск вручную из вкладки Actions
+  push:
+    tags: ["v*"]              # и при пуше тега версии (v1.0.0 и т.п.)
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: bhydra-windows
+            binary: dist/bhydra.exe
+          - os: macos-latest
+            artifact: bhydra-macos
+            binary: dist/bhydra
+          - os: ubuntu-latest
+            artifact: bhydra-linux
+            binary: dist/bhydra
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install tkinter (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y python3-tk
+
+      - name: Install PyInstaller
+        run: pip install pyinstaller
+
+      - name: Build executable
+        run: pyinstaller --onefile --windowed --name bhydra bhydra_gui.py
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.binary }}
+          if-no-files-found: error

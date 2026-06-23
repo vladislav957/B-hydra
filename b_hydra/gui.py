@@ -20,7 +20,7 @@ import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-from . import hashing
+from . import __version__, hashing
 from .node import BHydraNode
 from .p2p import P2PNode
 from .wallet import Wallet, generate_wallet, is_valid_address
@@ -69,6 +69,13 @@ class BHydraApp(tk.Tk):
             style.theme_use("clam")
         except tk.TclError:
             pass
+
+        # Меню «Справка → О программе».
+        menubar = tk.Menu(self)
+        helpm = tk.Menu(menubar, tearoff=0)
+        helpm.add_command(label="О программе", command=self._about)
+        menubar.add_cascade(label="Справка", menu=helpm)
+        self.config(menu=menubar)
 
         # Верхняя строка статуса.
         self.status = tk.StringVar()
@@ -445,6 +452,15 @@ class BHydraApp(tk.Tk):
         widget.insert("end", text + "\n")
         widget.see("end")
         widget.config(state="disabled")
+
+    def _about(self) -> None:
+        messagebox.showinfo(
+            "О программе",
+            f"B-hydra v{__version__}\n\n"
+            "Одноранговая электронная денежная система (P2P).\n"
+            "Кошелёк · майнинг · сеть в одном приложении.\n\n"
+            "Криптография: SHA-2 (SHA-256/512) собственной реализации,\n"
+            "подписи ECDSA secp256k1, модель UTXO, Proof-of-Work.")
 
     def _auto_refresh(self) -> None:
         """Периодически обновляет баланс и статус (раз в 3 сек), кроме майнинга."""
