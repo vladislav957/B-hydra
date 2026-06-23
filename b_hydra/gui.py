@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import threading
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
 
 from . import hashing
 from .node import BHydraNode
@@ -52,6 +52,7 @@ class BHydraApp(tk.Tk):
 
         self._build_ui()
         self._refresh_status()
+        self._refresh_blocks()
 
     # --- Интерфейс -------------------------------------------------------
     def _build_ui(self) -> None:
@@ -66,6 +67,7 @@ class BHydraApp(tk.Tk):
         self._build_wallet_tab(nb)
         self._build_mining_tab(nb)
         self._build_network_tab(nb)
+        self._build_blocks_tab(nb)
 
     def _build_wallet_tab(self, nb: ttk.Notebook) -> None:
         tab = ttk.Frame(nb, padding=12)
@@ -77,6 +79,10 @@ class BHydraApp(tk.Tk):
                    command=self._new_wallet).pack(side="left")
         ttk.Button(btns, text="Обновить баланс",
                    command=self._refresh_status).pack(side="left", padx=6)
+        ttk.Button(btns, text="Сохранить в файл…",
+                   command=self._save_wallet_as).pack(side="left")
+        ttk.Button(btns, text="Загрузить из файла…",
+                   command=self._load_wallet_from).pack(side="left", padx=6)
 
         self.addr_var = tk.StringVar()
         self.priv_var = tk.StringVar()
@@ -161,7 +167,91 @@ class BHydraApp(tk.Tk):
         self.net_log = tk.Text(tab, height=16, state="disabled")
         self.net_log.pack(fill="both", expand=True)
 
+    def _build_blocks_tab(self, nb: ttk.Notebook) -> None:
+        tab = ttk.Frame(nb, padding=12)
+        nb.add(tab, text="🔍 Блоки")
+
+        top = ttk.Frame(tab)
+        top.pack(fill="x")
+        ttk.Button(top, text="Обновить", command=self._refresh_blocks).pack(side="left")
+        self.blocks_info = tk.StringVar()
+        ttk.Label(top, textvariable=self.blocks_info).pack(side="left", padx=10)
+
+        cols = ("idx", "tx", "miner", "hash")
+        self.blocks_tree = ttk.Treeview(tab, columns=cols, show="headings", height=12)
+        for col, title, width in (("idx", "№", 50), ("tx", "tx", 40),
+                                  ("miner", "майнер", 220), ("hash", "hash", 280)):
+            self.blocks_tree.heading(col, text=title)
+            self.blocks_tree.column(col, width=width, anchor="w")
+        self.blocks_tree.pack(fill="both", expand=True, pady=6)
+        self.blocks_tree.bind("<<TreeviewSelect>>", self._show_block_details)
+
+        self.block_details = tk.Text(tab, height=8, state="disabled")
+        self.block_details.pack(fill="x")
+
+    def _refresh_blocks(self) -> None:
+        self.blocks_tree.delete(*self.blocks_tree.get_children())
+        for block in reversed(self.node.blockchain.chain):
+            miner = self.node.blockchain._miner_of(block) or "— генезис —"
+            n_tx = len(block.data) if isinstance(block.data, list) else 1
+            self.blocks_tree.insert(
+                "", "end", iid=str(block.index),
+                values=(block.index, n_tx,
+                        miner[:18] + "…" if len(miner) > 19 else miner,
+                        block.hash[:40] + "…"))
+        self.blocks_info.set(f"всего блоков: {self.node.height} | "
+                             f"эмиссия: {self.node.blockchain.total_supply:.0f} BHY")
+
+    def _show_block_details(self, _event=None) -> None:
+        sel = self.blocks_tree.selection()
+        if not sel:
+            return
+        block = self.node.blockchain.chain[int(sel[0])]
+        d = block.to_dict()
+        lines = [
+            f"Блок #{d['index']}",
+            f"  hash         : {d['hash']}",
+            f"  previous_hash: {d['previous_hash']}",
+            f"  merkle_root  : {d['merkle_root']}",
+            f"  target       : {d['target'][:32]}…",
+            f"  nonce        : {d['nonce']}   | сложность: {d['difficulty']} | "
+            f"работа: {d['work']}",
+            f"  транзакций   : {len(d['data']) if isinstance(d['data'], list) else 1}",
+        ]
+        self.block_details.config(state="normal")
+        self.block_details.delete("1.0", "end")
+        self.block_details.insert("end", "\n".join(lines))
+        self.block_details.config(state="disabled")
+
     # --- Логика: кошелёк -------------------------------------------------
+    def _save_wallet_as(self) -> None:
+        if self.wallet is None:
+            return messagebox.showwarning("Кошелёк", "Сначала создайте кошелёк.")
+        path = filedialog.asksaveasfilename(
+            defaultextension=".key", initialfile="bhydra_wallet.key",
+            filetypes=[("Ключ B-hydra", "*.key"), ("Все файлы", "*.*")])
+        if path:
+            try:
+                with open(path, "w") as fh:
+                    fh.write(self.wallet.private_key_hex)
+                messagebox.showinfo("Кошелёк", f"Сохранён в {path}")
+            except OSError as exc:
+                messagebox.showerror("Ошибка", str(exc))
+
+    def _load_wallet_from(self) -> None:
+        path = filedialog.askopenfilename(
+            filetypes=[("Ключ B-hydra", "*.key"), ("Все файлы", "*.*")])
+        if not path:
+            return
+        try:
+            self.wallet = Wallet.from_private_hex(open(path).read().strip())
+            with open(WALLET_FILE, "w") as fh:
+                fh.write(self.wallet.private_key_hex)
+            self._refresh_status()
+            messagebox.showinfo("Кошелёк", f"Загружен: {self.wallet.address}")
+        except (ValueError, OSError):
+            messagebox.showerror("Ошибка", "Не удалось загрузить кошелёк из файла.")
+
     def _new_wallet(self) -> None:
         self.wallet = generate_wallet()
         try:
@@ -232,6 +322,7 @@ class BHydraApp(tk.Tk):
         self._mining = False
         self.mine_btn.config(state="normal")
         self._refresh_status()
+        self._refresh_blocks()
 
     # --- Логика: сеть ----------------------------------------------------
     def _toggle_node(self) -> None:
@@ -253,6 +344,7 @@ class BHydraApp(tk.Tk):
         try:
             host, port = self.peer_var.get().strip().split(":")
             self.p2p.connect(host, int(port))
+            self._refresh_blocks()
             self._log(self.net_log, f"Подключено к {host}:{port} | "
                                     f"пиров: {len(self.p2p.peers)} | "
                                     f"высота: {self.node.height}")
