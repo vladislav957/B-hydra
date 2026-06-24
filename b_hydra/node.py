@@ -377,25 +377,55 @@ class BHydraNode:
         return None
 
     def address_history(self, address: str):
-        """История транзакций адреса: получено/потрачено по каждой транзакции."""
+        """История транзакций адреса: получено/потрачено по каждой операции.
+
+        Кроме сумм определяет НАПРАВЛЕНИЕ и КОНТРАГЕНТА:
+          * "Майнинг"    — награда за блок (coinbase) на этот адрес;
+          * "Пополнение" — кто-то прислал монеты (counterparty = отправитель);
+          * "Отправка"   — этот адрес отправил монеты (counterparty = получатель).
+        Поля received/sent/txid/block_index сохранены для обратной совместимости.
+        """
         history = []
         for block in self.blockchain.chain:
             for tx in self._block_transactions(block):
-                received = sum(o["amount"] for o in tx.get("vout", [])
-                               if o["address"] == address)
+                vout = tx.get("vout", [])
+                received = sum(o["amount"] for o in vout if o["address"] == address)
                 sent = 0.0
+                sender_addrs = []
                 for inp in tx.get("vin", []):
                     ref = self._resolve_output(inp.get("txid"), inp.get("index"))
-                    if ref and ref["address"] == address:
-                        sent += ref["amount"]
-                if received or sent:
-                    history.append({
-                        "txid": tx["txid"],
-                        "block_index": block.index,
-                        "timestamp": tx.get("timestamp"),
-                        "received": received,
-                        "sent": sent,
-                    })
+                    if ref:
+                        if ref["address"] == address:
+                            sent += ref["amount"]
+                        else:
+                            sender_addrs.append(ref["address"])
+                if not (received or sent):
+                    continue
+
+                if _is_coinbase_dict(tx):
+                    direction, counterparty, amount = "Майнинг", "—", received
+                elif sent > received:
+                    # Отправка: контрагент — получатель (выходы не на наш адрес).
+                    others = [o["address"] for o in vout if o["address"] != address]
+                    direction = "Отправка"
+                    counterparty = others[0] if others else address  # перевод себе
+                    amount = sent - received                          # ушло нетто
+                else:
+                    # Пополнение: контрагент — отправитель (вход не наш).
+                    direction = "Пополнение"
+                    counterparty = sender_addrs[0] if sender_addrs else "—"
+                    amount = received - sent
+
+                history.append({
+                    "txid": tx["txid"],
+                    "block_index": block.index,
+                    "timestamp": tx.get("timestamp"),
+                    "received": received,
+                    "sent": sent,
+                    "direction": direction,        # Майнинг / Пополнение / Отправка
+                    "counterparty": counterparty,  # от кого / куда
+                    "amount": amount,              # сумма операции (нетто), BHY
+                })
         return history
 
     # --- Сохранение / загрузка ------------------------------------------

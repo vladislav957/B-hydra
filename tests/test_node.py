@@ -84,3 +84,27 @@ def test_persistence_roundtrip(tmp_path, funded):
     loaded = BHydraNode.load(str(path))
     assert loaded.get_balance(alice.address) == node.get_balance(alice.address)
     assert loaded.is_valid()
+
+
+def test_address_history_directions_and_counterparties():
+    """История различает Майнинг / Пополнение / Отправка и контрагента."""
+    from b_hydra.node import BHydraNode
+    from b_hydra.wallet import generate_wallet
+    from b_hydra.blockchain import DEFAULT_FEE
+    n = BHydraNode(difficulty=2)
+    n.blockchain.retarget_interval = 4
+    me, bob = generate_wallet(), generate_wallet()
+    n.mine_pending(me.address)                                  # Майнинг → me
+    n.add_transaction(n.create_transaction(me, bob.address, 10, fee=DEFAULT_FEE))
+    n.mine_pending(me.address)                                  # Отправка me→bob
+    n.add_transaction(n.create_transaction(bob, me.address, 3, fee=DEFAULT_FEE))
+    n.mine_pending(bob.address)                                 # Пополнение bob→me
+
+    hist = n.address_history(me.address)
+    kinds = [h["direction"] for h in hist]
+    assert "Майнинг" in kinds and "Отправка" in kinds and "Пополнение" in kinds
+    out = next(h for h in hist if h["direction"] == "Отправка")
+    assert out["counterparty"] == bob.address          # куда ушло
+    inc = next(h for h in hist if h["direction"] == "Пополнение")
+    assert inc["counterparty"] == bob.address          # от кого пришло
+    assert inc["amount"] == 3

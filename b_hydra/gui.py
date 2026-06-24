@@ -183,6 +183,24 @@ class BHydraApp(tk.Tk):
         ttk.Button(send, text="Отправить", command=self._send).grid(
             row=1, column=2, sticky="w", padx=2)
 
+        # История операций: пополнения и отправки (от кого / куда).
+        hist = ttk.LabelFrame(tab, text="История операций", padding=8)
+        hist.pack(fill="both", expand=True, pady=(10, 0))
+        cols = ("Тип", "Сумма", "От кого / Кому", "Блок")
+        self.history_tree = ttk.Treeview(hist, columns=cols, show="headings",
+                                         height=7)
+        widths = (110, 120, 360, 60)
+        for col, w in zip(cols, widths):
+            self.history_tree.heading(col, text=col)
+            self.history_tree.column(col, width=w,
+                                     anchor="center" if col != "От кого / Кому"
+                                     else "w")
+        vsb = ttk.Scrollbar(hist, orient="vertical",
+                            command=self.history_tree.yview)
+        self.history_tree.configure(yscrollcommand=vsb.set)
+        self.history_tree.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+
     def _build_mining_tab(self, nb: ttk.Notebook) -> None:
         tab = ttk.Frame(nb, padding=12)
         nb.add(tab, text="⛏ Майнинг")
@@ -738,6 +756,29 @@ class BHydraApp(tk.Tk):
             f"SHA: {hashing.backend()} | блоков: {self.node.height} | "
             f"баланс: {bal:.2f} BHY | узел: {'вкл' if running else 'выкл'} | "
             f"пиров: {peers}")
+        self._refresh_history()
+
+    def _refresh_history(self) -> None:
+        """Обновить таблицу истории операций кошелька (по умолчанию)."""
+        tree = getattr(self, "history_tree", None)
+        if tree is None:
+            return
+        tree.delete(*tree.get_children())
+        if self.wallet is None:
+            return
+        icon = {"Пополнение": "🟢 Пополнение",
+                "Отправка": "🔴 Отправка",
+                "Майнинг": "⛏ Майнинг"}
+        history = self.node.address_history(self.wallet.address)
+        for h in reversed(history):            # свежие операции сверху
+            party = h["counterparty"]
+            party = party if len(party) <= 40 else party[:30] + "…" + party[-6:]
+            tree.insert("", "end", values=(
+                icon.get(h["direction"], h["direction"]),
+                f"{h['amount']:.4f} BHY",
+                party,
+                f"#{h['block_index']}",
+            ))
 
 
 def main() -> None:
