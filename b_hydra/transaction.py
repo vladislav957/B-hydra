@@ -16,6 +16,12 @@ Transactinons.py — транзакции B-hydra по модели UTXO (вхо
 import json
 import time
 
+if __name__ == "__main__" and __package__ in (None, ""):
+    import os
+    import sys
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    __package__ = "b_hydra"
+
 from . import hashing
 from .blockchain import CHAIN_ID
 

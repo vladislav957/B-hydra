@@ -11,6 +11,12 @@ economics.py — экономика эмиссии B-hydra.
 халвинг Bitcoin); выпуск монет конечен и завершается примерно в 3000 году.
 """
 
+if __name__ == "__main__" and __package__ in (None, ""):
+    import os
+    import sys
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    __package__ = "b_hydra"
+
 from .blockchain import (
     INITIAL_REWARD, HALVING_INTERVAL, MAX_SUPPLY, DECIMALS,
     BLOCK_TIME_SECONDS, SECONDS_PER_YEAR, GENESIS_YEAR,

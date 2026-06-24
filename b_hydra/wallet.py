@@ -12,6 +12,12 @@ wallet.py — кошелёк B-hydra с ECDSA-подписями на криво
 import hashlib
 import secrets
 
+if __name__ == "__main__" and __package__ in (None, ""):
+    import os
+    import sys
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    __package__ = "b_hydra"
+
 from . import hashing
 
 # --- Параметры кривой secp256k1 ---------------------------------------------

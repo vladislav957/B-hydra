@@ -14,6 +14,12 @@ import json
 import socket
 import threading
 
+if __name__ == "__main__" and __package__ in (None, ""):
+    import os
+    import sys
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    __package__ = "b_hydra"
+
 from .tcp import recv_message, send_message
 from .node import BHydraNode
 

@@ -29,6 +29,12 @@ def _asset(name: str) -> str:
                    os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     return os.path.join(base, "assets", name)
 
+if __name__ == "__main__" and __package__ in (None, ""):
+    import os
+    import sys
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    __package__ = "b_hydra"
+
 from . import __version__, hashing
 from .node import BHydraNode
 from .p2p import P2PNode

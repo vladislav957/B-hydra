@@ -12,6 +12,12 @@ import json
 
 import time
 
+if __name__ == "__main__" and __package__ in (None, ""):
+    import os
+    import sys
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    __package__ = "b_hydra"
+
 from .blockchain import (
     Block, Blockchain, DEFAULT_DIFFICULTY,
     MAX_BLOCK_TRANSACTIONS, MAX_FUTURE_DRIFT,

@@ -5,6 +5,12 @@ Merkle_python.py — дерево Меркла B-hydra на двойном SHA-5
 меняет корень, а значит и хеш блока.
 """
 
+if __name__ == "__main__" and __package__ in (None, ""):
+    import os
+    import sys
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    __package__ = "b_hydra"
+
 from . import hashing
 
 

@@ -19,6 +19,12 @@ Kotlin/Swift/JS (см. схему подписи в API.md): ECDSA secp256k1 + S
 import json
 import urllib.request
 
+if __name__ == "__main__" and __package__ in (None, ""):
+    import os
+    import sys
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    __package__ = "b_hydra"
+
 from .wallet import Wallet
 from .transaction import Transaction, TxInput, TxOutput
 
