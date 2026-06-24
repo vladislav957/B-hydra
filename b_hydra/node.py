@@ -420,6 +420,7 @@ class BHydraNode:
                     "txid": tx["txid"],
                     "block_index": block.index,
                     "timestamp": tx.get("timestamp"),
+                    "block_time": block.timestamp,  # когда блок добыт (epoch, сек)
                     "received": received,
                     "sent": sent,
                     "direction": direction,        # Майнинг / Пополнение / Отправка

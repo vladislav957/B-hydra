@@ -183,23 +183,37 @@ class BHydraApp(tk.Tk):
         ttk.Button(send, text="Отправить", command=self._send).grid(
             row=1, column=2, sticky="w", padx=2)
 
-        # История операций: пополнения и отправки (от кого / куда).
+        # История операций: пополнения и отправки (от кого / куда, когда).
         hist = ttk.LabelFrame(tab, text="История операций", padding=8)
         hist.pack(fill="both", expand=True, pady=(10, 0))
-        cols = ("Тип", "Сумма", "От кого / Кому", "Блок")
-        self.history_tree = ttk.Treeview(hist, columns=cols, show="headings",
+        ttk.Label(hist, text="(двойной клик — копировать txid, правый клик — меню)",
+                  foreground="gray").pack(side="bottom", anchor="w")
+        tree_wrap = ttk.Frame(hist)
+        tree_wrap.pack(side="top", fill="both", expand=True)
+        cols = ("Дата", "Тип", "Сумма", "От кого / Кому", "Блок")
+        self.history_tree = ttk.Treeview(tree_wrap, columns=cols, show="headings",
                                          height=7)
-        widths = (110, 120, 360, 60)
+        widths = (130, 110, 120, 320, 55)
         for col, w in zip(cols, widths):
             self.history_tree.heading(col, text=col)
             self.history_tree.column(col, width=w,
-                                     anchor="center" if col != "От кого / Кому"
-                                     else "w")
-        vsb = ttk.Scrollbar(hist, orient="vertical",
+                                     anchor="w" if col == "От кого / Кому"
+                                     else "center")
+        vsb = ttk.Scrollbar(tree_wrap, orient="vertical",
                             command=self.history_tree.yview)
         self.history_tree.configure(yscrollcommand=vsb.set)
         self.history_tree.pack(side="left", fill="both", expand=True)
         vsb.pack(side="right", fill="y")
+        # Клик по строке: меню «Копировать txid / адрес контрагента».
+        self._history_meta = {}                 # iid → (txid, counterparty)
+        self._history_menu = tk.Menu(self.history_tree, tearoff=0)
+        self._history_menu.add_command(label="Копировать txid",
+                                       command=lambda: self._copy_history("txid"))
+        self._history_menu.add_command(label="Копировать адрес контрагента",
+                                       command=lambda: self._copy_history("party"))
+        self.history_tree.bind("<Button-3>", self._history_popup)
+        self.history_tree.bind("<Double-1>",
+                               lambda e: self._copy_history("txid"))
 
     def _build_mining_tab(self, nb: ttk.Notebook) -> None:
         tab = ttk.Frame(nb, padding=12)
@@ -758,12 +772,24 @@ class BHydraApp(tk.Tk):
             f"пиров: {peers}")
         self._refresh_history()
 
+    @staticmethod
+    def _fmt_time(ts) -> str:
+        """Epoch-секунды → 'дд.мм.гггг чч:мм' (или '—' для генезиса/пустого)."""
+        if not ts:
+            return "—"
+        from datetime import datetime
+        try:
+            return datetime.fromtimestamp(ts).strftime("%d.%m.%Y %H:%M")
+        except (OverflowError, OSError, ValueError):
+            return "—"
+
     def _refresh_history(self) -> None:
         """Обновить таблицу истории операций кошелька (по умолчанию)."""
         tree = getattr(self, "history_tree", None)
         if tree is None:
             return
         tree.delete(*tree.get_children())
+        self._history_meta = {}
         if self.wallet is None:
             return
         icon = {"Пополнение": "🟢 Пополнение",
@@ -772,13 +798,36 @@ class BHydraApp(tk.Tk):
         history = self.node.address_history(self.wallet.address)
         for h in reversed(history):            # свежие операции сверху
             party = h["counterparty"]
-            party = party if len(party) <= 40 else party[:30] + "…" + party[-6:]
-            tree.insert("", "end", values=(
+            shown = party if len(party) <= 40 else party[:30] + "…" + party[-6:]
+            iid = tree.insert("", "end", values=(
+                self._fmt_time(h.get("block_time")),
                 icon.get(h["direction"], h["direction"]),
                 f"{h['amount']:.4f} BHY",
-                party,
+                shown,
                 f"#{h['block_index']}",
             ))
+            self._history_meta[iid] = (h["txid"], party)   # полные данные для копии
+
+    def _history_popup(self, event) -> None:
+        row = self.history_tree.identify_row(event.y)
+        if row:
+            self.history_tree.selection_set(row)
+            self._history_menu.tk_popup(event.x_root, event.y_root)
+
+    def _copy_history(self, what: str) -> None:
+        """Скопировать txid или адрес контрагента выделенной операции."""
+        sel = self.history_tree.selection()
+        if not sel:
+            return
+        txid, party = self._history_meta.get(sel[0], ("", ""))
+        value = txid if what == "txid" else party
+        if not value or value == "—":
+            return self.status.set("Нечего копировать для этой операции.")
+        self.clipboard_clear()
+        self.clipboard_append(value)
+        self.update()
+        label = "txid" if what == "txid" else "адрес контрагента"
+        self.status.set(f"Скопирован {label}: {value[:24]}…")
 
 
 def main() -> None:
