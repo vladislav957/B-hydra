@@ -160,16 +160,22 @@ class BHydraApp(tk.Tk):
         # Перевод.
         send = ttk.LabelFrame(tab, text="Отправить перевод", padding=8)
         send.pack(fill="x", pady=(10, 0))
+        send.columnconfigure(1, weight=1)
         self.to_var = tk.StringVar()
         self.amount_var = tk.StringVar(value="10")
         ttk.Label(send, text="Кому (адрес):").grid(row=0, column=0, sticky="w")
-        ttk.Entry(send, textvariable=self.to_var, width=44).grid(
-            row=0, column=1, columnspan=3, sticky="we", padx=4)
+        to_entry = ttk.Entry(send, textvariable=self.to_var, width=44)
+        to_entry.grid(row=0, column=1, sticky="we", padx=4)
+        self._add_paste_menu(to_entry)          # ПКМ → «Вставить» (на любой раскладке)
+        ttk.Button(send, text="Вставить", width=10,
+                   command=self._paste_recipient).grid(row=0, column=2, padx=2)
+        ttk.Button(send, text="Себе", width=8,
+                   command=self._fill_self).grid(row=0, column=3, padx=2)
         ttk.Label(send, text="Сумма:").grid(row=1, column=0, sticky="w", pady=4)
         ttk.Entry(send, textvariable=self.amount_var, width=12).grid(
             row=1, column=1, sticky="w", pady=4)
         ttk.Button(send, text="Отправить", command=self._send).grid(
-            row=1, column=2, padx=6)
+            row=1, column=2, columnspan=2, sticky="w", padx=2)
 
     def _build_mining_tab(self, nb: ttk.Notebook) -> None:
         tab = ttk.Frame(nb, padding=12)
@@ -373,6 +379,44 @@ class BHydraApp(tk.Tk):
         self.clipboard_append(value)
         self.update()  # удержать буфер после закрытия окна
         self.status.set(f"{label.rstrip(':')} скопирован в буфер обмена.")
+
+    def _fill_self(self) -> None:
+        """Подставить собственный адрес в поле получателя (перевод себе)."""
+        if self.wallet is None:
+            return messagebox.showwarning("Кошелёк", "Сначала создайте кошелёк.")
+        self.to_var.set(self.wallet.address)
+        self.status.set("Адрес получателя — ваш собственный (перевод себе).")
+
+    def _paste_recipient(self) -> None:
+        """Вставить адрес из буфера обмена в поле получателя."""
+        try:
+            text = self.clipboard_get()
+        except tk.TclError:
+            return messagebox.showinfo("Вставить", "Буфер обмена пуст.")
+        self.to_var.set(text.strip())
+
+    def _add_paste_menu(self, entry: tk.Widget) -> None:
+        """Контекстное меню по правой кнопке: Вставить/Копировать/Вырезать.
+
+        Нужно, потому что на русской раскладке Ctrl+V иногда не срабатывает —
+        а правый клик работает всегда.
+        """
+        menu = tk.Menu(entry, tearoff=0)
+        menu.add_command(label="Вставить",
+                         command=lambda: entry.event_generate("<<Paste>>"))
+        menu.add_command(label="Копировать",
+                         command=lambda: entry.event_generate("<<Copy>>"))
+        menu.add_command(label="Вырезать",
+                         command=lambda: entry.event_generate("<<Cut>>"))
+        menu.add_separator()
+        menu.add_command(label="Выделить всё",
+                         command=lambda: entry.select_range(0, "end"))
+
+        def popup(event):
+            menu.tk_popup(event.x_root, event.y_root)
+
+        entry.bind("<Button-3>", popup)          # ПКМ (Windows/Linux)
+        entry.bind("<Button-2>", popup)          # средняя кнопка (на всякий)
 
     def _show_qr(self) -> None:
         """Показать QR-код адреса в отдельном окне (для сканирования телефоном)."""
