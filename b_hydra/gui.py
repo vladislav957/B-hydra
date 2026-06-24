@@ -434,21 +434,43 @@ class BHydraApp(tk.Tk):
         if self.wallet is None:
             return messagebox.showwarning("Кошелёк", "Сначала создайте кошелёк.")
         to = self.to_var.get().strip()
+        if not to:
+            return messagebox.showwarning(
+                "Перевод", "Введите адрес получателя (начинается с BHY…).")
         if not is_valid_address(to):
-            return messagebox.showerror("Ошибка", "Неверный адрес получателя.")
+            return messagebox.showerror(
+                "Неверный адрес",
+                "Адрес получателя некорректен.\nОн должен начинаться с «BHY» и "
+                "быть скопирован полностью (без …, без пробелов).")
         try:
-            amount = float(self.amount_var.get())
+            amount = float(self.amount_var.get().replace(",", "."))
         except ValueError:
-            return messagebox.showerror("Ошибка", "Неверная сумма.")
+            return messagebox.showerror("Ошибка", "Сумма должна быть числом.")
+        if amount <= 0:
+            return messagebox.showerror("Ошибка", "Сумма должна быть больше нуля.")
+
+        balance = self.node.get_balance(self.wallet.address)
+        if amount > balance:
+            return messagebox.showwarning(
+                "Недостаточно средств",
+                f"На балансе {balance:.4f} BHY, а нужно {amount:.4f} BHY.\n\n"
+                "Сначала намайните монеты на свой адрес во вкладке ⛏ Майнинг.")
+
         tx = self.node.create_transaction(self.wallet, to, amount, fee=0.0)
         if tx is None or not self.node.add_transaction(tx):
-            return messagebox.showwarning("Перевод", "Недостаточно средств.")
+            return messagebox.showwarning(
+                "Перевод", "Не удалось создать перевод (средства уже зарезервированы "
+                "в мемпуле?). Попробуйте после майнинга.")
         if self.p2p and self.p2p._running:
             self.p2p.broadcast({"type": "transaction", "transaction": tx.to_dict(),
                                 "from": [self.p2p.host, self.p2p.port]})
         self.node.save(STATE_FILE)
-        messagebox.showinfo("Перевод", f"Транзакция в мемпуле:\n{tx.txid[:24]}…\n"
-                                       "Будет подтверждена при майнинге.")
+        self.to_var.set("")                     # очистить поле адреса после отправки
+        self.status.set("Перевод отправлен в мемпул.")
+        messagebox.showinfo("Перевод отправлен",
+                            f"{amount:.4f} BHY → {to[:20]}…\n\n"
+                            f"Транзакция в мемпуле: {tx.txid[:24]}…\n"
+                            "Будет подтверждена при майнинге следующего блока.")
         self._refresh_status()
 
     # --- Логика: майнинг -------------------------------------------------
