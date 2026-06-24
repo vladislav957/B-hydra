@@ -36,6 +36,7 @@ if __name__ == "__main__" and __package__ in (None, ""):
     __package__ = "b_hydra"
 
 from . import __version__, hashing
+from .blockchain import DEFAULT_FEE
 from .node import BHydraNode
 from .p2p import P2PNode
 from .wallet import Wallet, generate_wallet, is_valid_address
@@ -163,6 +164,7 @@ class BHydraApp(tk.Tk):
         send.columnconfigure(1, weight=1)
         self.to_var = tk.StringVar()
         self.amount_var = tk.StringVar(value="10")
+        self.fee_var = tk.StringVar(value=f"{DEFAULT_FEE:g}")
         ttk.Label(send, text="Кому (адрес):").grid(row=0, column=0, sticky="w")
         to_entry = ttk.Entry(send, textvariable=self.to_var, width=44)
         to_entry.grid(row=0, column=1, sticky="we", padx=4)
@@ -172,6 +174,12 @@ class BHydraApp(tk.Tk):
         ttk.Label(send, text="Сумма:").grid(row=1, column=0, sticky="w", pady=4)
         ttk.Entry(send, textvariable=self.amount_var, width=12).grid(
             row=1, column=1, sticky="w", pady=4)
+        fee_row = ttk.Frame(send)
+        fee_row.grid(row=2, column=0, columnspan=3, sticky="w")
+        ttk.Label(fee_row, text="Комиссия майнеру:").pack(side="left")
+        ttk.Entry(fee_row, textvariable=self.fee_var, width=12).pack(
+            side="left", padx=4)
+        ttk.Label(fee_row, text="BHY (низкая, по стандарту крипты)").pack(side="left")
         ttk.Button(send, text="Отправить", command=self._send).grid(
             row=1, column=2, sticky="w", padx=2)
 
@@ -483,15 +491,22 @@ class BHydraApp(tk.Tk):
             return messagebox.showerror("Ошибка", "Сумма должна быть числом.")
         if amount <= 0:
             return messagebox.showerror("Ошибка", "Сумма должна быть больше нуля.")
+        try:
+            fee = float(self.fee_var.get().replace(",", "."))
+        except ValueError:
+            return messagebox.showerror("Ошибка", "Комиссия должна быть числом.")
+        if fee < 0:
+            return messagebox.showerror("Ошибка", "Комиссия не может быть отрицательной.")
 
         balance = self.node.get_balance(self.wallet.address)
-        if amount > balance:
+        if amount + fee > balance:
             return messagebox.showwarning(
                 "Недостаточно средств",
-                f"На балансе {balance:.4f} BHY, а нужно {amount:.4f} BHY.\n\n"
+                f"На балансе {balance:.4f} BHY, а нужно {amount + fee:.4f} BHY "
+                f"({amount:.4f} перевод + {fee:g} комиссия).\n\n"
                 "Сначала намайните монеты на свой адрес во вкладке ⛏ Майнинг.")
 
-        tx = self.node.create_transaction(self.wallet, to, amount, fee=0.0)
+        tx = self.node.create_transaction(self.wallet, to, amount, fee=fee)
         if tx is None or not self.node.add_transaction(tx):
             return messagebox.showwarning(
                 "Перевод", "Не удалось создать перевод (средства уже зарезервированы "
@@ -503,7 +518,8 @@ class BHydraApp(tk.Tk):
         self.to_var.set("")                     # очистить поле адреса после отправки
         self.status.set("Перевод отправлен в мемпул.")
         messagebox.showinfo("Перевод отправлен",
-                            f"{amount:.4f} BHY → {to[:20]}…\n\n"
+                            f"{amount:.4f} BHY → {to[:20]}…\n"
+                            f"комиссия майнеру: {fee:g} BHY\n\n"
                             f"Транзакция в мемпуле: {tx.txid[:24]}…\n"
                             "Будет подтверждена при майнинге следующего блока.")
         self._refresh_status()

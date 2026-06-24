@@ -24,6 +24,7 @@ if __name__ == "__main__" and __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     __package__ = "b_hydra"
 
+from .blockchain import DEFAULT_FEE
 from .node import BHydraNode
 from .wallet import Wallet, generate_wallet
 
@@ -143,7 +144,8 @@ def build_parser():
     p_send.add_argument("private_key", help="приватный ключ отправителя (hex)")
     p_send.add_argument("to", help="адрес получателя")
     p_send.add_argument("amount", type=float, help="сумма BHY")
-    p_send.add_argument("--fee", type=float, default=0.0, help="комиссия")
+    p_send.add_argument("--fee", type=float, default=DEFAULT_FEE,
+                        help=f"комиссия майнеру (по умолчанию {DEFAULT_FEE:g})")
     p_send.set_defaults(func=cmd_send)
 
     p_bal = sub.add_parser("balance", help="баланс адреса")
