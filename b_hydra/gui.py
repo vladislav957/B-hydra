@@ -131,14 +131,18 @@ class BHydraApp(tk.Tk):
         self.addr_var = tk.StringVar()
         self.priv_var = tk.StringVar()
         self.bal_var = tk.StringVar()
-        for label, var in (("Адрес:", self.addr_var),
-                           ("Приватный ключ:", self.priv_var),
-                           ("Баланс:", self.bal_var)):
+        for label, var, copyable in (("Адрес:", self.addr_var, True),
+                                     ("Приватный ключ:", self.priv_var, True),
+                                     ("Баланс:", self.bal_var, False)):
             row = ttk.Frame(tab)
             row.pack(fill="x", pady=4)
             ttk.Label(row, text=label, width=16).pack(side="left")
             ttk.Entry(row, textvariable=var, state="readonly").pack(
                 side="left", fill="x", expand=True)
+            if copyable:
+                ttk.Button(row, text="Копировать", width=12,
+                           command=lambda v=var, n=label: self._copy(v, n)).pack(
+                    side="left", padx=(6, 0))
 
         # Импорт ключа.
         imp = ttk.LabelFrame(tab, text="Импорт по приватному ключу", padding=8)
@@ -342,6 +346,16 @@ class BHydraApp(tk.Tk):
             messagebox.showinfo("Кошелёк", f"Загружен: {self.wallet.address}")
         except (ValueError, OSError):
             messagebox.showerror("Ошибка", "Не удалось загрузить кошелёк из файла.")
+
+    def _copy(self, var: tk.StringVar, label: str) -> None:
+        """Скопировать значение поля в буфер обмена."""
+        value = var.get().strip()
+        if not value:
+            return messagebox.showwarning("Кошелёк", "Сначала создайте кошелёк.")
+        self.clipboard_clear()
+        self.clipboard_append(value)
+        self.update()  # удержать буфер после закрытия окна
+        self.status.set(f"{label.rstrip(':')} скопирован в буфер обмена.")
 
     def _new_wallet(self) -> None:
         self.wallet = generate_wallet()
