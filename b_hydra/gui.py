@@ -131,9 +131,9 @@ class BHydraApp(tk.Tk):
         self.addr_var = tk.StringVar()
         self.priv_var = tk.StringVar()
         self.bal_var = tk.StringVar()
-        for label, var, copyable in (("Адрес:", self.addr_var, True),
-                                     ("Приватный ключ:", self.priv_var, True),
-                                     ("Баланс:", self.bal_var, False)):
+        for label, var, copyable, qr in (("Адрес:", self.addr_var, True, True),
+                                         ("Приватный ключ:", self.priv_var, True, False),
+                                         ("Баланс:", self.bal_var, False, False)):
             row = ttk.Frame(tab)
             row.pack(fill="x", pady=4)
             ttk.Label(row, text=label, width=16).pack(side="left")
@@ -143,6 +143,9 @@ class BHydraApp(tk.Tk):
                 ttk.Button(row, text="Копировать", width=12,
                            command=lambda v=var, n=label: self._copy(v, n)).pack(
                     side="left", padx=(6, 0))
+            if qr:
+                ttk.Button(row, text="QR", width=4,
+                           command=self._show_qr).pack(side="left", padx=(6, 0))
 
         # Импорт ключа.
         imp = ttk.LabelFrame(tab, text="Импорт по приватному ключу", padding=8)
@@ -356,6 +359,34 @@ class BHydraApp(tk.Tk):
         self.clipboard_append(value)
         self.update()  # удержать буфер после закрытия окна
         self.status.set(f"{label.rstrip(':')} скопирован в буфер обмена.")
+
+    def _show_qr(self) -> None:
+        """Показать QR-код адреса в отдельном окне (для сканирования телефоном)."""
+        if self.wallet is None:
+            return messagebox.showwarning("Кошелёк", "Сначала создайте кошелёк.")
+        from .qrcode_gen import qr_matrix
+        addr = self.wallet.address
+        rows = qr_matrix(addr)
+        n = len(rows)
+        scale, quiet = 8, 4
+        side = (n + 2 * quiet) * scale
+
+        win = tk.Toplevel(self)
+        win.title("QR-код адреса")
+        win.resizable(False, False)
+        win.transient(self)
+        canvas = tk.Canvas(win, width=side, height=side,
+                           bg="white", highlightthickness=0)
+        canvas.pack(padx=12, pady=12)
+        for r in range(n):
+            for c in range(n):
+                if rows[r][c] == "1":
+                    x = (c + quiet) * scale
+                    y = (r + quiet) * scale
+                    canvas.create_rectangle(x, y, x + scale, y + scale,
+                                            fill="black", outline="")
+        ttk.Label(win, text=addr, font=("TkDefaultFont", 9)).pack(pady=(0, 4))
+        ttk.Button(win, text="Закрыть", command=win.destroy).pack(pady=(0, 10))
 
     def _new_wallet(self) -> None:
         self.wallet = generate_wallet()
