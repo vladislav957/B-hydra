@@ -109,6 +109,7 @@ class BHydraApp(tk.Tk):
 
         nb = ttk.Notebook(self)
         nb.pack(fill="both", expand=True, padx=8, pady=8)
+        self._nb = nb
         self._build_wallet_tab(nb)
         self._build_mining_tab(nb)
         self._build_network_tab(nb)
@@ -212,8 +213,7 @@ class BHydraApp(tk.Tk):
         self._history_menu.add_command(label="Копировать адрес контрагента",
                                        command=lambda: self._copy_history("party"))
         self.history_tree.bind("<Button-3>", self._history_popup)
-        self.history_tree.bind("<Double-1>",
-                               lambda e: self._copy_history("txid"))
+        self.history_tree.bind("<Double-1>", self._open_history_in_explorer)
 
     def _build_mining_tab(self, nb: ttk.Notebook) -> None:
         tab = ttk.Frame(nb, padding=12)
@@ -284,6 +284,7 @@ class BHydraApp(tk.Tk):
     def _build_blocks_tab(self, nb: ttk.Notebook) -> None:
         tab = ttk.Frame(nb, padding=12)
         nb.add(tab, text="🔍 Блоки")
+        self._blocks_tab = tab
 
         top = ttk.Frame(tab)
         top.pack(fill="x")
@@ -312,8 +313,10 @@ class BHydraApp(tk.Tk):
         self.blocks_tree.pack(fill="both", expand=True, pady=6)
         self.blocks_tree.bind("<<TreeviewSelect>>", self._show_block_details)
 
-        self.block_details = tk.Text(tab, height=8, state="disabled")
+        self.block_details = tk.Text(tab, height=10, state="disabled")
         self.block_details.pack(fill="x")
+        self.block_details.tag_configure("hl", background="#fff3a0",
+                                         foreground="#000000")
 
     def _refresh_blocks(self) -> None:
         self.blocks_tree.delete(*self.blocks_tree.get_children())
@@ -828,6 +831,50 @@ class BHydraApp(tk.Tk):
         self.update()
         label = "txid" if what == "txid" else "адрес контрагента"
         self.status.set(f"Скопирован {label}: {value[:24]}…")
+
+    def _open_history_in_explorer(self, _event=None) -> None:
+        """Двойной клик по операции → вкладка «Блоки» с подсветкой транзакции."""
+        sel = self.history_tree.selection()
+        if not sel:
+            return
+        txid, _party = self._history_meta.get(sel[0], ("", ""))
+        if txid:
+            self._open_in_explorer(txid)
+
+    def _open_in_explorer(self, txid: str) -> None:
+        """Переключиться на «Блоки», выбрать блок транзакции и подсветить её."""
+        found = self.node.find_transaction(txid)
+        if not found:
+            return messagebox.showinfo(
+                "Обозреватель", "Транзакция ещё не в цепочке (возможно, в мемпуле "
+                "и ждёт майнинга).")
+        self._nb.select(self._blocks_tab)
+        self._refresh_blocks()
+        idx = str(found["block_index"])
+        if self.blocks_tree.exists(idx):
+            self.blocks_tree.selection_set(idx)
+            self.blocks_tree.see(idx)
+            self._show_block_details()
+        self._append_tx_highlight(found, txid)
+        self.search_var.set(txid)
+
+    def _append_tx_highlight(self, found: dict, txid: str) -> None:
+        """Дописать в детали блока выделенную информацию о транзакции."""
+        tx = found["transaction"]
+        is_cb = tx.get("vin") and tx["vin"][0].get("txid", "").count("0") == len(
+            tx["vin"][0].get("txid", ""))
+        lines = [f"\n▶ Транзакция {txid[:32]}…  (блок #{found['block_index']})"]
+        lines.append("  тип   : " + ("награда за блок (coinbase)" if is_cb
+                                     else "перевод"))
+        for o in tx.get("vout", []):
+            lines.append(f"  выход : {o['amount']} BHY → {o['address']}")
+        text = "\n".join(lines)
+        self.block_details.config(state="normal")
+        start = self.block_details.index("end-1c")
+        self.block_details.insert("end", "\n" + text)
+        self.block_details.tag_add("hl", start, "end-1c")
+        self.block_details.see("end")
+        self.block_details.config(state="disabled")
 
 
 def main() -> None:
