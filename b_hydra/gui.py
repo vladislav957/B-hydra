@@ -62,6 +62,7 @@ class BHydraApp(tk.Tk):
         self.wallet: Wallet | None = None
         self.p2p: P2PNode | None = None
         self._mining = False
+        self._auto_after_id = None       # id запланированного авто-майнинга
         # Очередь «фоновый поток → главный поток»: tkinter нельзя трогать из
         # чужого потока, поэтому воркер кладёт события сюда, а главный поток
         # забирает их в _poll_queue.
@@ -183,6 +184,19 @@ class BHydraApp(tk.Tk):
         self.mine_btn = ttk.Button(top, text="Майнить",
                                    command=self._mine_clicked)
         self.mine_btn.pack(side="left")
+
+        # Авто-майнинг: блок создаётся сам каждые N минут (как 10-минутный
+        # ритм Bitcoin), пока окно открыто и галочка включена.
+        auto = ttk.Frame(tab)
+        auto.pack(fill="x", pady=(8, 0))
+        self.auto_mine = tk.BooleanVar(value=False)
+        ttk.Checkbutton(auto, text="Авто-майнинг: блок каждые",
+                        variable=self.auto_mine,
+                        command=self._toggle_auto_mine).pack(side="left")
+        self.auto_interval = tk.StringVar(value="10")
+        ttk.Entry(auto, textvariable=self.auto_interval, width=5).pack(
+            side="left", padx=4)
+        ttk.Label(auto, text="мин.").pack(side="left")
 
         self.mine_info = tk.StringVar()
         ttk.Label(tab, textvariable=self.mine_info).pack(anchor="w", pady=6)
@@ -437,12 +451,58 @@ class BHydraApp(tk.Tk):
             count = int(self.mine_count.get())
         except ValueError:
             return messagebox.showerror("Ошибка", "Неверное число блоков.")
+        self._begin_mining(count)
+
+    def _begin_mining(self, count: int) -> bool:
+        """Запустить фоновый майнинг `count` блоков. Общий код для ручного
+        и авто-майнинга. Возвращает False, если запуск невозможен."""
+        if self.wallet is None or self._mining or count < 1:
+            return False
         self._mining = True
         self.mine_btn.config(state="disabled")
         self.progress.config(maximum=count, value=0)
         self.mine_status.set(f"Майнинг… 0/{count}")
         threading.Thread(target=self._mine_worker, args=(count,),
                          daemon=True).start()
+        return True
+
+    # --- Логика: авто-майнинг (блок раз в N минут) -----------------------
+    def _auto_minutes(self) -> float | None:
+        try:
+            minutes = float(self.auto_interval.get().replace(",", "."))
+        except ValueError:
+            return None
+        return minutes if minutes > 0 else None
+
+    def _toggle_auto_mine(self) -> None:
+        if self.auto_mine.get():
+            if self.wallet is None:
+                self.auto_mine.set(False)
+                return messagebox.showwarning("Кошелёк",
+                                              "Сначала создайте кошелёк.")
+            minutes = self._auto_minutes()
+            if minutes is None:
+                self.auto_mine.set(False)
+                return messagebox.showerror("Ошибка", "Неверный интервал (минуты).")
+            self._log(self.mine_log,
+                      f"🤖 Авто-майнинг включён: блок каждые {minutes:g} мин.")
+            self._auto_tick()                      # первый блок сразу + расписание
+        else:
+            if self._auto_after_id is not None:
+                self.after_cancel(self._auto_after_id)
+                self._auto_after_id = None
+            self._log(self.mine_log, "🤖 Авто-майнинг выключен.")
+
+    def _auto_tick(self) -> None:
+        """Срабатывает по таймеру: майнит один блок и планирует следующий."""
+        if not self.auto_mine.get():
+            return
+        minutes = self._auto_minutes() or 10.0
+        if self.wallet is not None and not self._mining:
+            self._begin_mining(1)
+        else:
+            self._log(self.mine_log, "⏳ Пропуск: предыдущий майнинг ещё идёт.")
+        self._auto_after_id = self.after(int(minutes * 60_000), self._auto_tick)
 
     def _mine_worker(self, count: int) -> None:
         # Только майнинг и запись в очередь — НИКАКИХ обращений к tkinter.
