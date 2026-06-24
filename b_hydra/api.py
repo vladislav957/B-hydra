@@ -138,6 +138,7 @@ class BHydraAPI(BaseHTTPRequestHandler):
                     "difficulty": bc.last_block.difficulty,
                     "block_work": bc.last_block.work,
                     "target_block_time_min": round(TARGET_BLOCK_TIME / 60, 1),
+                    "retarget_interval": bc.retarget_interval,
                     "next_block_reward": bc.block_reward(len(bc.chain)),
                     "max_supply": MAX_SUPPLY,
                     "mining_end_year": round(mining_end_year()),
