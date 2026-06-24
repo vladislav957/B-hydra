@@ -169,13 +169,11 @@ class BHydraApp(tk.Tk):
         self._add_paste_menu(to_entry)          # ПКМ → «Вставить» (на любой раскладке)
         ttk.Button(send, text="Вставить", width=10,
                    command=self._paste_recipient).grid(row=0, column=2, padx=2)
-        ttk.Button(send, text="Себе", width=8,
-                   command=self._fill_self).grid(row=0, column=3, padx=2)
         ttk.Label(send, text="Сумма:").grid(row=1, column=0, sticky="w", pady=4)
         ttk.Entry(send, textvariable=self.amount_var, width=12).grid(
             row=1, column=1, sticky="w", pady=4)
         ttk.Button(send, text="Отправить", command=self._send).grid(
-            row=1, column=2, columnspan=2, sticky="w", padx=2)
+            row=1, column=2, sticky="w", padx=2)
 
     def _build_mining_tab(self, nb: ttk.Notebook) -> None:
         tab = ttk.Frame(nb, padding=12)
@@ -379,13 +377,6 @@ class BHydraApp(tk.Tk):
         self.clipboard_append(value)
         self.update()  # удержать буфер после закрытия окна
         self.status.set(f"{label.rstrip(':')} скопирован в буфер обмена.")
-
-    def _fill_self(self) -> None:
-        """Подставить собственный адрес в поле получателя (перевод себе)."""
-        if self.wallet is None:
-            return messagebox.showwarning("Кошелёк", "Сначала создайте кошелёк.")
-        self.to_var.set(self.wallet.address)
-        self.status.set("Адрес получателя — ваш собственный (перевод себе).")
 
     def _paste_recipient(self) -> None:
         """Вставить адрес из буфера обмена в поле получателя."""
