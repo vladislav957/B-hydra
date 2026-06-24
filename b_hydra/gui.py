@@ -412,13 +412,23 @@ class BHydraApp(tk.Tk):
         self._refresh_status()
 
     def _import_wallet(self) -> None:
+        raw = self.import_var.get().strip()
+        if not raw:
+            return messagebox.showwarning(
+                "Импорт", "Вставьте приватный ключ (64 hex-символа) в поле.")
         try:
-            self.wallet = Wallet.from_private_hex(self.import_var.get().strip())
+            self.wallet = Wallet.from_private_hex(raw)
+        except ValueError as exc:
+            return messagebox.showerror("Неверный приватный ключ", str(exc))
+        try:
             with open(WALLET_FILE, "w") as fh:
                 fh.write(self.wallet.private_key_hex)
-            self._refresh_status()
-        except (ValueError, OSError):
-            messagebox.showerror("Ошибка", "Неверный приватный ключ.")
+        except OSError:
+            pass
+        self.import_var.set("")                 # очистить поле после импорта
+        self._refresh_status()
+        self.status.set("Кошелёк импортирован.")
+        messagebox.showinfo("Импорт", f"Кошелёк загружен:\n{self.wallet.address}")
 
     def _send(self) -> None:
         if self.wallet is None:

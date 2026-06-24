@@ -83,3 +83,18 @@ def test_is_valid_address():
     assert not is_valid_address("not-an-address")
     assert not is_valid_address(generate_wallet().address + "x")  # битый checksum
     assert not is_valid_address(123)
+
+
+def test_from_private_hex_is_lenient_and_clear():
+    """Импорт ключа терпим к 0x/пробелам/регистру и даёт понятные ошибки."""
+    import pytest
+    from b_hydra.wallet import Wallet, generate_wallet
+    w = generate_wallet()
+    k = w.private_key_hex
+    # Терпимость к человеческому вводу.
+    for variant in (k, "0x" + k, "  " + k + "\n", k.upper()):
+        assert Wallet.from_private_hex(variant).address == w.address
+    # Понятные ошибки.
+    for bad in ("", "0x", "BHYDabc", k[:-1], "zz" * 32):
+        with pytest.raises(ValueError):
+            Wallet.from_private_hex(bad)

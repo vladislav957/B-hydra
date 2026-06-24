@@ -243,7 +243,26 @@ class Wallet:
 
     @classmethod
     def from_private_hex(cls, private_hex: str) -> "Wallet":
-        return cls(int.from_bytes(bytes.fromhex(private_hex), "big"))
+        """Восстанавливает кошелёк из приватного ключа (hex).
+
+        Терпимо к вводу человека: убирает пробелы/переводы строк и
+        необязательный префикс 0x. Бросает ValueError с понятным текстом,
+        если ключ не той длины, содержит не-hex символы или вне диапазона.
+        """
+        if not private_hex:
+            raise ValueError("пустой приватный ключ")
+        cleaned = "".join(str(private_hex).split())     # убрать любые пробелы
+        if cleaned[:2].lower() == "0x":
+            cleaned = cleaned[2:]
+        if len(cleaned) != 64:
+            raise ValueError(
+                f"приватный ключ должен быть 64 hex-символа, а тут {len(cleaned)}. "
+                "Похоже, вы вставили не приватный ключ (например, адрес).")
+        try:
+            value = int.from_bytes(bytes.fromhex(cleaned), "big")
+        except ValueError:
+            raise ValueError("в приватном ключе есть лишние символы (не 0-9, a-f)")
+        return cls(value)                               # проверит диапазон [1, N-1]
 
     def __repr__(self):
         return f"<Wallet {self.address}>"
