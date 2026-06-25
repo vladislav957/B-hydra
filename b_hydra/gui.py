@@ -64,6 +64,7 @@ class BHydraApp(tk.Tk):
         self.p2p: P2PNode | None = None
         self._mining = False
         self._auto_after_id = None       # id запланированного авто-майнинга
+        self._net_sync_id = None         # id периодической авто-синхронизации
         # Очередь «фоновый поток → главный поток»: tkinter нельзя трогать из
         # чужого потока, поэтому воркер кладёт события сюда, а главный поток
         # забирает их в _poll_queue.
@@ -626,6 +627,12 @@ class BHydraApp(tk.Tk):
         # Только майнинг и запись в очередь — НИКАКИХ обращений к tkinter.
         for i in range(count):
             if self.p2p and self.p2p._running:
+                # Сначала встаём на самую длинную цепочку сети, потом майним
+                # поверх неё — иначе свой блок «улетит» в форк и не примется.
+                try:
+                    self.p2p.sync()
+                except Exception:
+                    pass
                 block = self.p2p.mine(self.wallet.address)   # майнит + рассылает
             else:
                 block = self.node.mine_pending(self.wallet.address)
@@ -651,6 +658,12 @@ class BHydraApp(tk.Tk):
                     self.mine_status.set(f"Готово ✓ намайнено {msg[1]} блоков")
                     self._refresh_status()
                     self._refresh_blocks()
+                elif msg[0] == "synced":
+                    self._log(self.net_log,
+                              f"🔄 Авто-синхронизация: подтянута цепочка, "
+                              f"высота {msg[1]}")
+                    self._refresh_status()
+                    self._refresh_blocks()
         except queue.Empty:
             pass
         self.after(150, self._poll_queue)
@@ -659,6 +672,9 @@ class BHydraApp(tk.Tk):
     def _toggle_node(self) -> None:
         if self.p2p and self.p2p._running:
             self.p2p.stop()
+            if self._net_sync_id is not None:
+                self.after_cancel(self._net_sync_id)
+                self._net_sync_id = None
             self.node_btn.config(text="Запустить узел")
             self._log(self.net_log, "Узел остановлен.")
         else:
@@ -667,7 +683,29 @@ class BHydraApp(tk.Tk):
             self.p2p.start()
             self.node_btn.config(text="Остановить узел")
             self._log(self.net_log, f"Узел запущен на {host}:{port}")
+            self._net_autosync()             # начать периодически подтягивать цепочку
         self._refresh_status()
+
+    def _net_autosync(self) -> None:
+        """Каждые 5 с тихо подтягивает у пиров самую длинную/тяжёлую цепочку.
+
+        Сетевые вызовы блокирующие, поэтому идут в фоновом потоке, а результат
+        возвращается в главный поток через очередь (_poll_queue)."""
+        if not (self.p2p and self.p2p._running):
+            self._net_sync_id = None
+            return
+        # Во время майнинга не трогаем цепочку (иначе гонка с воркером).
+        if not self._mining and self.p2p.peers:
+            threading.Thread(target=self._do_autosync, daemon=True).start()
+        self._net_sync_id = self.after(5000, self._net_autosync)
+
+    def _do_autosync(self) -> None:
+        try:
+            changed = self.p2p.sync()
+        except Exception:                    # сеть могла отвалиться — не падаем
+            changed = False
+        if changed:
+            self._queue.put(("synced", self.node.height))
 
     def _connect(self) -> None:
         if not (self.p2p and self.p2p._running):
