@@ -971,6 +971,7 @@ class BHydraApp(tk.Tk):
             return
         icon = {"Пополнение": "🟢 Пополнение",
                 "Отправка": "🔴 Отправка",
+                "Себе": "🔁 Себе",
                 "Майнинг": "⛏ Майнинг"}
         history = self.node.address_history(self.wallet.address)
         for h in reversed(history):            # свежие операции сверху

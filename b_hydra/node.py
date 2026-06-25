@@ -405,11 +405,18 @@ class BHydraNode:
                 if _is_coinbase_dict(tx):
                     direction, counterparty, amount = "Майнинг", "—", received
                 elif sent > received:
-                    # Отправка: контрагент — получатель (выходы не на наш адрес).
+                    # Контрагент — получатель (выходы не на наш адрес).
                     others = [o["address"] for o in vout if o["address"] != address]
-                    direction = "Отправка"
-                    counterparty = others[0] if others else address  # перевод себе
-                    amount = sent - received                          # ушло нетто
+                    if others:
+                        direction = "Отправка"
+                        counterparty = others[0]
+                        amount = sent - received                  # ушло нетто (+ комиссия)
+                    else:
+                        # Все выходы — на наш же адрес: перевод самому себе.
+                        # Нетто из кошелька уходит только комиссия майнеру.
+                        direction = "Себе"
+                        counterparty = address
+                        amount = sent - received                  # = комиссия
                 else:
                     # Пополнение: контрагент — отправитель (вход не наш).
                     direction = "Пополнение"
