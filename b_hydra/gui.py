@@ -65,6 +65,7 @@ class BHydraApp(tk.Tk):
         self._mining = False
         self._auto_after_id = None       # id запланированного авто-майнинга
         self._net_sync_id = None         # id периодической авто-синхронизации
+        self.autosync_var = tk.BooleanVar(value=True)   # автосинк включён по умолчанию
         # Очередь «фоновый поток → главный поток»: tkinter нельзя трогать из
         # чужого потока, поэтому воркер кладёт события сюда, а главный поток
         # забирает их в _poll_queue.
@@ -278,6 +279,8 @@ class BHydraApp(tk.Tk):
         ttk.Button(prow, text="Подключиться", command=self._connect).pack(side="left")
         ttk.Button(prow, text="Синхронизировать", command=self._sync).pack(
             side="left", padx=6)
+        ttk.Checkbutton(prow, text="Авто-синхронизация (каждые 5 с)",
+                        variable=self.autosync_var).pack(side="left", padx=6)
 
         self.net_log = tk.Text(tab, height=16, state="disabled")
         self.net_log.pack(fill="both", expand=True)
@@ -694,8 +697,9 @@ class BHydraApp(tk.Tk):
         if not (self.p2p and self.p2p._running):
             self._net_sync_id = None
             return
-        # Во время майнинга не трогаем цепочку (иначе гонка с воркером).
-        if not self._mining and self.p2p.peers:
+        # Тикаем, только пока галочка включена; во время майнинга цепочку не
+        # трогаем (иначе гонка с воркером).
+        if self.autosync_var.get() and not self._mining and self.p2p.peers:
             threading.Thread(target=self._do_autosync, daemon=True).start()
         self._net_sync_id = self.after(5000, self._net_autosync)
 
