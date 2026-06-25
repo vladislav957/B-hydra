@@ -270,6 +270,8 @@ class BHydraApp(tk.Tk):
         self.node_btn = ttk.Button(row, text="Запустить узел",
                                    command=self._toggle_node)
         self.node_btn.pack(side="left", padx=6)
+        ttk.Button(row, text="Мой IP", command=self._show_my_ip).pack(
+            side="left", padx=4)
 
         prow = ttk.Frame(tab)
         prow.pack(fill="x", pady=8)
@@ -672,6 +674,31 @@ class BHydraApp(tk.Tk):
         self.after(150, self._poll_queue)
 
     # --- Логика: сеть ----------------------------------------------------
+    @staticmethod
+    def _local_ip() -> str:
+        """IP компьютера в локальной сети (для связи с другими машинами)."""
+        import socket
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("8.8.8.8", 80))      # коннект не шлёт пакетов, лишь даёт IP
+            return s.getsockname()[0]
+        except OSError:
+            return "127.0.0.1"
+        finally:
+            s.close()
+
+    def _show_my_ip(self) -> None:
+        ip = self._local_ip()
+        self.host_var.set(ip)               # сразу подставим в «Хост»
+        messagebox.showinfo(
+            "Мой IP в сети",
+            f"Ваш адрес в локальной сети: {ip}\n\n"
+            f"Чтобы вас нашёл другой участник, дайте ему: {ip}:{self.port_var.get()}\n\n"
+            "127.0.0.1 — это «только мой компьютер». Для связи между РАЗНЫМИ "
+            "компьютерами используйте этот IP, а не 127.0.0.1.\n"
+            "(Оба должны быть в одной сети Wi-Fi/роутере; брандмауэр Windows "
+            "может спросить разрешение — нажмите «Разрешить».)")
+
     def _toggle_node(self) -> None:
         if self.p2p and self.p2p._running:
             self.p2p.stop()
@@ -686,6 +713,13 @@ class BHydraApp(tk.Tk):
             self.p2p.start()
             self.node_btn.config(text="Остановить узел")
             self._log(self.net_log, f"Узел запущен на {host}:{port}")
+            if host in ("127.0.0.1", "localhost"):
+                self._log(self.net_log,
+                          "ℹ Хост 127.0.0.1 — виден только на этом компьютере. "
+                          "Для связи с другой машиной нажмите «Мой IP».")
+            else:
+                self._log(self.net_log,
+                          f"➡ Дайте другому участнику адрес: {host}:{port}")
             self._net_autosync()             # начать периодически подтягивать цепочку
         self._refresh_status()
 
