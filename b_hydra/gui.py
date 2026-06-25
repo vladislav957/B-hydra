@@ -714,14 +714,34 @@ class BHydraApp(tk.Tk):
     def _connect(self) -> None:
         if not (self.p2p and self.p2p._running):
             return messagebox.showwarning("Сеть", "Сначала запустите узел.")
+        raw = self.peer_var.get().strip()
+        if ":" not in raw:
+            return messagebox.showerror(
+                "Сеть", "Адрес пира в формате host:port, например 127.0.0.1:5001")
+        host, port_s = raw.rsplit(":", 1)
         try:
-            host, port = self.peer_var.get().strip().split(":")
-            self.p2p.connect(host, int(port))
+            port = int(port_s)
+        except ValueError:
+            return messagebox.showerror("Сеть", "Порт должен быть числом (например 5001).")
+        if (host, port) == (self.host_var.get().strip(), int(self.port_var.get())):
+            return messagebox.showwarning(
+                "Сеть", "Это адрес ЭТОГО же узла. Нужен адрес ДРУГОГО узла.")
+        try:
+            self.p2p.connect(host, port)
             self._refresh_blocks()
             self._log(self.net_log, f"Подключено к {host}:{port} | "
                                     f"пиров: {len(self.p2p.peers)} | "
                                     f"высота: {self.node.height}")
             self._refresh_status()
+        except ConnectionRefusedError:
+            messagebox.showerror(
+                "Узел не найден",
+                f"По адресу {host}:{port} никто не отвечает.\n\n"
+                "Похоже, второй узел там не запущен. Чтобы появилась сеть, нужен "
+                "ВТОРОЙ узел:\n"
+                "1) Запусти второй экземпляр B-hydra в ДРУГОЙ папке;\n"
+                f"2) на нём укажи Порт {port} и нажми «Запустить узел»;\n"
+                "3) только потом здесь нажми «Подключиться».")
         except (ValueError, OSError) as exc:
             messagebox.showerror("Сеть", f"Не удалось подключиться: {exc}")
 
