@@ -184,6 +184,25 @@ class P2PNode:
                 continue
         self.sync()
 
+    def discover_peers(self):
+        """Сплетни об адресах: спросить у известных пиров их списки пиров и
+        подключиться к новым (как `addr`-обмен в Bitcoin — сеть расползается
+        сама, без ручного ввода адресов каждого узла)."""
+        for host, port in list(self.peers):
+            try:
+                resp = self.send(host, port, {"type": "get_peers"})
+            except OSError:
+                continue
+            for h, p in resp.get("peers", []):
+                if (h, p) == (self.host, self.port) or (h, p) in self.peers:
+                    continue
+                self.add_peer(h, p)
+                try:                       # представиться новому пиру
+                    self.send(h, p, {"type": "hello",
+                                     "host": self.host, "port": self.port})
+                except OSError:
+                    continue
+
     def broadcast(self, message: dict):
         results = []
         for host, port in list(self.peers):

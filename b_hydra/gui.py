@@ -43,6 +43,7 @@ from .wallet import Wallet, generate_wallet, is_valid_address
 
 STATE_FILE = "bhydra_chain.json"
 WALLET_FILE = "wallet.key"
+SEEDS_FILE = "bhydra_seeds.txt"     # список seed-узлов (host:port), как в Bitcoin
 
 
 class BHydraApp(tk.Tk):
@@ -66,6 +67,7 @@ class BHydraApp(tk.Tk):
         self._auto_after_id = None       # id запланированного авто-майнинга
         self._net_sync_id = None         # id периодической авто-синхронизации
         self.autosync_var = tk.BooleanVar(value=True)   # автосинк включён по умолчанию
+        self.seeds_var = tk.StringVar(value=self._load_seeds())  # seed-узлы
         # Очередь «фоновый поток → главный поток»: tkinter нельзя трогать из
         # чужого потока, поэтому воркер кладёт события сюда, а главный поток
         # забирает их в _poll_queue.
@@ -284,7 +286,18 @@ class BHydraApp(tk.Tk):
         ttk.Checkbutton(prow, text="Авто-синхронизация (каждые 5 с)",
                         variable=self.autosync_var).pack(side="left", padx=6)
 
-        self.net_log = tk.Text(tab, height=16, state="disabled")
+        # Seed-узлы: адреса «для входа в сеть», к которым узел подключается сам
+        # при старте (как DNS-сиды/вшитые узлы Bitcoin). Несколько — через запятую.
+        seedrow = ttk.Frame(tab)
+        seedrow.pack(fill="x", pady=(0, 6))
+        ttk.Label(seedrow, text="Seed-узлы (host:port, через запятую):").pack(
+            side="left")
+        ttk.Entry(seedrow, textvariable=self.seeds_var).pack(
+            side="left", fill="x", expand=True, padx=4)
+        ttk.Button(seedrow, text="Сохранить", command=self._save_seeds).pack(
+            side="left")
+
+        self.net_log = tk.Text(tab, height=14, state="disabled")
         self.net_log.pack(fill="both", expand=True)
 
     def _build_blocks_tab(self, nb: ttk.Notebook) -> None:
@@ -669,6 +682,14 @@ class BHydraApp(tk.Tk):
                               f"высота {msg[1]}")
                     self._refresh_status()
                     self._refresh_blocks()
+                elif msg[0] == "bootstrap":
+                    _, ok, total, height = msg
+                    self._log(self.net_log,
+                              f"🌱 Seed-узлы: подключено {ok} из {total} | "
+                              f"пиров: {len(self.p2p.peers) if self.p2p else 0} | "
+                              f"высота: {height}")
+                    self._refresh_status()
+                    self._refresh_blocks()
         except queue.Empty:
             pass
         self.after(150, self._poll_queue)
@@ -686,6 +707,59 @@ class BHydraApp(tk.Tk):
             return "127.0.0.1"
         finally:
             s.close()
+
+    @staticmethod
+    def _load_seeds() -> str:
+        try:
+            with open(SEEDS_FILE, encoding="utf-8") as fh:
+                return fh.read().strip()
+        except OSError:
+            return ""
+
+    def _save_seeds(self) -> None:
+        try:
+            with open(SEEDS_FILE, "w", encoding="utf-8") as fh:
+                fh.write(self.seeds_var.get().strip())
+            self.status.set("Seed-узлы сохранены.")
+        except OSError:
+            pass
+
+    def _parse_seeds(self):
+        """Разбирает поле seed-узлов в список (host, port)."""
+        seeds = []
+        for token in self.seeds_var.get().replace(";", ",").split(","):
+            token = token.strip()
+            if ":" not in token:
+                continue
+            host, _, port = token.rpartition(":")
+            host = host.strip()
+            try:
+                seeds.append((host, int(port.strip())))
+            except ValueError:
+                continue
+        return seeds
+
+    def _bootstrap_seeds(self) -> None:
+        """Подключиться ко всем seed-узлам в фоне (как bootstrap у Bitcoin)."""
+        seeds = self._parse_seeds()
+        if not seeds:
+            return
+        self._save_seeds()
+        threading.Thread(target=self._do_bootstrap, args=(seeds,),
+                         daemon=True).start()
+
+    def _do_bootstrap(self, seeds) -> None:
+        me = (self.host_var.get().strip(), int(self.port_var.get()))
+        ok = 0
+        for host, port in seeds:
+            if (host, port) == me:
+                continue
+            try:
+                self.p2p.connect(host, port)
+                ok += 1
+            except OSError:
+                continue
+        self._queue.put(("bootstrap", ok, len(seeds), self.node.height))
 
     def _show_my_ip(self) -> None:
         ip = self._local_ip()
@@ -720,6 +794,9 @@ class BHydraApp(tk.Tk):
             else:
                 self._log(self.net_log,
                           f"➡ Дайте другому участнику адрес: {host}:{port}")
+            if self._parse_seeds():
+                self._log(self.net_log, "🌱 Подключаюсь к seed-узлам…")
+                self._bootstrap_seeds()      # авто-вход в сеть через seed-узлы
             self._net_autosync()             # начать периодически подтягивать цепочку
         self._refresh_status()
 
@@ -739,6 +816,7 @@ class BHydraApp(tk.Tk):
 
     def _do_autosync(self) -> None:
         try:
+            self.p2p.discover_peers()        # сплетни: узнать новых пиров
             changed = self.p2p.sync()
         except Exception:                    # сеть могла отвалиться — не падаем
             changed = False
