@@ -281,6 +281,8 @@ class BHydraApp(tk.Tk):
         self.peer_var = tk.StringVar()
         ttk.Entry(prow, textvariable=self.peer_var, width=20).pack(side="left", padx=4)
         ttk.Button(prow, text="Подключиться", command=self._connect).pack(side="left")
+        ttk.Button(prow, text="Проверить связь", command=self._test_peer).pack(
+            side="left", padx=4)
         ttk.Button(prow, text="Синхронизировать", command=self._sync).pack(
             side="left", padx=6)
         ttk.Checkbutton(prow, text="Авто-синхронизация (каждые 5 с)",
@@ -690,6 +692,16 @@ class BHydraApp(tk.Tk):
                               f"высота: {height}")
                     self._refresh_status()
                     self._refresh_blocks()
+                elif msg[0] == "conntest":
+                    _, host, port, ok, err = msg
+                    if ok:
+                        self._log(self.net_log,
+                                  f"✅ {host}:{port} доступен — узел там есть, "
+                                  "можно «Подключиться».")
+                    else:
+                        self._log(self.net_log,
+                                  f"❌ {host}:{port} не отвечает. Причины: узел там "
+                                  "не запущен / другая сеть / брандмауэр / неверный IP.")
         except queue.Empty:
             pass
         self.after(150, self._poll_queue)
@@ -856,6 +868,29 @@ class BHydraApp(tk.Tk):
                 "3) только потом здесь нажми «Подключиться».")
         except (ValueError, OSError) as exc:
             messagebox.showerror("Сеть", f"Не удалось подключиться: {exc}")
+
+    def _test_peer(self) -> None:
+        """Проверить, доступен ли узел по адресу из поля «Пир» (диагностика)."""
+        raw = self.peer_var.get().strip()
+        if ":" not in raw:
+            return messagebox.showerror(
+                "Проверка связи", "Адрес в формате host:port, например 192.168.1.50:5000")
+        host, _, port_s = raw.rpartition(":")
+        try:
+            port = int(port_s)
+        except ValueError:
+            return messagebox.showerror("Проверка связи", "Порт должен быть числом.")
+        self._log(self.net_log, f"🔎 Проверяю связь с {host}:{port}…")
+        threading.Thread(target=self._do_test_peer, args=(host.strip(), port),
+                         daemon=True).start()
+
+    def _do_test_peer(self, host: str, port: int) -> None:
+        import socket
+        try:
+            with socket.create_connection((host, port), timeout=5):
+                self._queue.put(("conntest", host, port, True, ""))
+        except (OSError, ValueError) as exc:
+            self._queue.put(("conntest", host, port, False, str(exc)))
 
     def _sync(self) -> None:
         if not (self.p2p and self.p2p._running):
