@@ -11,8 +11,16 @@ chain»). Логика блокчейна — в Node.py (BHydraNode); здес�
 """
 
 import json
+import secrets
 import socket
 import threading
+import time
+
+# Авто-поиск узлов в локальной сети (WiFi/LAN) без интернета и без ввода IP:
+# каждый узел рассылает короткий UDP-«маяк» в широковещание, а услышав чужой
+# маяк — подключается. Работает на одном роутере/точке доступа даже офлайн.
+DISCOVERY_PORT = 5999
+DISCOVERY_MAGIC = "b-hydra-discovery-v1"
 
 if __name__ == "__main__" and __package__ in (None, ""):
     import os
@@ -37,6 +45,9 @@ class P2PNode:
         self._seen_lock = threading.Lock()
         self._server = None
         self._running = False
+        self._node_id = secrets.token_hex(8)   # чтобы не отвечать на свой же маяк
+        self._discovery_running = False
+        self.on_discover = None                # колбэк (host, port) при находке
 
     # --- Протокол --------------------------------------------------------
     def _handle_message(self, raw: bytes) -> bytes:
@@ -148,6 +159,7 @@ class P2PNode:
 
     def stop(self):
         self._running = False
+        self._discovery_running = False
         if self._server is not None:
             self._server.close()
 
@@ -202,6 +214,74 @@ class P2PNode:
                                      "host": self.host, "port": self.port})
                 except OSError:
                     continue
+
+    # --- Авто-поиск в локальной сети (UDP-маяки, WiFi/LAN без интернета) ---
+    def start_discovery(self, interval: int = 5):
+        """Запустить рассылку и приём UDP-маяков для авто-поиска узлов в сети."""
+        if self._discovery_running:
+            return
+        self._discovery_running = True
+        threading.Thread(target=self._discovery_listen, daemon=True).start()
+        threading.Thread(target=self._discovery_announce, args=(interval,),
+                         daemon=True).start()
+
+    def stop_discovery(self):
+        self._discovery_running = False
+
+    def _discovery_announce(self, interval: int):
+        """Периодически кричим в сеть «я — узел B-hydra на порту N»."""
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        beacon = json.dumps({"magic": DISCOVERY_MAGIC, "port": self.port,
+                             "id": self._node_id}).encode("utf-8")
+        while self._discovery_running and self._running:
+            try:
+                sock.sendto(beacon, ("255.255.255.255", DISCOVERY_PORT))
+            except OSError:
+                pass
+            time.sleep(interval)
+        sock.close()
+
+    def _discovery_listen(self):
+        """Слушаем маяки соседей и подключаемся к новым узлам."""
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:                                   # на одной машине — несколько узлов
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+        except (AttributeError, OSError):
+            pass
+        try:
+            sock.bind(("", DISCOVERY_PORT))
+        except OSError:
+            return
+        sock.settimeout(1.0)
+        while self._discovery_running and self._running:
+            try:
+                data, addr = sock.recvfrom(2048)
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            try:
+                msg = json.loads(data.decode("utf-8"))
+            except (ValueError, UnicodeDecodeError):
+                continue
+            if msg.get("magic") != DISCOVERY_MAGIC or msg.get("id") == self._node_id:
+                continue                        # чужой протокол или наш же маяк
+            peer = (addr[0], int(msg.get("port", 0)))
+            if not peer[1] or peer == (self.host, self.port) or peer in self.peers:
+                continue
+            self.add_peer(*peer)
+            try:
+                self.connect(*peer)             # обмен пирами + синхронизация
+            except OSError:
+                continue
+            if self.on_discover:
+                try:
+                    self.on_discover(*peer)
+                except Exception:
+                    pass
+        sock.close()
 
     def broadcast(self, message: dict):
         results = []

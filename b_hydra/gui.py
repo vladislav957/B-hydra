@@ -67,6 +67,7 @@ class BHydraApp(tk.Tk):
         self._auto_after_id = None       # id запланированного авто-майнинга
         self._net_sync_id = None         # id периодической авто-синхронизации
         self.autosync_var = tk.BooleanVar(value=True)   # автосинк включён по умолчанию
+        self.discover_var = tk.BooleanVar(value=True)   # авто-поиск в сети (WiFi/LAN)
         self.seeds_var = tk.StringVar(value=self._load_seeds())  # seed-узлы
         # Очередь «фоновый поток → главный поток»: tkinter нельзя трогать из
         # чужого потока, поэтому воркер кладёт события сюда, а главный поток
@@ -287,6 +288,8 @@ class BHydraApp(tk.Tk):
             side="left", padx=6)
         ttk.Checkbutton(prow, text="Авто-синхронизация (каждые 5 с)",
                         variable=self.autosync_var).pack(side="left", padx=6)
+        ttk.Checkbutton(prow, text="Авто-поиск в сети (WiFi)",
+                        variable=self.discover_var).pack(side="left", padx=6)
 
         # Seed-узлы: адреса «для входа в сеть», к которым узел подключается сам
         # при старте (как DNS-сиды/вшитые узлы Bitcoin). Несколько — через запятую.
@@ -692,6 +695,12 @@ class BHydraApp(tk.Tk):
                               f"высота: {height}")
                     self._refresh_status()
                     self._refresh_blocks()
+                elif msg[0] == "discovered":
+                    _, host, port = msg
+                    self._log(self.net_log,
+                              f"🛰 Найден узел в сети: {host}:{port} — подключаюсь.")
+                    self._refresh_status()
+                    self._refresh_blocks()
                 elif msg[0] == "conntest":
                     _, host, port, ok, err = msg
                     if ok:
@@ -809,6 +818,13 @@ class BHydraApp(tk.Tk):
             if self._parse_seeds():
                 self._log(self.net_log, "🌱 Подключаюсь к seed-узлам…")
                 self._bootstrap_seeds()      # авто-вход в сеть через seed-узлы
+            if self.discover_var.get():
+                # Колбэк из потока поиска → в очередь главного потока.
+                self.p2p.on_discover = lambda h, p: self._queue.put(
+                    ("discovered", h, p))
+                self.p2p.start_discovery()   # авто-поиск узлов по WiFi/LAN (UDP)
+                self._log(self.net_log,
+                          "🛰 Авто-поиск в сети включён — узлы найдутся сами.")
             self._net_autosync()             # начать периодически подтягивать цепочку
         self._refresh_status()
 
