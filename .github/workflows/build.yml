@@ -15,18 +15,18 @@ jobs:
       matrix:
         include:
           - os: windows-latest
-            artifact: bhydra-windows
-            binary: dist/bhydra.exe
+            artifact: bhydra-core-windows
+            binary: dist/B-hydra-Core.exe
             iconflag: "--icon assets/bhydra.ico"
             sep: ";"
           - os: macos-latest
-            artifact: bhydra-macos
-            binary: dist/bhydra
+            artifact: bhydra-core-macos
+            binary: dist/B-hydra-Core
             iconflag: "--icon assets/bhydra.png"
             sep: ":"
           - os: ubuntu-latest
-            artifact: bhydra-linux
-            binary: dist/bhydra
+            artifact: bhydra-core-linux
+            binary: dist/B-hydra-Core
             iconflag: ""
             sep: ":"
     runs-on: ${{ matrix.os }}
@@ -46,7 +46,7 @@ jobs:
 
       - name: Build executable
         run: >
-          pyinstaller --onefile --windowed --name bhydra ${{ matrix.iconflag }}
+          pyinstaller --onefile --windowed --name B-hydra-Core ${{ matrix.iconflag }}
           --add-data "assets/bhydra.png${{ matrix.sep }}assets"
           bhydra_gui.py
 

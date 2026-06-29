@@ -47,11 +47,11 @@ SEEDS_FILE = "bhydra_seeds.txt"     # список seed-узлов (host:port), 
 
 
 class BHydraApp(tk.Tk):
-    """Главное окно клиента B-hydra."""
+    """Главное окно B-hydra Core — эталонного клиента сети (полный узел)."""
 
     def __init__(self) -> None:
         super().__init__()
-        self.title("B-hydra — кошелёк · майнинг · сеть")
+        self.title("B-hydra Core — кошелёк · майнинг · сеть")
         self.geometry("680x560")
         self._set_icon()
         self._text_widgets: list[tk.Text] = []
@@ -957,7 +957,8 @@ class BHydraApp(tk.Tk):
     def _about(self) -> None:
         messagebox.showinfo(
             "О программе",
-            f"B-hydra v{__version__}\n\n"
+            f"B-hydra Core v{__version__}\n\n"
+            "Эталонный клиент сети B-hydra (полный узел).\n"
             "Одноранговая электронная денежная система (P2P).\n"
             "Кошелёк · майнинг · сеть в одном приложении.\n\n"
             "Криптография: SHA-2 (SHA-256/512) собственной реализации,\n"
