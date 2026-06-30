@@ -331,6 +331,18 @@ class BHydraApp(tk.Tk):
                                      anchor="center" if col in ("Сумма", "Комиссия",
                                                                 "Целевой блок") else "w")
         self.mempool_tree.pack(fill="both", expand=True, pady=6)
+        # Клик по строке: детали (двойной) и копирование txid (правый клик).
+        self._mempool_meta = {}            # iid → txid (полный)
+        self._mempool_menu = tk.Menu(self.mempool_tree, tearoff=0)
+        self._mempool_menu.add_command(label="Показать детали",
+                                       command=self._show_mempool_tx)
+        self._mempool_menu.add_command(label="Копировать txid",
+                                       command=self._copy_mempool_txid)
+        self.mempool_tree.bind("<Double-1>", lambda e: self._show_mempool_tx())
+        self.mempool_tree.bind("<Button-3>", self._mempool_popup)
+        ttk.Label(tab, foreground="gray",
+                  text="(двойной клик — детали транзакции, правый клик — меню)").pack(
+            anchor="w")
 
     def _refresh_mempool(self) -> None:
         """Обновить таблицу мемпула (по умолчанию — при каждом refresh)."""
@@ -338,6 +350,7 @@ class BHydraApp(tk.Tk):
         if tree is None:
             return
         tree.delete(*tree.get_children())
+        self._mempool_meta = {}
         info = self.node.mempool_info()
         n = info["pending"]
         target = info["target_block"]
@@ -351,13 +364,67 @@ class BHydraApp(tk.Tk):
             fee = "—" if t["fee"] is None else f"{t['fee']:.4f}"
             party = t["recipients"][0] if t["recipients"] else "— себе —"
             party = party if len(party) <= 30 else party[:24] + "…"
-            tree.insert("", "end", values=(
+            iid = tree.insert("", "end", values=(
                 t["txid"][:28] + "…",
                 f"{t['amount']:.4f} BHY",
                 fee,
                 party,
                 f"#{t['target_block']}",
             ))
+            self._mempool_meta[iid] = t["txid"]        # полный txid для копии/деталей
+
+    def _mempool_popup(self, event) -> None:
+        row = self.mempool_tree.identify_row(event.y)
+        if row:
+            self.mempool_tree.selection_set(row)
+            self._mempool_menu.tk_popup(event.x_root, event.y_root)
+
+    def _selected_mempool_tx(self):
+        sel = self.mempool_tree.selection()
+        if not sel:
+            return None, None
+        txid = self._mempool_meta.get(sel[0])
+        for tx in self.node.mempool.transactions:
+            if tx.txid == txid:
+                return txid, tx
+        return txid, None
+
+    def _copy_mempool_txid(self) -> None:
+        txid, _ = self._selected_mempool_tx()
+        if not txid:
+            return
+        self.clipboard_clear()
+        self.clipboard_append(txid)
+        self.update()
+        self.status.set(f"Скопирован txid: {txid[:24]}…")
+
+    def _show_mempool_tx(self) -> None:
+        """Окно с деталями неподтверждённой транзакции (входы/выходы)."""
+        txid, tx = self._selected_mempool_tx()
+        if tx is None:
+            return
+        d = tx.to_dict()
+        target = len(self.node.blockchain.chain)
+        lines = [f"Транзакция (в мемпуле, ждёт блок #{target})",
+                 f"txid: {txid}", "",
+                 f"Входов: {len(d.get('vin', []))}"]
+        for inp in d.get("vin", []):
+            lines.append(f"  ← {inp.get('txid', '')[:24]}…:{inp.get('index')}")
+        lines.append(f"Выходов: {len(d.get('vout', []))}")
+        for o in d.get("vout", []):
+            lines.append(f"  → {o['amount']} BHY  {o['address']}")
+
+        win = tk.Toplevel(self)
+        win.title("Детали транзакции (мемпул)")
+        win.transient(self)
+        txt = tk.Text(win, width=82, height=min(20, 6 + len(d.get("vin", []))
+                                                + len(d.get("vout", []))), wrap="none")
+        txt.pack(fill="both", expand=True, padx=10, pady=10)
+        txt.insert("end", "\n".join(lines))
+        txt.config(state="disabled")
+        ttk.Button(win, text="Копировать txid",
+                   command=self._copy_mempool_txid).pack(pady=(0, 6))
+        ttk.Button(win, text="Закрыть", command=win.destroy).pack(pady=(0, 10))
 
     def _build_blocks_tab(self, nb: ttk.Notebook) -> None:
         tab = ttk.Frame(nb, padding=12)
