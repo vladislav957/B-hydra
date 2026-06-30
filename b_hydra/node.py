@@ -436,6 +436,46 @@ class BHydraNode:
                 })
         return history
 
+    def mempool_info(self):
+        """Сведения о неподтверждённых транзакциях (мемпул).
+
+        Возвращает целевой блок (в какой попадут при ближайшем майнинге) и
+        список транзакций: txid, сумма выходов, комиссия, число входов/выходов.
+        """
+        utxos = self.utxo_set()
+        target_block = len(self.blockchain.chain)     # следующий добытый блок
+        items = []
+        for tx in self.mempool.transactions:
+            d = tx.to_dict()
+            # Адреса-отправители (владельцы входов) — чтобы отделить сдачу себе.
+            sender_addrs = set()
+            for inp in d.get("vin", []):
+                ref = utxos.get((inp["txid"], inp["index"]))
+                if ref:
+                    sender_addrs.add(ref["address"])
+            # Переведено получателям = выходы НЕ на адрес отправителя (без сдачи).
+            sent = sum(o["amount"] for o in d.get("vout", [])
+                       if o["address"] not in sender_addrs)
+            recipients = [o["address"] for o in d.get("vout", [])
+                          if o["address"] not in sender_addrs]
+            try:
+                fee = self._tx_fee(tx, utxos)          # вход − выход
+            except (KeyError, AttributeError):
+                fee = None                             # вход не найден (цепочка в мемпуле)
+            items.append({
+                "txid": d["txid"],
+                "amount": sent,                        # переведено получателям
+                "total_out": sum(o["amount"] for o in d.get("vout", [])),
+                "fee": fee,
+                "vin": len(d.get("vin", [])),
+                "vout": len(d.get("vout", [])),
+                "recipients": recipients,
+                "target_block": target_block,
+            })
+        return {"target_block": target_block,
+                "pending": len(items),
+                "transactions": items}
+
     # --- Сохранение / загрузка ------------------------------------------
     def save(self, path: str) -> None:
         """Сохраняет цепочку и мемпул в JSON-файл."""

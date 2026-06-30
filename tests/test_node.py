@@ -108,3 +108,25 @@ def test_address_history_directions_and_counterparties():
     inc = next(h for h in hist if h["direction"] == "Пополнение")
     assert inc["counterparty"] == bob.address          # от кого пришло
     assert inc["amount"] == 3
+
+
+def test_mempool_info_shows_pending_and_target_block():
+    """Мемпул показывает неподтверждённые переводы и целевой блок."""
+    from b_hydra.node import BHydraNode
+    from b_hydra.wallet import generate_wallet
+    from b_hydra.blockchain import DEFAULT_FEE
+    n = BHydraNode(difficulty=2)
+    n.blockchain.retarget_interval = 4
+    a, b = generate_wallet(), generate_wallet()
+    n.mine_pending(a.address)
+    assert n.mempool_info()["pending"] == 0          # пусто после майнинга
+    n.add_transaction(n.create_transaction(a, b.address, 7, fee=DEFAULT_FEE))
+    info = n.mempool_info()
+    assert info["pending"] == 1
+    assert info["target_block"] == len(n.blockchain.chain)   # следующий блок
+    t = info["transactions"][0]
+    assert t["amount"] == 7                            # переведено (без сдачи себе)
+    assert t["recipients"][0] == b.address
+    assert abs(t["fee"] - DEFAULT_FEE) < 1e-9
+    n.mine_pending(a.address)
+    assert n.mempool_info()["pending"] == 0          # после майнинга мемпул пуст

@@ -118,6 +118,7 @@ class BHydraApp(tk.Tk):
         self._build_wallet_tab(nb)
         self._build_mining_tab(nb)
         self._build_network_tab(nb)
+        self._build_mempool_tab(nb)
         self._build_blocks_tab(nb)
         self._text_widgets = [self.mine_log, self.net_log, self.block_details]
 
@@ -304,6 +305,59 @@ class BHydraApp(tk.Tk):
 
         self.net_log = tk.Text(tab, height=14, state="disabled")
         self.net_log.pack(fill="both", expand=True)
+
+    def _build_mempool_tab(self, nb: ttk.Notebook) -> None:
+        tab = ttk.Frame(nb, padding=12)
+        nb.add(tab, text="🕓 Мемпул")
+
+        top = ttk.Frame(tab)
+        top.pack(fill="x")
+        ttk.Button(top, text="Обновить", command=self._refresh_mempool).pack(
+            side="left")
+        self.mempool_info = tk.StringVar()
+        ttk.Label(top, textvariable=self.mempool_info).pack(side="left", padx=10)
+
+        ttk.Label(tab, foreground="gray",
+                  text="Неподтверждённые переводы ждут майнинга. «Целевой блок» — "
+                       "номер блока, в который они войдут при следующем майнинге.").pack(
+            anchor="w", pady=(4, 6))
+
+        cols = ("txid", "Сумма", "Комиссия", "Кому", "Целевой блок")
+        self.mempool_tree = ttk.Treeview(tab, columns=cols, show="headings",
+                                         height=12)
+        for col, w in zip(cols, (250, 110, 100, 250, 110)):
+            self.mempool_tree.heading(col, text=col)
+            self.mempool_tree.column(col, width=w,
+                                     anchor="center" if col in ("Сумма", "Комиссия",
+                                                                "Целевой блок") else "w")
+        self.mempool_tree.pack(fill="both", expand=True, pady=6)
+
+    def _refresh_mempool(self) -> None:
+        """Обновить таблицу мемпула (по умолчанию — при каждом refresh)."""
+        tree = getattr(self, "mempool_tree", None)
+        if tree is None:
+            return
+        tree.delete(*tree.get_children())
+        info = self.node.mempool_info()
+        n = info["pending"]
+        target = info["target_block"]
+        if n:
+            self.mempool_info.set(
+                f"В очереди: {n} транзакц. → войдут в блок #{target}")
+        else:
+            self.mempool_info.set(
+                f"Мемпул пуст. Следующий блок будет #{target}.")
+        for t in info["transactions"]:
+            fee = "—" if t["fee"] is None else f"{t['fee']:.4f}"
+            party = t["recipients"][0] if t["recipients"] else "— себе —"
+            party = party if len(party) <= 30 else party[:24] + "…"
+            tree.insert("", "end", values=(
+                t["txid"][:28] + "…",
+                f"{t['amount']:.4f} BHY",
+                fee,
+                party,
+                f"#{t['target_block']}",
+            ))
 
     def _build_blocks_tab(self, nb: ttk.Notebook) -> None:
         tab = ttk.Frame(nb, padding=12)
@@ -1000,6 +1054,7 @@ class BHydraApp(tk.Tk):
             f"баланс: {bal:.2f} BHY | узел: {'вкл' if running else 'выкл'} | "
             f"пиров: {peers}")
         self._refresh_history()
+        self._refresh_mempool()
 
     @staticmethod
     def _fmt_time(ts) -> str:
