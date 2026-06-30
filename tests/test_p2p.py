@@ -128,3 +128,50 @@ def test_transaction_propagates_multi_hop(line_nodes):
     a.submit_transaction(tx)
     assert _wait_until(
         lambda: any(t.txid == tx.txid for t in c.node.mempool.transactions))
+
+
+# --- Ограничение роста seen_tx / seen_blocks (анти-петля без утечки) --------
+from b_hydra.p2p import _BoundedSet, SEEN_LIMIT
+
+
+def test_bounded_set_evicts_oldest_keeps_recent():
+    """При переполнении вытесняется самый старый, свежие остаются."""
+    s = _BoundedSet(max_size=3)
+    for item in ("a", "b", "c"):
+        s.add(item)
+    assert len(s) == 3 and "a" in s
+    s.add("d")                       # переполнение → выталкивается "a"
+    assert len(s) == 3
+    assert "a" not in s              # старый вытеснен
+    assert "b" in s and "c" in s and "d" in s   # свежие на месте
+
+
+def test_bounded_set_dedup_no_growth_on_repeat():
+    """Повтор уже виденного не растит множество и не двигает порядок."""
+    s = _BoundedSet(max_size=3)
+    s.add("a"); s.add("b"); s.add("c")
+    s.add("a")                       # уже видели — размер не меняется
+    assert len(s) == 3
+    s.add("d")                       # "a" по-прежнему самый старый → его и вытолкнет
+    assert "a" not in s and "b" in s
+
+
+def test_node_uses_bounded_seen_sets():
+    """У узла seen_* ограничены по размеру и дедуп работает."""
+    node = P2PNode("127.0.0.1", _free_port(), BHydraNode(difficulty=2),
+                   seen_limit=5)
+    for i in range(20):
+        node.seen_tx.add(f"tx{i}")
+    assert len(node.seen_tx) == 5            # рост ограничен
+    assert "tx19" in node.seen_tx            # свежие сохранены
+    assert "tx0" not in node.seen_tx         # старые вытеснены
+    # дедуп: недавно виденное по-прежнему распознаётся
+    node.seen_tx.add("tx19")
+    assert "tx19" in node.seen_tx and len(node.seen_tx) == 5
+
+
+def test_default_seen_limit_is_bounded():
+    node = P2PNode("127.0.0.1", _free_port(), BHydraNode(difficulty=2))
+    for i in range(SEEN_LIMIT + 100):
+        node.seen_blocks.add(f"h{i}")
+    assert len(node.seen_blocks) == SEEN_LIMIT

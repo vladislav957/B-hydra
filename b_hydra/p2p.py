@@ -15,6 +15,41 @@ import secrets
 import socket
 import threading
 import time
+from collections import OrderedDict
+
+# Предел числа запомненных txid/хешей блоков для анти-петли gossip. Без него
+# множества seen_* росли бы без границ (утечка памяти и мягкий DoS: атакующий
+# шлёт много уникальных txid). 10 000 последних — с запасом хватает, чтобы не
+# пересылать недавно виденное повторно.
+SEEN_LIMIT = 10_000
+
+
+class _BoundedSet:
+    """Множество с пределом размера и FIFO-вытеснением (только stdlib).
+
+    Хранит последние `max_size` добавленных элементов: при переполнении
+    выталкивается самый старый. Поддерживает то же, что нужно для анти-петли:
+    проверку `in` и `add`. Потокобезопасность обеспечивает вызывающий код
+    (доступ к seen_* идёт под self._seen_lock), здесь блокировок нет.
+    """
+
+    def __init__(self, max_size: int = SEEN_LIMIT):
+        self._max = max(1, int(max_size))
+        self._data = OrderedDict()      # элемент → None, порядок = порядок добавления
+
+    def __contains__(self, item) -> bool:
+        return item in self._data
+
+    def add(self, item) -> None:
+        # Новый элемент дописывается в конец; повторное добавление существующего
+        # не меняет его место (честный FIFO по первому появлению).
+        if item not in self._data:
+            self._data[item] = None
+            if len(self._data) > self._max:
+                self._data.popitem(last=False)   # вытолкнуть самый старый
+
+    def __len__(self) -> int:
+        return len(self._data)
 
 # Авто-поиск узлов в локальной сети (WiFi/LAN) без интернета и без ввода IP:
 # каждый узел рассылает короткий UDP-«маяк» в широковещание, а услышав чужой
@@ -35,13 +70,15 @@ from .node import BHydraNode
 class P2PNode:
     """Сетевой узел B-hydra: TCP-сервер + клиент + синхронизация."""
 
-    def __init__(self, host="127.0.0.1", port=5000, node=None):
+    def __init__(self, host="127.0.0.1", port=5000, node=None,
+                 seen_limit=SEEN_LIMIT):
         self.host = host
         self.port = port
         self.node = node if node is not None else BHydraNode()
         self.peers = set()          # известные пиры: множество (host, port)
-        self.seen_tx = set()        # txid уже виденных транзакций (анти-петля)
-        self.seen_blocks = set()    # хеши уже виденных блоков (анти-петля)
+        # Анти-петля gossip с пределом размера (FIFO) — без утечки памяти:
+        self.seen_tx = _BoundedSet(seen_limit)      # txid уже виденных транзакций
+        self.seen_blocks = _BoundedSet(seen_limit)  # хеши уже виденных блоков
         self._seen_lock = threading.Lock()
         self._server = None
         self._running = False
