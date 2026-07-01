@@ -1,4 +1,13 @@
-# B-hydra- это одноранговая электронная кассовая система P2P.
+# B-hydra Core — одноранговая электронная денежная система (P2P)
+
+**B-hydra Core** — эталонный клиент сети B-hydra (полный узел): кошелёк, майнинг
+и P2P-сеть в одном приложении (как Bitcoin Core).
+
+### ⬇️ Скачать готовое приложение (.exe — Python не нужен)
+
+Последняя сборка для Windows/macOS/Linux — в разделе
+[**Releases**](https://github.com/vladislav957/B-hydra/releases/latest):
+скачайте `B-hydra-Core.exe` и запустите двойным кликом.
 
  ---
 
@@ -50,13 +59,117 @@ https://github.com/vladislav957/B-hydra.git
 cd B-hydra
 
 Пример использования :
-После запуска программы вы можете начать майнинг или создать транзакции. Пример кода для добавления блока:
+После запуска программы вы можете начать майнинг или создать транзакции.
+
+Быстрый старт (полная демонстрация жизненного цикла):
+
+    python manig.py
+
+Пример кода для добавления блока:
 
 from b_hydra import Blockchain
 
 blockchain = Blockchain()
 blockchain.add_block(data="Пример транзакции")
 print(blockchain.chain)
+
+Командная строка (CLI) — состояние хранится в bhydra_chain.json:
+
+    python cli.py wallet                       # создать кошелёк
+    python cli.py init                         # инициализировать цепочку
+    python cli.py mine <АДРЕС_МАЙНЕРА>         # добыть блок (награда 50 BHY)
+    python cli.py send <ПРИВ_КЛЮЧ> <АДРЕС> 10 --fee 0.5   # перевод
+    python cli.py mine <АДРЕС_МАЙНЕРА>         # подтвердить транзакцию в блоке
+    python cli.py balance <АДРЕС>             # проверить баланс
+    python cli.py chain                        # показать цепочку
+
+Параметры сети B-hydra: хеш SHA-512, консенсус Proof-of-Work, модель UTXO
+(транзакции со входами и выходами, как в Bitcoin), награда 50 BHY,
+интервал халвинга 310 000 блоков, максимальная эмиссия 31 000 000 BHY.
+Сложность как у Bitcoin (ретаргетинг по времени): PoW устроен как в Bitcoin —
+хеш блока (как 512-битное число) должен быть не больше порога target. Каждые
+RETARGET_INTERVAL блоков target пересчитывается по фактическому времени окна
+относительно ожидаемого: блоки шли быстрее цели → труднее, медленнее → проще
+(изменение не более чем в 4 раза за пересчёт, не легче генезиса). Больше
+майнеров → блоки находятся быстрее цели → следующий пересчёт поднимает сложность
+(«больше майнеров — труднее» получается само, как в Bitcoin). Порог каждого
+блока записан в его заголовок и проверяется всеми узлами.
+Эмиссия как у Bitcoin: за блок майнер получает строго 50 BHY, и каждые
+310 000 блоков награда делится пополам — 50 → 25 → 12.5 … Потолок
+31 000 000 BHY; майнеры получают награду примерно до 3000 года.
+
+Структура проекта — ядро оформлено как Python-пакет b_hydra/:
+
+    b_hydra/
+      hashing.py / sha2.py   — хеши SHA-512 (обёртки) и SHA-2 «с нуля»
+      merkle.py, hashcash.py — дерево Меркла и proof-of-work
+      wallet.py              — ключи ECDSA secp256k1 и адреса
+      transaction.py         — UTXO-транзакции (входы/выходы), мемпул
+      blockchain.py          — блоки, PoW, динамическая сложность
+      economics.py           — награда, халвинг, конец эмиссии (3000)
+      node.py                — узел: UTXO, балансы, майнинг, синхронизация
+      p2p.py, tcp.py         — одноранговая сеть
+      api.py, mobile_client.py — REST API и мобильный кошелёк
+      contract.py            — смарт-контракт и эскроу
+    cli.py, api.py, P2P.py, manig.py — точки входа (запускалки)
+    explorer.html            — веб-обозреватель блоков
+    tests/                   — автотесты (pytest)
+
+Импорт из пакета:
+
+    from b_hydra import Blockchain, BHydraNode, Wallet, Transaction
+
+Полная карта системы (слои, консенсус, P2P-протокол, модель безопасности) —
+в ARCHITECTURE.md.
+
+Хеширование: по умолчанию весь проект использует реализацию SHA-256/512
+«с нуля» (b_hydra/sha2.py, без hashlib). Она применяется на всех уровнях —
+майнинг, дерево Меркла, txid, адреса. Значения хешей идентичны hashlib, меняется
+только скорость (чистый Python заметно медленнее). Вернуть быстрый движок:
+
+    BHYDRA_PURE_SHA=0 python manig.py        # через окружение
+    # или в коде:
+    from b_hydra import hashing
+    hashing.use_pure_sha(False)
+
+Мобильный кошелёк (REST API) + веб-обозреватель блоков — узел отдаёт JSON по
+HTTP и страницу обозревателя; телефон подписывает транзакции локально
+(приватный ключ не покидает устройство):
+
+    python api.py --port 8000
+    # http://<IP>:8000/         — обозреватель блоков (блоки, транзакции, адреса)
+    # http://<IP>:8000/api/info — REST API
+
+Эндпоинты и схема подписи описаны в API.md, эталонный клиент — mobile_client.py.
+
+Десктоп-приложение «B-hydra Core» (tkinter) — единое окно с кошельком,
+майнингом и сетью (готовый `.exe` — в разделе Releases, или запуск из исходников):
+
+    python bhydra_gui.py
+    # вкладки: 💼 Кошелёк · ⛏ Майнинг · 🌐 Сеть · 🔍 Блоки
+    # (нужен tkinter: на Windows/macOS встроен, на Linux — пакет python3-tk)
+
+Возможности приложения:
+  * Кошелёк: создать/импортировать ключ, копирование адреса и QR-код для приёма;
+  * Перевод с низкой комиссией майнеру (по стандарту крипты);
+  * История операций: пополнения/отправки/майнинг «от кого и куда» с датой,
+    двойной клик открывает транзакцию в обозревателе блоков;
+  * Майнинг в фоне + авто-майнинг (блок раз в N минут);
+  * P2P-сеть: запуск узла, авто-синхронизация, seed-узлы, проверка связи и
+    авто-поиск других узлов в локальной сети по WiFi (UDP-маяки, без интернета).
+
+P2P-сеть — несколько узлов синхронизируются между собой (рассылка блоков и
+транзакций, правило самой длинной валидной цепочки):
+
+    python P2P.py --port 5101                       # первый узел
+    python P2P.py --port 5102 --peer 127.0.0.1:5101 # подключается к первому
+    python P2P.py --demo                            # демо из трёх узлов
+
+Автотесты (102 теста: кошелёк, транзакции, блокчейн, узел, экономика,
+ретаргетинг сложности, P2P, API, QR, безопасность):
+
+    pip install pytest
+    pytest
 
 Планы на будущее :
 Добавление интерфейса командной строки для системы управления.
@@ -72,7 +185,12 @@ print(blockchain.chain)
 Контакты:
 Если у вас есть вопросы или предложения, свяжитесь со мной через GitHub Issues или напишите на: Kovtunvladislav96@gmail.com killnetvladislav@outlook.com
 
-# B-hydra is a peer-to-peer electronic cash register system P2P.
+# B-hydra Core — a peer-to-peer electronic cash system (P2P)
+
+**B-hydra Core** is the reference client (full node) of the B-hydra network —
+wallet, mining and P2P networking in one app (like Bitcoin Core). Prebuilt
+`B-hydra-Core.exe` is available in
+[Releases](https://github.com/vladislav957/B-hydra/releases/latest).
 
  ---
 
@@ -113,13 +231,33 @@ git clone
 https://github.com/vladislav957/B-hydra.git
 cd B-hydra
 
-Example of usage: After running the program, you can start mining or create transactions. Example code for adding a block:
+Example of usage: After running the program, you can start mining or create transactions.
+
+Quick start (full lifecycle demo):
+
+    python manig.py
+
+Example code for adding a block:
 
 from b_hydra import Blockchain
 
 blockchain = Blockchain()
 blockchain.add_block(data="Пример транзакции")
 print(blockchain.chain)
+
+Command line (CLI) — state is stored in bhydra_chain.json:
+
+    python cli.py wallet                       # create a wallet
+    python cli.py init                         # initialise the chain
+    python cli.py mine <MINER_ADDRESS>         # mine a block (50 BHY reward)
+    python cli.py send <PRIV_KEY> <ADDRESS> 10 --fee 0.5   # transfer
+    python cli.py mine <MINER_ADDRESS>         # confirm the tx in a block
+    python cli.py balance <ADDRESS>           # check balance
+    python cli.py chain                        # show the chain
+
+B-hydra network parameters: SHA-512 hashing, Proof-of-Work consensus, UTXO
+model (transactions with inputs and outputs, like Bitcoin), 50 BHY reward,
+halving interval 310,000 blocks, maximum supply 31,000,000 BHY.
 
 Future plans: Adding a command line interface for the management system. Implementation of the automatic complexity adjustment function. Improving performance through multi-precision. Integration with other payment services.
  ---
