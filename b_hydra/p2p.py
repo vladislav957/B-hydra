@@ -88,6 +88,15 @@ class P2PNode:
 
     # --- Протокол --------------------------------------------------------
     def _handle_message(self, raw: bytes) -> bytes:
+        # Верхний предохранитель: любое некорректное сообщение от пира
+        # (нет обязательного поля, битая структура блока/транзакции) не должно
+        # ронять поток-обработчик — иначе удалённый пир может вырубить узел.
+        try:
+            return self._dispatch(raw)
+        except Exception:
+            return self._json({"type": "error", "error": "bad message"})
+
+    def _dispatch(self, raw: bytes) -> bytes:
         try:
             message = json.loads(raw.decode("utf-8"))
         except (ValueError, UnicodeDecodeError):
