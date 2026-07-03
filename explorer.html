@@ -3,226 +3,620 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>B-hydra — обозреватель блоков</title>
+<title>B-hydra Core — живая сеть</title>
 <style>
-  :root { --bg:#0d1117; --card:#161b22; --line:#30363d; --fg:#e6edf3;
-          --muted:#8b949e; --accent:#3fb950; --link:#58a6ff; }
-  * { box-sizing:border-box; }
-  body { margin:0; font-family:-apple-system,Segoe UI,Roboto,sans-serif;
-         background:var(--bg); color:var(--fg); line-height:1.5; }
-  header { padding:18px 16px; border-bottom:1px solid var(--line);
-           background:var(--card); }
-  h1 { margin:0; font-size:20px; }
-  h1 span { color:var(--accent); }
-  .wrap { max-width:880px; margin:0 auto; padding:16px; }
-  .stats { display:flex; flex-wrap:wrap; gap:10px; margin-top:10px; }
-  .stat { background:var(--card); border:1px solid var(--line); border-radius:8px;
-          padding:8px 12px; font-size:13px; }
-  .stat b { display:block; font-size:16px; color:var(--accent); }
-  .search { display:flex; gap:8px; margin:16px 0; }
-  input { flex:1; padding:10px 12px; border-radius:8px; border:1px solid var(--line);
-          background:var(--card); color:var(--fg); font-size:14px; }
-  button { padding:10px 16px; border:0; border-radius:8px; background:var(--accent);
-           color:#04140a; font-weight:600; cursor:pointer; font-size:14px; }
-  .card { background:var(--card); border:1px solid var(--line); border-radius:10px;
-          padding:14px; margin-bottom:12px; }
-  .card h3 { margin:0 0 10px; font-size:15px; }
-  .row { display:flex; justify-content:space-between; gap:10px; padding:4px 0;
-         border-bottom:1px solid var(--line); font-size:13px; }
-  .row:last-child { border-bottom:0; }
-  .row span:first-child { color:var(--muted); flex-shrink:0; }
-  .mono { font-family:ui-monospace,Menlo,Consolas,monospace; word-break:break-all; }
-  a.link { color:var(--link); cursor:pointer; text-decoration:none; }
-  a.link:hover { text-decoration:underline; }
-  .blocklist .row { cursor:pointer; }
-  .blocklist .row:hover { background:#1f2630; }
-  .badge { background:#1f6feb33; color:var(--link); border-radius:6px;
-           padding:1px 7px; font-size:12px; }
-  .in { color:#f85149; } .out { color:var(--accent); }
-  .muted { color:var(--muted); font-size:12px; }
-  .err { color:#f85149; }
+  /* ── Абиссаль: осознанно единый тёмный мир, свечение — это продукт ── */
+  :root{
+    --abyss:#060a14; --abyss2:#0a1222; --deep:#0c1526;
+    --panel:rgba(16,26,46,.62); --panel2:rgba(20,32,54,.55);
+    --line:rgba(120,180,220,.14); --line2:rgba(120,180,220,.28);
+    --text:#e8f1ff; --muted:#8ea6c8; --dim:#5f79a0;
+    --teal:#2ee6c0; --teal-g:#63ffe4;
+    --venom:#8bf05a; --violet:#8b6cff; --magenta:#d16bff;
+    --coral:#ff6b6b; --gold:#ffcf5c;
+    --grad:linear-gradient(100deg,var(--teal),var(--violet));
+    --r:14px;
+    --mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Inter,sans-serif;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;}
+  body{
+    font-family:var(--sans); color:var(--text); background:var(--abyss);
+    line-height:1.55; -webkit-font-smoothing:antialiased;
+    overflow-x:hidden;
+  }
+  a{color:inherit;}
+  ::selection{background:rgba(46,230,192,.28);}
+
+  /* ── Герой: живая сеть ── */
+  .hero{position:relative; min-height:clamp(420px,62vh,620px); overflow:hidden;
+        border-bottom:1px solid var(--line);
+        background:
+          radial-gradient(120% 90% at 80% -10%, rgba(139,108,255,.20), transparent 60%),
+          radial-gradient(90% 80% at 10% 110%, rgba(46,230,192,.16), transparent 55%),
+          linear-gradient(180deg,var(--abyss2),var(--abyss));}
+  #net{position:absolute; inset:0; width:100%; height:100%; display:block;}
+  .hero-grain{position:absolute; inset:0; pointer-events:none;
+    background:radial-gradient(circle at 50% 40%, transparent 55%, rgba(3,6,12,.55) 100%);}
+  .hero-in{position:relative; z-index:2; max-width:1080px; margin:0 auto;
+    padding:clamp(26px,5vw,60px) 20px; pointer-events:none;}
+  .eyebrow{font-family:var(--mono); font-size:12px; letter-spacing:.42em;
+    text-transform:uppercase; color:var(--teal); margin:0 0 14px;
+    display:flex; align-items:center; gap:10px;}
+  .eyebrow::before{content:""; width:26px; height:1px; background:var(--teal);
+    box-shadow:0 0 10px var(--teal);}
+  .brand{margin:0; font-weight:800; letter-spacing:-.03em;
+    font-size:clamp(44px,9vw,104px); line-height:.92; text-wrap:balance;}
+  .brand .hy{background:var(--grad); -webkit-background-clip:text;
+    background-clip:text; color:transparent;}
+  .brand .dot{color:var(--teal); text-shadow:0 0 26px var(--teal);}
+  .tag{margin:16px 0 0; max-width:34ch; color:var(--muted);
+    font-size:clamp(15px,2.2vw,19px);}
+  .tag b{color:var(--text); font-weight:600;}
+  .pulse-dot{display:inline-block; width:9px; height:9px; border-radius:50%;
+    background:var(--venom); box-shadow:0 0 0 0 rgba(139,240,90,.7);
+    animation:beat 1.9s infinite; vertical-align:middle; margin-right:7px;}
+  @keyframes beat{0%{box-shadow:0 0 0 0 rgba(139,240,90,.55);}
+    70%{box-shadow:0 0 0 11px rgba(139,240,90,0);}100%{box-shadow:0 0 0 0 rgba(139,240,90,0);}}
+
+  /* ── Живые чипы статистики ── */
+  .chips{display:flex; flex-wrap:wrap; gap:12px; margin-top:30px; pointer-events:auto;}
+  .chip{position:relative; padding:12px 16px 11px; border-radius:var(--r);
+    background:var(--panel); border:1px solid var(--line);
+    backdrop-filter:blur(9px); -webkit-backdrop-filter:blur(9px);
+    min-width:112px; overflow:hidden;}
+  .chip::after{content:""; position:absolute; left:0; top:0; bottom:0; width:3px;
+    background:var(--c,var(--teal)); box-shadow:0 0 14px var(--c,var(--teal));}
+  .chip .k{font-family:var(--mono); font-size:11px; letter-spacing:.12em;
+    text-transform:uppercase; color:var(--muted);}
+  .chip .v{font-size:23px; font-weight:750; letter-spacing:-.02em;
+    font-variant-numeric:tabular-nums; margin-top:2px;
+    color:var(--c,var(--text)); transition:color .3s;}
+  .chip .v small{font-size:12px; font-weight:500; color:var(--muted);
+    letter-spacing:0;}
+  .chip.flash .v{animation:vflash .6s;}
+  @keyframes vflash{0%{filter:brightness(2.2) drop-shadow(0 0 8px currentColor);}100%{filter:none;}}
+
+  /* ── Основной макет ── */
+  .wrap{max-width:1080px; margin:0 auto; padding:22px 20px 64px;}
+  .bar{display:grid; grid-template-columns:1fr; gap:14px; margin:6px 0 24px;}
+  @media(min-width:760px){.bar{grid-template-columns:1.3fr 1fr;}}
+  .field{display:flex; gap:9px;}
+  input{flex:1; min-width:0; padding:12px 14px; border-radius:12px;
+    border:1px solid var(--line2); background:rgba(8,14,26,.7); color:var(--text);
+    font-size:14px; font-family:var(--sans); transition:border-color .2s, box-shadow .2s;}
+  input::placeholder{color:var(--dim);}
+  input:focus{outline:none; border-color:var(--teal);
+    box-shadow:0 0 0 3px rgba(46,230,192,.16);}
+  button{padding:12px 18px; border:0; border-radius:12px; cursor:pointer;
+    font-weight:700; font-size:14px; font-family:var(--sans); color:#04140f;
+    background:var(--grad); background-size:160% 100%; transition:.25s;
+    white-space:nowrap;}
+  button:hover{background-position:100% 0; box-shadow:0 6px 22px rgba(46,230,192,.28);}
+  button:active{transform:translateY(1px);}
+  button.ghost{background:transparent; color:var(--teal);
+    border:1px solid var(--line2); box-shadow:none;}
+  button.ghost:hover{border-color:var(--teal); background:rgba(46,230,192,.08);}
+  :focus-visible{outline:2px solid var(--teal-g); outline-offset:2px;}
+
+  .grid{display:grid; grid-template-columns:1fr; gap:16px;}
+  @media(min-width:860px){.grid{grid-template-columns:1.55fr 1fr; align-items:start;}}
+
+  .panel{background:var(--panel2); border:1px solid var(--line); border-radius:var(--r);
+    padding:16px 16px 14px; backdrop-filter:blur(6px);}
+  .panel > h3{margin:0 0 12px; font-size:13px; letter-spacing:.14em;
+    text-transform:uppercase; color:var(--muted); font-family:var(--mono);
+    display:flex; align-items:center; gap:8px;}
+  .panel > h3 .ic{color:var(--teal);}
+
+  /* ── Метр мемпула (наша вместимость 10000+) ── */
+  .gauge-num{font-size:38px; font-weight:800; letter-spacing:-.02em;
+    font-variant-numeric:tabular-nums; line-height:1;}
+  .gauge-num small{font-size:14px; color:var(--muted); font-weight:500;}
+  .meter{height:12px; border-radius:99px; margin:14px 0 8px;
+    background:rgba(8,14,26,.8); border:1px solid var(--line); overflow:hidden;
+    position:relative;}
+  .meter i{display:block; height:100%; width:0; border-radius:99px;
+    background:linear-gradient(90deg,var(--teal),var(--venom));
+    box-shadow:0 0 16px rgba(46,230,192,.6); transition:width .8s cubic-bezier(.2,.7,.2,1);}
+  .meter.warn i{background:linear-gradient(90deg,var(--gold),var(--coral));}
+  .legend{display:flex; flex-direction:column; gap:11px; margin-top:4px;}
+  .lg{display:flex; align-items:center; gap:11px; font-size:13px;}
+  .lg .swatch{width:11px; height:11px; border-radius:50%; flex:none;
+    box-shadow:0 0 10px currentColor;}
+  .lg b{margin-left:auto; font-variant-numeric:tabular-nums; font-family:var(--mono);}
+  .lg .sub{color:var(--muted);}
+
+  /* ── Поток блоков ── */
+  .stream{display:flex; flex-direction:column; gap:10px;}
+  .blk{position:relative; display:grid; grid-template-columns:auto 1fr auto; gap:12px;
+    align-items:center; padding:12px 14px; border-radius:12px; cursor:pointer;
+    background:rgba(10,18,32,.6); border:1px solid var(--line); transition:.18s;
+    animation:rise .5s both;}
+  @keyframes rise{from{opacity:0; transform:translateY(8px);}to{opacity:1; transform:none;}}
+  .blk:hover{border-color:var(--line2); transform:translateX(3px);
+    box-shadow:-3px 0 0 var(--teal), 0 8px 24px rgba(0,0,0,.35);}
+  .blk .h{font-family:var(--mono); font-weight:750; font-size:15px; color:var(--teal);
+    font-variant-numeric:tabular-nums;}
+  .blk .mid{min-width:0;}
+  .blk .miner{font-family:var(--mono); font-size:12.5px; color:var(--text);
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
+  .blk .sub{font-size:11.5px; color:var(--muted); font-family:var(--mono);}
+  .pill{font-family:var(--mono); font-size:11px; padding:3px 9px; border-radius:99px;
+    background:rgba(139,108,255,.16); color:var(--magenta); border:1px solid rgba(139,108,255,.3);
+    white-space:nowrap;}
+  .pill.tx{background:rgba(46,230,192,.14); color:var(--teal); border-color:rgba(46,230,192,.3);}
+
+  /* ── Карточки деталей ── */
+  .card{background:var(--panel2); border:1px solid var(--line); border-radius:var(--r);
+    padding:16px; margin-bottom:14px; animation:rise .4s both;}
+  .card h4{margin:0 0 12px; font-size:16px; letter-spacing:-.01em;}
+  .card h4 .tag-hue{background:var(--grad); -webkit-background-clip:text;
+    background-clip:text; color:transparent;}
+  .row{display:flex; justify-content:space-between; gap:12px; padding:7px 0;
+    border-bottom:1px solid var(--line); font-size:13.5px;}
+  .row:last-child{border-bottom:0;}
+  .row .k{color:var(--muted); flex:none;}
+  .mono{font-family:var(--mono); word-break:break-all;}
+  .lnk{color:var(--teal); cursor:pointer; text-decoration:none; border-bottom:1px dotted transparent;}
+  .lnk:hover{border-bottom-color:var(--teal);}
+  .in{color:var(--coral);} .out{color:var(--venom);}
+  .sub{color:var(--muted); font-size:12px;}
+  .grp{margin-top:10px;} .grp > .sub{font-family:var(--mono); letter-spacing:.1em;
+    text-transform:uppercase; font-size:11px;}
+  .err{color:var(--coral); border-color:rgba(255,107,107,.35);}
+  #mineMsg{margin-top:10px; font-size:13px; min-height:18px; font-family:var(--mono);}
+
+  .foot{max-width:1080px; margin:0 auto; padding:0 20px 40px; color:var(--dim);
+    font-size:12px; font-family:var(--mono); text-align:center;}
+
+  @media (prefers-reduced-motion: reduce){
+    *{animation-duration:.001s !important; transition-duration:.05s !important;}
+  }
 </style>
 </head>
 <body>
-<header>
-  <div class="wrap">
-    <h1>B-<span>hydra</span> · обозреватель блоков</h1>
-    <div class="stats" id="stats"></div>
+
+<section class="hero">
+  <canvas id="net"></canvas>
+  <div class="hero-grain"></div>
+  <div class="hero-in">
+    <p class="eyebrow">B-hydra Core · P2P Blockchain</p>
+    <h1 class="brand">B<span class="dot">·</span><span class="hy">hydra</span></h1>
+    <p class="tag"><span class="pulse-dot"></span><b>Живая одноранговая сеть.</b>
+       Каждая голова гидры — узел: майнеры куют блоки, транзакции текут по тендрилам,
+       новый блок расходится ударной волной.</p>
+    <div class="chips" id="chips"></div>
   </div>
-</header>
+</section>
 
 <div class="wrap">
-  <div class="search">
-    <input id="q" placeholder="Высота блока, txid или адрес (BHY…)"
-           autocomplete="off">
-    <button onclick="search()">Поиск</button>
-  </div>
-  <div class="card">
-    <h3>⛏ Майнинг</h3>
-    <div class="search" style="margin:0">
-      <input id="miner" placeholder="Адрес майнера (BHY…)" autocomplete="off">
-      <button onclick="mine()">Майнить блок</button>
+  <div class="bar">
+    <div class="field">
+      <input id="q" placeholder="Высота блока, txid или адрес (BHY…)" autocomplete="off">
+      <button onclick="search()">Поиск</button>
     </div>
-    <div id="mineMsg" class="muted" style="margin-top:8px"></div>
+    <div class="field">
+      <input id="miner" placeholder="Адрес майнера (BHY…)" autocomplete="off">
+      <button class="ghost" onclick="mine()">⛏ Майнить</button>
+    </div>
   </div>
-  <div id="detail"></div>
-  <div class="card">
-    <h3>Последние блоки</h3>
-    <div class="blocklist" id="blocks"></div>
+  <div id="mineMsg"></div>
+
+  <div class="grid">
+    <div>
+      <div id="detail"></div>
+      <div class="panel">
+        <h3><span class="ic">◆</span> Последние блоки</h3>
+        <div class="stream" id="blocks"></div>
+      </div>
+    </div>
+    <div style="display:flex; flex-direction:column; gap:16px;">
+      <div class="panel">
+        <h3><span class="ic">≋</span> Мемпул</h3>
+        <div><span class="gauge-num" id="mpNum">0</span>
+             <small id="mpCap">/ 50 000 вместимость</small></div>
+        <div class="meter" id="mpMeter"><i id="mpFill"></i></div>
+        <div class="sub" id="mpNote">неподтверждённых транзакций</div>
+      </div>
+      <div class="panel">
+        <h3><span class="ic">✦</span> Узлы сети</h3>
+        <div class="legend" id="peers"></div>
+      </div>
+    </div>
   </div>
 </div>
 
+<div class="foot" id="foot">B-hydra Core · обозреватель живой сети</div>
+
 <script>
+"use strict";
 const $ = id => document.getElementById(id);
-async function api(path) {
-  const r = await fetch(path);
+const esc = s => String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const short = (s,n=20)=>{s=String(s);return s.length>2*n?s.slice(0,n)+'…'+s.slice(-n):s;};
+const fmtDate = ts => new Date(ts*1000).toLocaleString();
+const fmtNum = n => Number(n).toLocaleString('ru-RU');
+const MEMPOOL_CAP = 50000;
+
+/* ─────────── Слой данных: реальный узел или саможивущая симуляция ─────────── */
+let DEMO = false;
+async function getJSON(path){
+  const r = await fetch(path,{cache:'no-store'});
+  if(!r.ok) throw new Error(r.status);
   return r.json();
 }
-// Экранирование для безопасной вставки в HTML-текст И в значения атрибутов
-// (включая кавычки) — защита от XSS через данные блоков/адресов.
-function esc(s){ return String(s).replace(/[&<>"']/g, c=>(
-  {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
-function short(s, n=20){ s=String(s); return s.length>2*n ? s.slice(0,n)+'…'+s.slice(-n) : s; }
-function date(ts){ return new Date(ts*1000).toLocaleString(); }
-// Кликабельная ссылка через data-атрибуты (без инлайн-JS из данных).
-function link(label, action, id){
-  return `<a class="link" data-action="${esc(action)}" data-id="${esc(id)}">${esc(label)}</a>`;
+// Демо-генераторы (для превью без запущенного узла).
+const B58="123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+const rnd=(a,b)=>a+Math.random()*(b-a);
+const pick=a=>a[Math.floor(Math.random()*a.length)];
+const randStr=(n,al)=>Array.from({length:n},()=>pick(al)).join('');
+const demoAddr=()=>"BHY"+randStr(34,B58);
+const demoHash=()=>randStr(64,"0123456789abcdef");
+let demoMiners=[], demoChain=[], demoMempool=42, demoDiff=3;
+function demoInit(){
+  demoMiners=Array.from({length:5},demoAddr);
+  const genesis={index:0,hash:demoHash(),previous_hash:"0".repeat(64),
+    merkle_root:demoHash(),difficulty:demoDiff,nonce:0,work:0,
+    timestamp:Date.now()/1000-4000,data:[]};
+  demoChain=[genesis];
+  for(let i=0;i<7;i++) demoMineBlock();
+}
+function demoMineBlock(){
+  const prev=demoChain[demoChain.length-1];
+  const miner=pick(demoMiners);
+  const nTx=Math.floor(rnd(1,6));
+  const data=[{txid:demoHash(),timestamp:Date.now()/1000,
+    vin:[{txid:"0".repeat(64),index:0}],
+    vout:[{amount:+rnd(25,50).toFixed(4),address:miner}]}];
+  for(let i=1;i<nTx;i++) data.push({txid:demoHash(),timestamp:Date.now()/1000,
+    vin:[{txid:demoHash(),index:0}],
+    vout:[{amount:+rnd(.1,9).toFixed(4),address:pick(demoMiners)}]});
+  demoChain.push({index:demoChain.length,hash:demoHash(),previous_hash:prev.hash,
+    merkle_root:demoHash(),difficulty:demoDiff,nonce:Math.floor(rnd(500,90000)),
+    work:Math.floor(rnd(3000,80000)),timestamp:Date.now()/1000,data});
+  if(demoChain.length>60) demoChain.shift();
+  demoMempool=Math.max(0,demoMempool-nTx+Math.floor(rnd(0,9)));
+}
+function demoInfo(){const last=demoChain[demoChain.length-1];
+  return {network:"B-hydra",height:demoChain.length,difficulty:last.difficulty,
+    block_work:last.work,next_block_reward:+rnd(20,50).toFixed(2),
+    hash_algorithm:"SHA-512",model:"UTXO"};}
+
+async function fInfo(){ try{return await getJSON('/api/info');}catch(e){DEMO=true;return demoInfo();} }
+async function fChain(){ try{const d=await getJSON('/api/chain');return d.chain;}catch(e){DEMO=true;return demoChain;} }
+async function fMempool(){ try{const d=await getJSON('/api/mempool');return d.pending;}catch(e){DEMO=true;return demoMempool;} }
+
+/* ─────────── Живая сеть (canvas) ─────────── */
+const cv=$('net'), cx=cv.getContext('2d');
+let W=0,H=0,DPR=1, reduce=matchMedia('(prefers-reduced-motion: reduce)').matches;
+let nodes=[], edges=[], particles=[], waves=[];
+const COLORS={core:'#2ee6c0',miner:'#8bf05a',peer:'#8b6cff'};
+let core=null, mouse={x:.5,y:.5};
+
+function resize(){
+  DPR=Math.min(2,window.devicePixelRatio||1);
+  W=cv.clientWidth; H=cv.clientHeight;
+  cv.width=W*DPR; cv.height=H*DPR; cx.setTransform(DPR,0,0,DPR,0,0);
+  if(core){core.x=W*.5; core.y=H*.46;}
+  layout();
+}
+function makeNode(kind,label){
+  return {kind,label,
+    x:rnd(W*.1,W*.9), y:rnd(H*.15,H*.85),
+    vx:rnd(-.05,.05), vy:rnd(-.05,.05),
+    baseR:kind==='core'?16:kind==='miner'?7:5,
+    r:0, phase:rnd(0,6.28), heat:0};
+}
+function layout(){ // радиальная раскладка вокруг ядра
+  const rings={miner:Math.min(W,H)*.24, peer:Math.min(W,H)*.40};
+  let mi=0,pi=0, mc=nodes.filter(n=>n.kind==='miner').length||1,
+      pc=nodes.filter(n=>n.kind==='peer').length||1;
+  nodes.forEach(n=>{
+    if(n.kind==='core'){n.tx=W*.5;n.ty=H*.46;return;}
+    const isM=n.kind==='miner', idx=isM?mi++:pi++, cnt=isM?mc:pc;
+    const ang=(idx/cnt)*6.283+(isM?0:.5);
+    n.tx=W*.5+Math.cos(ang)*rings[n.kind]*rnd(.82,1.15);
+    n.ty=H*.46+Math.sin(ang)*rings[n.kind]*rnd(.72,1.05)*.82;
+  });
+}
+function rebuildNet(miners){
+  if(!core){core=makeNode('core','core');core.r=core.baseR;nodes=[core];}
+  const want=miners.slice(0,10);
+  let cur=nodes.filter(n=>n.kind==='miner');
+  // добавляем новых майнеров как новые «головы»
+  want.forEach(m=>{ if(!cur.find(n=>n.label===m)){
+    const n=makeNode('miner',m); n.x=core.x; n.y=core.y; n.heat=1; nodes.push(n);
+  }});
+  // держим немного ambient-пиров
+  let peers=nodes.filter(n=>n.kind==='peer').length;
+  const targetPeers=Math.max(5,Math.min(12,want.length*2));
+  while(peers<targetPeers){ nodes.push(makeNode('peer','peer')); peers++; }
+  // рёбра: каждый узел к ядру + к ближайшему соседу
+  edges=[];
+  const nonCore=nodes.filter(n=>n!==core);
+  nonCore.forEach(n=>edges.push([core,n]));
+  nonCore.forEach((n,i)=>{ if(i%2===0 && nonCore[i+1]) edges.push([n,nonCore[i+1]]); });
+  layout();
+}
+function spawnParticle(){
+  if(!edges.length) return;
+  const e=edges[Math.floor(Math.random()*edges.length)];
+  const fromCore=Math.random()<.5;
+  particles.push({a:fromCore?e[0]:e[1], b:fromCore?e[1]:e[0], t:0,
+    sp:rnd(.006,.016), hue:pick(['#63ffe4','#2ee6c0','#8bf05a'])});
+}
+function blockWave(minerLabel){
+  waves.push({x:core.x,y:core.y,r:0,max:Math.max(W,H)*.55,life:1});
+  const n=nodes.find(x=>x.label===minerLabel);
+  if(n) n.heat=1;
+  core.heat=1;
+  for(let i=0;i<10;i++) spawnParticle();
+}
+let mempoolLevel=42;
+function frame(t){
+  cx.clearRect(0,0,W,H);
+  // рёбра-тендрилы
+  edges.forEach(([a,b])=>{
+    const mx=(a.x+b.x)/2+Math.sin(t/900+a.phase)*10;
+    const my=(a.y+b.y)/2+Math.cos(t/1100+b.phase)*10;
+    const g=cx.createLinearGradient(a.x,a.y,b.x,b.y);
+    g.addColorStop(0,'rgba(46,230,192,.05)');
+    g.addColorStop(.5,'rgba(120,150,255,.16)');
+    g.addColorStop(1,'rgba(46,230,192,.05)');
+    cx.strokeStyle=g; cx.lineWidth=1;
+    cx.beginPath(); cx.moveTo(a.x,a.y); cx.quadraticCurveTo(mx,my,b.x,b.y); cx.stroke();
+  });
+  // частицы (транзакции)
+  particles.forEach(p=>{
+    p.t+=p.sp;
+    const x=p.a.x+(p.b.x-p.a.x)*p.t, y=p.a.y+(p.b.y-p.a.y)*p.t;
+    cx.beginPath(); cx.arc(x,y,2.2,0,6.283);
+    cx.fillStyle=p.hue; cx.shadowColor=p.hue; cx.shadowBlur=12; cx.fill(); cx.shadowBlur=0;
+  });
+  particles=particles.filter(p=>p.t<1);
+  // ударные волны блоков
+  waves.forEach(w=>{ w.r+=(w.max-w.r)*.045; w.life*=.96;
+    cx.beginPath(); cx.arc(core.x,core.y,w.r,0,6.283);
+    cx.strokeStyle='rgba(46,230,192,'+(w.life*.5)+')'; cx.lineWidth=2; cx.stroke();
+  });
+  waves=waves.filter(w=>w.life>.03);
+  // узлы
+  nodes.forEach(n=>{
+    n.x+=(n.tx-n.x)*.06 + n.vx; n.y+=(n.ty-n.y)*.06 + n.vy;
+    n.vx*=.98; n.vy*=.98; n.phase+=.01;
+    if(n.r<n.baseR) n.r+=(n.baseR-n.r)*.08;
+    const puls=1+Math.sin(t/700+n.phase)*.12 + n.heat*.6;
+    n.heat*=.94;
+    const col=COLORS[n.kind], R=n.r*puls;
+    // ореол
+    const halo=cx.createRadialGradient(n.x,n.y,0,n.x,n.y,R*4);
+    halo.addColorStop(0,col+'55'); halo.addColorStop(1,col+'00');
+    cx.fillStyle=halo; cx.beginPath(); cx.arc(n.x,n.y,R*4,0,6.283); cx.fill();
+    // ядро точки
+    cx.beginPath(); cx.arc(n.x,n.y,R,0,6.283);
+    cx.fillStyle=col; cx.shadowColor=col; cx.shadowBlur=16+n.heat*20; cx.fill(); cx.shadowBlur=0;
+    if(n.kind==='core'){ cx.beginPath(); cx.arc(n.x,n.y,R+5,0,6.283);
+      cx.strokeStyle=col+'66'; cx.lineWidth=1.5; cx.stroke(); }
+  });
+  // эмиссия частиц пропорционально мемпулу
+  if(Math.random()< Math.min(.5,.05+mempoolLevel/4000)) spawnParticle();
+  requestAnimationFrame(frame);
+}
+function staticFrame(){ // для prefers-reduced-motion
+  cx.clearRect(0,0,W,H);
+  edges.forEach(([a,b])=>{cx.strokeStyle='rgba(120,150,255,.14)';cx.lineWidth=1;
+    cx.beginPath();cx.moveTo(a.x,a.y);cx.lineTo(b.x,b.y);cx.stroke();});
+  nodes.forEach(n=>{const col=COLORS[n.kind];cx.beginPath();
+    cx.arc(n.tx,n.ty,n.baseR,0,6.283);cx.fillStyle=col;cx.shadowColor=col;
+    cx.shadowBlur=14;cx.fill();cx.shadowBlur=0;});
 }
 
-async function loadStats() {
-  const i = await api('/api/info');
-  $('stats').innerHTML = `
-    <div class="stat"><b>${esc(i.height)}</b>блоков</div>
-    <div class="stat"><b>${esc(i.difficulty)}</b>сложность</div>
-    <div class="stat"><b>${esc(Number(i.block_work).toLocaleString())}</b>работа (хешей)</div>
-    <div class="stat"><b>${esc(i.next_block_reward)}</b>награда BHY</div>
-    <div class="stat"><b>${esc(i.hash_algorithm)}</b>${esc(i.model)}</div>`;
-}
-
-function minerOf(b) {
-  // Майнер блока = получатель первой (coinbase) транзакции.
-  if (Array.isArray(b.data) && b.data.length && b.data[0].vout)
+/* ─────────── Загрузка данных → UI + сеть ─────────── */
+function minerOf(b){
+  if(Array.isArray(b.data)&&b.data.length&&b.data[0].vout&&b.data[0].vout.length)
     return b.data[0].vout[0].address;
   return null;
 }
-
-async function loadBlocks() {
-  const data = await api('/api/chain');
-  const blocks = data.chain.slice().reverse();
-  $('blocks').innerHTML = blocks.map(b => {
-    const n = Array.isArray(b.data) ? b.data.length : 1;
-    const m = minerOf(b);
-    const miner = m ? link(short(m,8), 'address', m) : '<span class="muted">генезис</span>';
-    return `<div class="row" data-action="block" data-id="${esc(b.index)}">
-      <span>#${esc(b.index)} <span class="badge">${esc(n)} tx</span></span>
-      <span>⛏ ${miner} &nbsp; <span class="mono muted">${esc(short(b.hash,8))}</span></span></div>`;
+let lastHeight=0;
+function setChip(k,v,color,sub){
+  return `<div class="chip" style="--c:${color}"><div class="k">${esc(k)}</div>
+    <div class="v">${v}${sub?` <small>${esc(sub)}</small>`:''}</div></div>`;
+}
+async function loadStats(){
+  const i=await fInfo();
+  $('chips').innerHTML =
+    setChip('Высота', fmtNum(i.height), 'var(--teal)') +
+    setChip('Сложность', esc(i.difficulty), 'var(--violet)', 'нулей') +
+    setChip('Мемпул', `<span id="chipMp">0</span>`, 'var(--venom)', 'тх') +
+    setChip('Награда', esc(i.next_block_reward), 'var(--gold)', 'BHY') +
+    setChip('Хеш', esc(i.hash_algorithm), 'var(--magenta)', esc(i.model));
+  $('foot').textContent = (DEMO?'демо-режим (узел не запущен) · ':'') +
+    `B-hydra Core · сеть ${esc(i.network||'B-hydra')} · высота ${fmtNum(i.height)}`;
+  // новый блок → живая волна
+  if(i.height>lastHeight){
+    if(lastHeight!==0){ document.querySelectorAll('.chip').forEach(c=>{
+      c.classList.remove('flash'); void c.offsetWidth; c.classList.add('flash');}); }
+    lastHeight=i.height;
+  }
+}
+async function loadBlocks(){
+  const chain=await fChain();
+  const blocks=chain.slice().reverse();
+  // сеть из реальных майнеров
+  const miners=[...new Set(chain.map(minerOf).filter(Boolean))];
+  rebuildNet(miners.length?miners:['peer']);
+  $('blocks').innerHTML = blocks.slice(0,12).map(b=>{
+    const n=Array.isArray(b.data)?b.data.length:1;
+    const m=minerOf(b);
+    const miner=m?`<span class="miner">${esc(short(m,12))}</span>`
+                 :`<span class="miner sub">генезис</span>`;
+    return `<div class="blk" data-action="block" data-id="${esc(b.index)}">
+      <span class="h">#${esc(b.index)}</span>
+      <span class="mid">${miner}
+        <div class="sub">${esc(short(b.hash,10))}</div></span>
+      <span class="pill tx">${esc(n)} tx</span></div>`;
   }).join('');
 }
+async function loadMempool(){
+  const p=await fMempool();
+  mempoolLevel=p;
+  const chip=$('chipMp'); if(chip) chip.textContent=fmtNum(p);
+  $('mpNum').textContent=fmtNum(p);
+  const pct=Math.min(100,p/MEMPOOL_CAP*100);
+  $('mpFill').style.width=Math.max(1.5,pct)+'%';
+  $('mpMeter').classList.toggle('warn',pct>75);
+  $('mpNote').innerHTML = p>0
+    ? `неподтверждённых транзакций · вмещает <b style="color:var(--venom)">10 000+</b> связанных`
+    : `пусто · вмещает <b style="color:var(--venom)">10 000+</b> связанных транзакций`;
+}
+function loadPeers(){
+  const c=k=>nodes.filter(n=>n.kind===k).length;
+  const rows=[
+    ['Ядро','core','маршрутизация и консенсус',c('core')],
+    ['Майнеры','miner','куют блоки, получают награду',c('miner')],
+    ['Пиры','peer','ретранслируют транзакции',c('peer')],
+  ];
+  $('peers').innerHTML = rows.map(([n,k,s,cnt])=>`<div class="lg">
+    <span class="swatch" style="color:${COLORS[k]};background:${COLORS[k]}"></span>
+    <span>${esc(n)} <span class="sub">— ${esc(s)}</span></span>
+    <b style="color:${COLORS[k]}">${cnt}</b></div>`).join('');
+}
 
-function txCard(tx, blockIndex) {
-  const vin = (tx.vin||[]).map(i => i.txid && String(i.txid).startsWith('0'.repeat(20))
-    ? `<div class="row"><span class="out">coinbase (эмиссия)</span><span></span></div>`
-    : `<div class="row"><span class="in">вход</span>
+/* ─────────── Детали: блок / транзакция / адрес (как было, в новом стиле) ─────────── */
+function link(label,action,id){
+  return `<a class="lnk" data-action="${esc(action)}" data-id="${esc(id)}">${esc(label)}</a>`;
+}
+async function jget(path){ // с фолбэком на демо-поиск
+  try{return await getJSON(path);}catch(e){ return demoLookup(path); }
+}
+function demoLookup(path){
+  const seg=path.split('/'); const kind=seg[2]; const key=decodeURIComponent(seg[3]||'');
+  if(kind==='block'){const b=demoChain[+key];return b||{error:'блок не найден'};}
+  if(kind==='tx'){for(const b of demoChain)for(const t of b.data)if(t.txid===key)
+    return {transaction:t,block_index:b.index}; return {error:'транзакция не найдена'};}
+  if(kind==='address'){let bal=0,hist=[];demoChain.forEach(b=>b.data.forEach(t=>{
+    let rec=0,snt=0;t.vout.forEach(o=>{if(o.address===key)rec+=o.amount;});
+    if(rec){bal+=rec;hist.push({txid:t.txid,block_index:b.index,received:+rec.toFixed(4),sent:0});}}));
+    return {address:key,balance:+bal.toFixed(4),history:hist};}
+  return {error:'нет данных'};
+}
+function txCard(tx,blockIndex){
+  const isCb=i=>i.txid&&String(i.txid).startsWith('0'.repeat(20));
+  const vin=(tx.vin||[]).map(i=>isCb(i)
+    ?`<div class="row"><span class="out">coinbase · эмиссия</span><span></span></div>`
+    :`<div class="row"><span class="k in">вход</span>
        <span class="mono">${esc(short(i.txid,10))}:${esc(i.index)}</span></div>`).join('');
-  const vout = (tx.vout||[]).map((o,idx) => `<div class="row">
-       <span class="out">→ #${esc(idx)}</span>
-       <span>${link(short(o.address,10), 'address', o.address)}
-       &nbsp; <b>${esc(o.amount)}</b> BHY</span></div>`).join('');
-  return `<div class="card">
-    <h3>Транзакция</h3>
-    <div class="row"><span>txid</span><span class="mono">${esc(short(tx.txid,16))}</span></div>
-    ${blockIndex!=null?`<div class="row"><span>блок</span><span>${link('#'+blockIndex,'block',blockIndex)}</span></div>`:''}
-    <div class="row"><span>время</span><span>${esc(date(tx.timestamp))}</span></div>
-    <div style="margin-top:8px"><span class="muted">Входы</span>${vin||'<div class="muted">нет</div>'}</div>
-    <div style="margin-top:8px"><span class="muted">Выходы</span>${vout}</div>
-  </div>`;
+  const vout=(tx.vout||[]).map((o,idx)=>`<div class="row">
+    <span class="k out">→ #${esc(idx)}</span>
+    <span>${link(short(o.address,10),'address',o.address)} &nbsp;<b>${esc(o.amount)}</b> BHY</span></div>`).join('');
+  return `<div class="card"><h4><span class="tag-hue">Транзакция</span></h4>
+    <div class="row"><span class="k">txid</span><span class="mono">${esc(short(tx.txid,16))}</span></div>
+    ${blockIndex!=null?`<div class="row"><span class="k">блок</span><span>${link('#'+blockIndex,'block',blockIndex)}</span></div>`:''}
+    ${tx.timestamp?`<div class="row"><span class="k">время</span><span>${esc(fmtDate(tx.timestamp))}</span></div>`:''}
+    <div class="grp"><span class="sub">Входы</span>${vin||'<div class="sub">нет</div>'}</div>
+    <div class="grp"><span class="sub">Выходы</span>${vout}</div></div>`;
 }
-
-async function showBlock(index) {
-  const b = await api('/api/block/' + encodeURIComponent(index));
-  if (b.error) return showError(b.error);
-  const txs = (Array.isArray(b.data)?b.data:[]).map(tx => txCard(tx, null)).join('');
-  const m = minerOf(b);
-  const minerRow = m
-    ? `<div class="row"><span>майнер</span><span>${link(short(m,14),'address',m)}</span></div>`
-    : '';
-  $('detail').innerHTML = `<div class="card">
-    <h3>Блок #${esc(b.index)}</h3>
-    ${minerRow}
-    <div class="row"><span>hash</span><span class="mono">${esc(short(b.hash,16))}</span></div>
-    <div class="row"><span>пред. блок</span><span class="mono">${esc(short(b.previous_hash,16))}</span></div>
-    <div class="row"><span>merkle root</span><span class="mono">${esc(short(b.merkle_root,16))}</span></div>
-    <div class="row"><span>сложность</span><span>${esc(b.difficulty)} (хеш с ${esc(b.difficulty)} нулями)</span></div>
-    <div class="row"><span>nonce</span><span>${esc(b.nonce)}</span></div>
-    <div class="row"><span>работа</span><span>перебрано ${esc((Number(b.nonce) + 1).toLocaleString())} хешей (ожидаемо ~${esc(Number(b.work).toLocaleString())})</span></div>
-    <div class="row"><span>время</span><span>${esc(date(b.timestamp))}</span></div>
+async function showBlock(index){
+  const b=await jget('/api/block/'+encodeURIComponent(index));
+  if(b.error) return showError(b.error);
+  const txs=(Array.isArray(b.data)?b.data:[]).map(tx=>txCard(tx,null)).join('');
+  const m=minerOf(b);
+  $('detail').innerHTML=`<div class="card"><h4>Блок <span class="tag-hue">#${esc(b.index)}</span></h4>
+    ${m?`<div class="row"><span class="k">майнер</span><span>${link(short(m,14),'address',m)}</span></div>`:''}
+    <div class="row"><span class="k">hash</span><span class="mono">${esc(short(b.hash,16))}</span></div>
+    <div class="row"><span class="k">пред. блок</span><span class="mono">${esc(short(b.previous_hash,16))}</span></div>
+    <div class="row"><span class="k">merkle root</span><span class="mono">${esc(short(b.merkle_root,16))}</span></div>
+    <div class="row"><span class="k">сложность</span><span>${esc(b.difficulty)} · хеш с ${esc(b.difficulty)} нулями</span></div>
+    <div class="row"><span class="k">nonce</span><span class="mono">${esc(fmtNum(b.nonce))}</span></div>
+    ${b.timestamp?`<div class="row"><span class="k">время</span><span>${esc(fmtDate(b.timestamp))}</span></div>`:''}
   </div>${txs}`;
-  window.scrollTo(0,0);
+  scrollTo({top:0,behavior:'smooth'});
+}
+async function showTx(txid){
+  const r=await jget('/api/tx/'+encodeURIComponent(txid));
+  if(r.error) return showError(r.error);
+  $('detail').innerHTML=txCard(r.transaction,r.block_index);
+  scrollTo({top:0,behavior:'smooth'});
+}
+async function showAddress(addr){
+  const r=await jget('/api/address/'+encodeURIComponent(addr));
+  if(r.error) return showError(r.error);
+  const hist=(r.history||[]).slice().reverse().map(h=>`<div class="row">
+    <span>${link(short(h.txid,10),'tx',h.txid)} <span class="sub">блок #${esc(h.block_index)}</span></span>
+    <span>${h.received?`<span class="out">+${esc(h.received)}</span> `:''}${h.sent?`<span class="in">-${esc(h.sent)}</span>`:''}</span>
+  </div>`).join('')||'<div class="sub">нет транзакций</div>';
+  $('detail').innerHTML=`<div class="card"><h4><span class="tag-hue">Адрес</span></h4>
+    <div class="row"><span class="k">адрес</span><span class="mono">${esc(addr)}</span></div>
+    <div class="row"><span class="k">баланс</span><span><b style="color:var(--venom)">${esc(r.balance)}</b> BHY</span></div>
+    <div class="grp"><span class="sub">История</span>${hist}</div></div>`;
+  scrollTo({top:0,behavior:'smooth'});
+}
+function showError(msg){ $('detail').innerHTML=`<div class="card err">Не найдено: ${esc(msg)}</div>`; }
+
+async function search(){
+  const q=$('q').value.trim(); if(!q){$('detail').innerHTML='';return;}
+  if(/^\d+$/.test(q)) return showBlock(parseInt(q,10));
+  if(q.startsWith('BHY')) return showAddress(q);
+  return showTx(q);
+}
+async function mine(){
+  const m=$('miner').value.trim();
+  if(!m){$('mineMsg').innerHTML='<span class="in">Введите адрес майнера (BHY…)</span>';return;}
+  $('mineMsg').innerHTML='<span style="color:var(--teal)">Майнинг…</span>';
+  try{
+    const r=await fetch('/api/mine',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({miner:m})});
+    const j=await r.json();
+    if(j.error){$('mineMsg').innerHTML=`<span class="in">Ошибка: ${esc(j.error)}</span>`;}
+    else{$('mineMsg').innerHTML=`<span class="out">✔ Добыт блок #${esc(j.index)}</span> · перебрано ${esc(fmtNum(j.attempts))} хешей · nonce ${esc(j.nonce)}`;
+      blockWave(m);}
+  }catch(e){ // демо-режим: майним локально
+    demoMineBlock(); blockWave(m);
+    $('mineMsg').innerHTML=`<span class="out">✔ Добыт блок #${esc(demoChain.length-1)}</span> <span class="sub">(демо)</span>`;
+  }
+  refresh();
 }
 
-async function showTx(txid) {
-  const r = await api('/api/tx/' + encodeURIComponent(txid));
-  if (r.error) return showError(r.error);
-  $('detail').innerHTML = txCard(r.transaction, r.block_index);
-  window.scrollTo(0,0);
-}
-
-async function showAddress(addr) {
-  const r = await api('/api/address/' + encodeURIComponent(addr));
-  const hist = (r.history||[]).slice().reverse().map(h => `<div class="row">
-     <span>${link(short(h.txid,10),'tx',h.txid)}
-       <span class="muted">блок #${esc(h.block_index)}</span></span>
-     <span>${h.received?`<span class="out">+${esc(h.received)}</span> `:''}${h.sent?`<span class="in">-${esc(h.sent)}</span>`:''}</span>
-   </div>`).join('') || '<div class="muted">нет транзакций</div>';
-  $('detail').innerHTML = `<div class="card">
-    <h3>Адрес</h3>
-    <div class="row"><span>адрес</span><span class="mono">${esc(addr)}</span></div>
-    <div class="row"><span>баланс</span><span><b>${esc(r.balance)}</b> BHY</span></div>
-    <div style="margin-top:8px"><span class="muted">История</span>${hist}</div>
-  </div>`;
-  window.scrollTo(0,0);
-}
-
-function showError(msg) {
-  $('detail').innerHTML = `<div class="card err">Не найдено: ${esc(msg)}</div>`;
-}
-
-async function mine() {
-  const m = $('miner').value.trim();
-  if (!m) { $('mineMsg').innerHTML = '<span class="err">Введите адрес майнера</span>'; return; }
-  $('mineMsg').textContent = 'Майнинг…';
-  const r = await fetch('/api/mine', {
-    method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({miner: m})
-  });
-  const j = await r.json();
-  if (j.error) { $('mineMsg').innerHTML = `<span class="err">Ошибка: ${esc(j.error)}</span>`; }
-  else { $('mineMsg').innerHTML = `<span class="out">Добыт блок #${esc(j.index)}</span> · ` +
-         `сложность ${esc(j.difficulty)} · перебрано ${esc(Number(j.attempts).toLocaleString())} хешей · nonce ${esc(j.nonce)}`; }
-  loadStats(); loadBlocks();
-}
-
-async function search() {
-  const q = $('q').value.trim();
-  if (!q) { $('detail').innerHTML=''; return; }
-  if (/^\d+$/.test(q)) return showBlock(parseInt(q));
-  if (q.startsWith('BHY')) return showAddress(q);
-  return showTx(q);                       // считаем txid
-}
-
-// Делегирование кликов: данные передаются через data-атрибуты, а не инлайн-JS.
-document.addEventListener('click', e => {
-  const el = e.target.closest('[data-action]');
-  if (!el) return;
-  const id = el.dataset.id;
-  if (el.dataset.action === 'block') showBlock(parseInt(id, 10));
-  else if (el.dataset.action === 'tx') showTx(id);
-  else if (el.dataset.action === 'address') showAddress(id);
+/* ─────────── Клики по data-action ─────────── */
+document.addEventListener('click',e=>{
+  const el=e.target.closest('[data-action]'); if(!el) return;
+  const id=el.dataset.id, a=el.dataset.action;
+  if(a==='block') showBlock(parseInt(id,10));
+  else if(a==='tx') showTx(id);
+  else if(a==='address') showAddress(id);
 });
-$('q').addEventListener('keydown', e => { if (e.key==='Enter') search(); });
+$('q').addEventListener('keydown',e=>{if(e.key==='Enter')search();});
+addEventListener('resize',resize);
 
-loadStats(); loadBlocks();
-setInterval(() => { loadStats(); loadBlocks(); }, 10000);   // автообновление
+/* ─────────── Запуск ─────────── */
+let prevHeight=0;
+async function refresh(){
+  await loadStats();
+  await loadBlocks();
+  await loadMempool();
+  loadPeers();
+  // живой отклик на новый блок
+  const h=demoChain.length? (DEMO?demoChain.length:lastHeight):lastHeight;
+  if(lastHeight>prevHeight && prevHeight>0){
+    const chain=DEMO?demoChain:null;
+    blockWave(chain?minerOf(chain[chain.length-1]):null);
+  }
+  prevHeight=lastHeight;
+}
+function boot(){
+  demoInit();
+  resize();
+  if(reduce){ rebuildNet(demoMiners); staticFrame(); }
+  else requestAnimationFrame(frame);
+  refresh();
+  // автообновление живого состояния
+  setInterval(async()=>{
+    if(DEMO && !reduce){ if(Math.random()<.5) demoMineBlock(); }
+    await refresh();
+  }, DEMO?5000:8000);
+}
+boot();
 </script>
 </body>
 </html>
