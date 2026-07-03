@@ -101,7 +101,8 @@ def genesis_target_for(difficulty: int) -> int:
 
 
 # Лимиты безопасности (анти-DoS / манипуляции).
-MAX_BLOCK_TRANSACTIONS = 5000  # максимум транзакций в блоке
+MAX_BLOCK_TRANSACTIONS = 5000      # максимум транзакций в блоке
+MAX_MEMPOOL_TRANSACTIONS = 50000   # вместимость мемпула (неподтверждённых тх)
 MAX_FUTURE_DRIFT = 2 * 60 * 60 # блок не может быть из будущего более чем на 2 ч
 
 # Фиксированная метка времени генезис-блока. Благодаря ей все узлы с одинаковой
@@ -374,12 +375,18 @@ class Blockchain:
         return json.dumps(self.to_dicts(), ensure_ascii=False, indent=2)
 
     @classmethod
-    def from_dicts(cls, chain_dicts, difficulty=DEFAULT_DIFFICULTY):
-        """Восстанавливает блокчейн из списка словарей (например, из файла)."""
+    def from_dicts(cls, chain_dicts, difficulty=DEFAULT_DIFFICULTY,
+                   retarget_interval=RETARGET_INTERVAL):
+        """Восстанавливает блокчейн из списка словарей (например, из файла).
+
+        retarget_interval нужно передавать тем же, с каким цепочка майнилась,
+        иначе expected_target/is_chain_valid посчитают восстановленную цепочку
+        невалидной (по умолчанию — сетевой RETARGET_INTERVAL).
+        """
         blockchain = cls.__new__(cls)
         blockchain.difficulty = difficulty
         blockchain.genesis_target = genesis_target_for(difficulty)
-        blockchain.retarget_interval = RETARGET_INTERVAL
+        blockchain.retarget_interval = max(1, retarget_interval)
         blockchain.chain = [Block.from_dict(d) for d in chain_dicts]
         return blockchain
 

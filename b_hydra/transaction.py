@@ -163,15 +163,36 @@ def coinbase(recipient, reward, fee_total=0.0, height=0, message="B-hydra"):
 
 
 class TransactionPool:
-    """Мемпул неподтверждённых транзакций."""
+    """Мемпул неподтверждённых транзакций.
 
-    def __init__(self):
-        self.transactions = []
+    max_size ограничивает вместимость (анти-DoS): по умолчанию пул держит до
+    MAX_MEMPOOL_TRANSACTIONS транзакций. Поиск дублей идёт по множеству txid,
+    поэтому add() — O(1), и мемпул спокойно вмещает десятки тысяч транзакций.
+    """
+
+    def __init__(self, max_size=50000):
+        self.max_size = max_size
+        self._transactions = []
+        self._txids = set()
+
+    @property
+    def transactions(self):
+        return self._transactions
+
+    @transactions.setter
+    def transactions(self, txs):
+        # Прямое присваивание (например, из _prune_mempool) держит индекс
+        # txid в синхроне, чтобы дедуп в add() оставался корректным.
+        self._transactions = list(txs)
+        self._txids = {t.txid for t in self._transactions}
 
     def add(self, transaction: Transaction) -> bool:
-        if any(t.txid == transaction.txid for t in self.transactions):
+        if transaction.txid in self._txids:
             return False  # дубликат
-        self.transactions.append(transaction)
+        if self.max_size is not None and len(self._transactions) >= self.max_size:
+            return False  # мемпул переполнен
+        self._transactions.append(transaction)
+        self._txids.add(transaction.txid)
         return True
 
     def spent_outpoints(self):
