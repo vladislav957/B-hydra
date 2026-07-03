@@ -20,7 +20,7 @@ if __name__ == "__main__" and __package__ in (None, ""):
 
 from .blockchain import (
     Block, Blockchain, DEFAULT_DIFFICULTY,
-    MAX_BLOCK_TRANSACTIONS, MAX_FUTURE_DRIFT,
+    MAX_BLOCK_TRANSACTIONS, MAX_MEMPOOL_TRANSACTIONS, MAX_FUTURE_DRIFT,
 )
 from .transaction import (
     NULL_TXID, Transaction, TxInput, TxOutput, TransactionPool, coinbase,
@@ -40,9 +40,11 @@ def _is_coinbase_dict(tx: dict) -> bool:
 class BHydraNode:
     """Логический узел B-hydra (блокчейн + мемпул + UTXO)."""
 
-    def __init__(self, difficulty=DEFAULT_DIFFICULTY):
+    def __init__(self, difficulty=DEFAULT_DIFFICULTY,
+                 mempool_size=MAX_MEMPOOL_TRANSACTIONS):
         self.blockchain = Blockchain(difficulty=difficulty)
-        self.mempool = TransactionPool()
+        self.mempool = TransactionPool(max_size=mempool_size)
+        self._rebuild_effective()
 
     # --- Набор UTXO ------------------------------------------------------
     def utxo_set(self):
@@ -70,11 +72,74 @@ class BHydraNode:
         return sum(u["amount"] for u in self.utxo_set().values()
                    if u["address"] == address)
 
-    def find_spendable(self, address: str):
-        """UTXO, принадлежащие адресу: список (outpoint, amount)."""
+    def find_spendable(self, address: str, include_mempool: bool = False):
+        """UTXO, принадлежащие адресу: список (outpoint, amount).
+
+        include_mempool=True учитывает и выходы неподтверждённых транзакций из
+        мемпула (сдачу) — тогда с одного кошелька можно выстроить цепочку из
+        многих транзакций, не дожидаясь майнинга каждой. Поиск идёт по индексу
+        адресов, поэтому не зависит от общего размера мемпула.
+        """
+        if include_mempool:
+            self.effective_utxo_set()  # гарантируем актуальность кэша/индекса
+            return [(op, self._effective[op]["amount"])
+                    for op in self._eff_by_addr.get(address, ())]
         return [(outpoint, u["amount"])
                 for outpoint, u in self.utxo_set().items()
                 if u["address"] == address]
+
+    @staticmethod
+    def _apply_tx_to_utxos(tx: Transaction, utxos: dict):
+        """Применяет транзакцию к рабочему набору UTXO: убирает потраченные
+        входами выходы и добавляет собственные выходы (для цепочек в мемпуле
+        и внутри одного блока)."""
+        for inp in tx.vin:
+            utxos.pop(inp.outpoint, None)
+        for index, out in enumerate(tx.vout):
+            utxos[(tx.txid, index)] = {"amount": out.amount,
+                                       "address": out.address}
+
+    # --- Кэш эффективного набора UTXO (подтверждённые + мемпул) ----------
+    def _cache_spend(self, outpoint):
+        u = self._effective.pop(outpoint, None)
+        if u is not None:
+            bucket = self._eff_by_addr.get(u["address"])
+            if bucket is not None:
+                bucket.discard(outpoint)
+                if not bucket:
+                    self._eff_by_addr.pop(u["address"], None)
+
+    def _cache_add(self, outpoint, amount, address):
+        self._effective[outpoint] = {"amount": amount, "address": address}
+        self._eff_by_addr.setdefault(address, set()).add(outpoint)
+
+    def _cache_apply(self, tx: Transaction):
+        """Инкрементально обновляет кэш эффективного набора одной транзакцией."""
+        for inp in tx.vin:
+            self._cache_spend(inp.outpoint)
+        for index, out in enumerate(tx.vout):
+            self._cache_add((tx.txid, index), out.amount, out.address)
+
+    def _rebuild_effective(self):
+        """Полностью пересобирает кэш эффективного набора и индекс адресов.
+        Вызывается при смене цепочки или массовой правке мемпула (майнинг,
+        prune); в горячем пути add_transaction кэш правится инкрементально."""
+        self._effective = self.utxo_set()
+        self._eff_by_addr = {}
+        for op, u in self._effective.items():
+            self._eff_by_addr.setdefault(u["address"], set()).add(op)
+        for tx in self.mempool.transactions:
+            self._cache_apply(tx)
+        return self._effective
+
+    def effective_utxo_set(self) -> dict:
+        """Кэш «виртуального» набора UTXO: подтверждённые + выходы мемпула −
+        их входы. По нему проверяются и собираются новые транзакции: он даёт
+        тратить неподтверждённую сдачу и не даёт повторно потратить выход,
+        уже зарезервированный мемпулом."""
+        if getattr(self, "_effective", None) is None:
+            self._rebuild_effective()
+        return self._effective
 
     # --- Проверка транзакции ---------------------------------------------
     def validate_transaction(self, tx: Transaction, utxos=None,
@@ -121,13 +186,20 @@ class BHydraNode:
 
     # --- Транзакции ------------------------------------------------------
     def add_transaction(self, tx: Transaction) -> bool:
-        """Добавляет транзакцию в мемпул после проверки UTXO и подписей."""
+        """Добавляет транзакцию в мемпул после проверки UTXO и подписей.
+
+        Проверка идёт против эффективного набора UTXO (подтверждённые + мемпул),
+        поэтому транзакция может тратить неподтверждённую сдачу предыдущей —
+        так мемпул наполняется тысячами связанных транзакций. Повторная трата
+        уже зарезервированного выхода отклоняется (его нет в наборе)."""
         if tx is None:
             return False
-        reserved = self.mempool.spent_outpoints()
-        if not self.validate_transaction(tx, reserved=reserved):
+        if not self.validate_transaction(tx, utxos=self.effective_utxo_set()):
             return False
-        return self.mempool.add(tx)
+        if not self.mempool.add(tx):
+            return False
+        self._cache_apply(tx)  # инкрементально: без пересборки всего набора
+        return True
 
     def create_transaction(self, wallet: Wallet, recipient: str,
                            amount: float, fee: float = 0.0) -> Transaction:
@@ -141,11 +213,11 @@ class BHydraNode:
         if not is_valid_address(recipient):
             return None
         need = amount + fee
-        reserved = self.mempool.spent_outpoints()
         chosen, gathered = [], 0.0
-        for outpoint, value in self.find_spendable(wallet.address):
-            if outpoint in reserved:
-                continue
+        # include_mempool=True: можно тратить и неподтверждённую сдачу, поэтому
+        # с одного кошелька собирается цепочка из многих транзакций подряд.
+        for outpoint, value in self.find_spendable(wallet.address,
+                                                   include_mempool=True):
             chosen.append((outpoint, value))
             gathered += value
             if gathered >= need:
@@ -165,24 +237,38 @@ class BHydraNode:
 
     # --- Майнинг ---------------------------------------------------------
     def mine_pending(self, miner_address: str):
-        """Собирает транзакции из мемпула в блок и майнит его."""
+        """Собирает транзакции из мемпула в блок и майнит его.
+
+        Берёт до MAX_BLOCK_TRANSACTIONS-1 транзакций (плюс coinbase), проверяя
+        их по нарастающему набору UTXO — поэтому в один блок попадают и связанные
+        цепочки (потомок тратит выход предка). Что не влезло в блок, остаётся в
+        мемпуле для следующего."""
+        # -1 — место под coinbase, которая тоже считается транзакцией блока.
+        limit = MAX_BLOCK_TRANSACTIONS - 1
         utxos = self.utxo_set()
-        reserved = set()
         valid = []
         fees = 0.0
-        for tx in self.mempool.take_all():
-            if self.validate_transaction(tx, utxos=utxos, reserved=reserved):
+        snapshot = list(self.mempool.transactions)
+        leftover = []
+        for i, tx in enumerate(snapshot):
+            if len(valid) >= limit:
+                leftover = snapshot[i:]  # не влезло — оставляем в мемпуле
+                break
+            if self.validate_transaction(tx, utxos=utxos):
                 fees += self._tx_fee(tx, utxos)
-                for inp in tx.vin:
-                    reserved.add(inp.outpoint)
+                self._apply_tx_to_utxos(tx, utxos)
                 valid.append(tx)
+            # невалидная транзакция просто отбрасывается
+        self.mempool.transactions = leftover
 
         height = len(self.blockchain.chain)
         reward = self.blockchain.block_reward(height)
         reward_tx = coinbase(miner_address, reward, fees, height=height)
 
         data = [reward_tx.to_dict()] + [tx.to_dict() for tx in valid]
-        return self.blockchain.add_block(data=data)
+        block = self.blockchain.add_block(data=data)
+        self._rebuild_effective()  # цепочка и мемпул изменились
+        return block
 
     def _tx_fee(self, tx: Transaction, utxos) -> float:
         total_in = sum(utxos[inp.outpoint]["amount"] for inp in tx.vin)
@@ -210,15 +296,17 @@ class BHydraNode:
         in_chain = {tx["txid"] for block in self.blockchain.chain
                     for tx in self._block_transactions(block)}
         utxos = self.utxo_set()
-        reserved, kept = set(), []
+        kept = []
         for tx in self.mempool.transactions:
             if tx.txid in in_chain:
                 continue
-            if self.validate_transaction(tx, utxos=utxos, reserved=reserved):
-                for inp in tx.vin:
-                    reserved.add(inp.outpoint)
+            if self.validate_transaction(tx, utxos=utxos):
+                # Применяем к набору, чтобы связанные транзакции (потомок тратит
+                # неподтверждённую сдачу предка) тоже проходили проверку.
+                self._apply_tx_to_utxos(tx, utxos)
                 kept.append(tx)
         self.mempool.transactions = kept
+        self._rebuild_effective()  # мемпул изменился — обновляем кэш
 
     # --- Полная проверка транзакций (безопасность) ----------------------
     def _validate_block_transactions(self, block, height, utxos) -> bool:
@@ -496,7 +584,8 @@ class BHydraNode:
         node.blockchain = Blockchain.from_dicts(data["chain"], data["difficulty"])
         node.mempool = TransactionPool()
         for tx_dict in data.get("mempool", []):
-            node.mempool.transactions.append(Transaction.from_dict(tx_dict))
+            node.mempool.add(Transaction.from_dict(tx_dict))
+        node._rebuild_effective()
         return node
 
 
