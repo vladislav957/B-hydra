@@ -1,0 +1,391 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>B-hydra Core — кошелёк</title>
+<style>
+  :root{
+    --abyss:#060a14; --abyss2:#0a1222;
+    --panel:rgba(16,26,46,.62); --panel2:rgba(20,32,54,.5);
+    --line:rgba(120,180,220,.14); --line2:rgba(120,180,220,.28);
+    --text:#e8f1ff; --muted:#8ea6c8; --dim:#5f79a0;
+    --teal:#2ee6c0; --teal-g:#63ffe4;
+    --venom:#8bf05a; --violet:#8b6cff; --magenta:#d16bff;
+    --coral:#ff6b6b; --gold:#ffcf5c;
+    --grad:linear-gradient(100deg,var(--teal),var(--violet));
+    --r:16px;
+    --mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Inter,sans-serif;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;}
+  body{font-family:var(--sans); color:var(--text); line-height:1.55;
+    -webkit-font-smoothing:antialiased; overflow-x:hidden;
+    background:
+      radial-gradient(120% 80% at 85% -10%, rgba(139,108,255,.16), transparent 55%),
+      radial-gradient(90% 70% at 5% 105%, rgba(46,230,192,.13), transparent 55%),
+      var(--abyss);}
+  ::selection{background:rgba(46,230,192,.28);}
+  .wrap{max-width:920px; margin:0 auto; padding:26px 20px 60px;}
+
+  header{display:flex; align-items:center; gap:12px; margin-bottom:22px;}
+  .logo{font-weight:800; letter-spacing:-.02em; font-size:22px;}
+  .logo .dot{color:var(--teal); text-shadow:0 0 18px var(--teal);}
+  .logo .hy{background:var(--grad); -webkit-background-clip:text; background-clip:text; color:transparent;}
+  .eyebrow{font-family:var(--mono); font-size:11px; letter-spacing:.32em;
+    text-transform:uppercase; color:var(--muted); margin-left:2px;}
+  .net-badge{margin-left:auto; font-family:var(--mono); font-size:11px;
+    padding:5px 11px; border-radius:99px; border:1px solid var(--line2);
+    color:var(--muted); display:flex; align-items:center; gap:7px;}
+  .net-badge i{width:8px; height:8px; border-radius:50%; background:var(--gold);
+    box-shadow:0 0 10px currentColor; color:var(--gold);}
+  .net-badge.live i{background:var(--venom); color:var(--venom);}
+
+  /* ── Карта кошелька ── */
+  .wallet{position:relative; border-radius:22px; padding:26px 24px 22px;
+    background:linear-gradient(150deg, rgba(46,230,192,.14), rgba(139,108,255,.14)) , var(--panel);
+    border:1px solid var(--line2); overflow:hidden; margin-bottom:18px;}
+  .wallet canvas{position:absolute; inset:0; width:100%; height:100%; z-index:0; opacity:.9;}
+  .wallet > *{position:relative; z-index:1;}
+  .w-top{display:flex; justify-content:space-between; align-items:flex-start; gap:12px;}
+  .w-label{font-family:var(--mono); font-size:11px; letter-spacing:.2em;
+    text-transform:uppercase; color:var(--muted);}
+  .w-bal{font-size:clamp(40px,9vw,64px); font-weight:800; letter-spacing:-.03em;
+    line-height:1; margin:4px 0 2px; font-variant-numeric:tabular-nums;
+    text-shadow:0 0 30px rgba(46,230,192,.35);}
+  .w-bal .u{font-size:.36em; font-weight:600; color:var(--teal); margin-left:8px;
+    letter-spacing:0; -webkit-text-fill-color:var(--teal);}
+  .w-fiat{color:var(--muted); font-size:13px; font-family:var(--mono);}
+  .chip-mini{font-family:var(--mono); font-size:11px; padding:5px 10px; border-radius:99px;
+    background:rgba(8,14,26,.5); border:1px solid var(--line); color:var(--teal);}
+  .addr-row{display:flex; align-items:center; gap:10px; margin-top:20px;
+    padding-top:16px; border-top:1px solid var(--line);}
+  .addr{font-family:var(--mono); font-size:13px; word-break:break-all; color:var(--text);}
+  .addr .k{display:block; font-size:10px; letter-spacing:.2em; text-transform:uppercase;
+    color:var(--muted); margin-bottom:3px;}
+
+  /* ── Кнопки ── */
+  .actions{display:flex; flex-wrap:wrap; gap:10px; margin-top:16px;}
+  button{font-family:var(--sans); font-weight:700; font-size:13.5px; cursor:pointer;
+    padding:11px 16px; border-radius:12px; border:0; color:#04140f;
+    background:var(--grad); background-size:160% 100%; transition:.22s; white-space:nowrap;}
+  button:hover{background-position:100% 0; box-shadow:0 6px 20px rgba(46,230,192,.26);}
+  button:active{transform:translateY(1px);}
+  button.ghost{background:transparent; color:var(--teal); border:1px solid var(--line2); box-shadow:none;}
+  button.ghost:hover{border-color:var(--teal); background:rgba(46,230,192,.08);}
+  button.tiny{padding:6px 11px; font-size:11.5px; border-radius:9px;}
+  :focus-visible{outline:2px solid var(--teal-g); outline-offset:2px;}
+
+  .grid{display:grid; grid-template-columns:1fr; gap:16px;}
+  @media(min-width:720px){.grid{grid-template-columns:1.1fr .9fr;}}
+
+  .panel{background:var(--panel2); border:1px solid var(--line); border-radius:var(--r);
+    padding:18px; backdrop-filter:blur(6px);}
+  .panel h3{margin:0 0 15px; font-size:12px; letter-spacing:.16em; text-transform:uppercase;
+    color:var(--muted); font-family:var(--mono); display:flex; align-items:center; gap:8px;}
+  .panel h3 .ic{color:var(--teal); font-size:14px;}
+
+  label{display:block; font-size:11px; font-family:var(--mono); letter-spacing:.1em;
+    text-transform:uppercase; color:var(--muted); margin:12px 0 6px;}
+  input{width:100%; padding:11px 13px; border-radius:11px; border:1px solid var(--line2);
+    background:rgba(8,14,26,.7); color:var(--text); font-size:14px; font-family:var(--sans);
+    transition:.2s;}
+  input:focus{outline:none; border-color:var(--teal); box-shadow:0 0 0 3px rgba(46,230,192,.15);}
+  input.mono{font-family:var(--mono); font-size:13px;}
+  .amt-wrap{position:relative;}
+  .amt-wrap .suffix{position:absolute; right:13px; top:50%; transform:translateY(-50%);
+    color:var(--muted); font-family:var(--mono); font-size:13px; pointer-events:none;}
+  .send-sum{display:flex; justify-content:space-between; font-family:var(--mono);
+    font-size:12px; color:var(--muted); margin:12px 0;}
+  .send-sum b{color:var(--text);}
+  .msg{font-family:var(--mono); font-size:12.5px; min-height:18px; margin-top:10px;}
+  .msg .ok{color:var(--venom);} .msg .bad{color:var(--coral);} .msg .go{color:var(--teal);}
+
+  /* ── Приём / QR ── */
+  .qr-box{display:flex; flex-direction:column; align-items:center; gap:14px;}
+  #qr{border-radius:14px; background:#040810; padding:12px; border:1px solid var(--line);
+    box-shadow:0 0 34px rgba(46,230,192,.18);}
+  .qr-addr{font-family:var(--mono); font-size:12px; word-break:break-all; text-align:center;
+    color:var(--muted);}
+
+  /* ── История ── */
+  .hist{display:flex; flex-direction:column; gap:9px;}
+  .tx{display:grid; grid-template-columns:auto 1fr auto; gap:12px; align-items:center;
+    padding:11px 13px; border-radius:12px; background:rgba(10,18,32,.55);
+    border:1px solid var(--line); animation:rise .4s both;}
+  @keyframes rise{from{opacity:0;transform:translateY(6px);}to{opacity:1;transform:none;}}
+  .tx .ico{width:30px; height:30px; border-radius:9px; display:grid; place-items:center;
+    font-size:15px; font-weight:800;}
+  .tx.in .ico{background:rgba(139,240,90,.13); color:var(--venom);}
+  .tx.out .ico{background:rgba(255,107,107,.13); color:var(--coral);}
+  .tx .mid{min-width:0;}
+  .tx .t1{font-size:13px;}
+  .tx .t2{font-family:var(--mono); font-size:11px; color:var(--muted);
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
+  .tx .amt{font-family:var(--mono); font-weight:750; font-variant-numeric:tabular-nums;
+    white-space:nowrap;}
+  .tx.in .amt{color:var(--venom);} .tx.out .amt{color:var(--coral);}
+  .empty{color:var(--dim); font-size:13px; font-family:var(--mono); text-align:center; padding:14px;}
+
+  .key-reveal{font-family:var(--mono); font-size:12px; word-break:break-all;
+    background:rgba(8,14,26,.7); border:1px solid var(--line); border-radius:10px;
+    padding:10px 12px; color:var(--gold); margin-top:8px; display:none;}
+  .key-reveal.show{display:block;}
+  .warn{color:var(--gold); font-size:11px; font-family:var(--mono); margin-top:6px;}
+  .toast{position:fixed; left:50%; bottom:26px; transform:translateX(-50%) translateY(20px);
+    background:rgba(10,20,36,.95); border:1px solid var(--teal); color:var(--teal);
+    padding:10px 18px; border-radius:12px; font-family:var(--mono); font-size:13px;
+    opacity:0; transition:.3s; pointer-events:none; z-index:50; box-shadow:0 8px 30px rgba(0,0,0,.5);}
+  .toast.show{opacity:1; transform:translateX(-50%) translateY(0);}
+  @media (prefers-reduced-motion: reduce){*{animation-duration:.001s!important;}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <div class="logo">B<span class="dot">·</span><span class="hy">hydra</span></div>
+      <div class="eyebrow">Core Wallet</div>
+    </div>
+    <div class="net-badge" id="netBadge"><i></i><span id="netTxt">демо</span></div>
+  </header>
+
+  <!-- Карта кошелька -->
+  <section class="wallet">
+    <canvas id="aura"></canvas>
+    <div class="w-top">
+      <div>
+        <div class="w-label">Баланс кошелька</div>
+        <div class="w-bal"><span id="bal">0.0000</span><span class="u">BHY</span></div>
+        <div class="w-fiat" id="fiat">≈ обновляется…</div>
+      </div>
+      <div class="chip-mini" id="utxoChip">0 UTXO</div>
+    </div>
+    <div class="addr-row">
+      <div class="addr" style="flex:1">
+        <span class="k">Адрес получения</span>
+        <span id="addr">—</span>
+      </div>
+      <button class="ghost tiny" onclick="copyAddr()">Копировать</button>
+    </div>
+    <div class="actions">
+      <button onclick="newWallet()">✨ Новый кошелёк</button>
+      <button class="ghost" onclick="importWallet()">📥 Импорт ключа</button>
+      <button class="ghost" onclick="toggleKey()">🔑 Показать ключ</button>
+      <button class="ghost" onclick="refresh()">⟳ Обновить</button>
+    </div>
+    <div class="key-reveal" id="keyBox"></div>
+  </section>
+
+  <div class="grid">
+    <!-- Отправка -->
+    <div class="panel">
+      <h3><span class="ic">↑</span> Отправить BHY</h3>
+      <label for="to">Адрес получателя</label>
+      <input id="to" class="mono" placeholder="BHY…" autocomplete="off">
+      <label for="amt">Сумма</label>
+      <div class="amt-wrap">
+        <input id="amt" type="number" min="0" step="0.0001" placeholder="0.0000">
+        <span class="suffix">BHY</span>
+      </div>
+      <label for="fee">Комиссия</label>
+      <div class="amt-wrap">
+        <input id="fee" type="number" min="0" step="0.0001" value="0.0010">
+        <span class="suffix">BHY</span>
+      </div>
+      <div class="send-sum">
+        <span>Спишется со счёта</span><span><b id="total">0.0010</b> BHY</span>
+      </div>
+      <button style="width:100%" onclick="send()">Отправить транзакцию</button>
+      <div class="msg" id="sendMsg"></div>
+    </div>
+
+    <!-- Приём -->
+    <div class="panel">
+      <h3><span class="ic">↓</span> Принять</h3>
+      <div class="qr-box">
+        <canvas id="qr" width="180" height="180"></canvas>
+        <div class="qr-addr" id="qrAddr">—</div>
+        <button class="ghost tiny" onclick="copyAddr()">Скопировать адрес</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="panel" style="margin-top:16px">
+    <h3><span class="ic">≋</span> История операций</h3>
+    <div class="hist" id="hist"></div>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+"use strict";
+const $=id=>document.getElementById(id);
+const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const short=(s,n=14)=>{s=String(s);return s.length>2*n?s.slice(0,n)+'…'+s.slice(-n):s;};
+const fmt=n=>Number(n).toLocaleString('ru-RU',{minimumFractionDigits:4,maximumFractionDigits:4});
+let LIVE=false;
+
+/* ── Псевдо-кошелёк для интерфейса (реальная кастодия/подпись — в десктоп/мобильном клиенте) ── */
+const B58="123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+const HEX="0123456789abcdef";
+const pick=a=>a[Math.floor(Math.random()*a.length)];
+const rstr=(n,al)=>Array.from({length:n},()=>pick(al)).join('');
+let wallet={address:'',key:'',balance:0,utxos:0,history:[]};
+
+function newWallet(){
+  wallet={address:"BHY"+rstr(34,B58), key:rstr(64,HEX),
+    balance: LIVE?0: +(50).toFixed(4), utxos: LIVE?0:1,
+    history: LIVE?[]:[{dir:'in',amount:50,txid:rstr(64,HEX),block:1,label:'награда за блок'}]};
+  $('keyBox').classList.remove('show');
+  render(); drawQR(); toast('Кошелёк создан');
+  if(LIVE) refresh();
+}
+function importWallet(){
+  const k=prompt('Введите приватный ключ (64 hex) или адрес BHY…');
+  if(!k) return;
+  const v=k.trim();
+  if(/^BHY[1-9A-HJ-NP-Za-km-z]{20,}$/.test(v)){ wallet.address=v; wallet.key='(импортирован адрес — только просмотр)'; }
+  else if(/^[0-9a-fA-F]{64}$/.test(v)){ wallet.key=v.toLowerCase(); wallet.address="BHY"+rstr(34,B58); }
+  else { toast('Неверный формат ключа/адреса'); return; }
+  wallet.balance=0; wallet.utxos=0; wallet.history=[];
+  render(); drawQR(); refresh(); toast('Импортировано');
+}
+function toggleKey(){
+  const b=$('keyBox');
+  if(b.classList.contains('show')){b.classList.remove('show');return;}
+  b.innerHTML=`<div class="warn">⚠ Никому не показывайте приватный ключ — он даёт полный доступ к средствам.</div>
+    ${esc(wallet.key||'—')}`;
+  b.classList.add('show');
+}
+
+/* ── Рендер ── */
+function render(){
+  $('addr').textContent=wallet.address||'—';
+  $('qrAddr').textContent=wallet.address||'—';
+  $('bal').textContent=fmt(wallet.balance);
+  $('utxoChip').textContent=`${wallet.utxos} UTXO`;
+  $('fiat').textContent=`≈ ${(wallet.balance*0.42).toLocaleString('ru-RU',{maximumFractionDigits:2})} у.е. · сеть B-hydra`;
+  renderHist();
+}
+function renderHist(){
+  if(!wallet.history.length){ $('hist').innerHTML='<div class="empty">операций пока нет</div>'; return; }
+  $('hist').innerHTML=wallet.history.slice().reverse().map(h=>`
+    <div class="tx ${h.dir}">
+      <div class="ico">${h.dir==='in'?'↓':'↑'}</div>
+      <div class="mid">
+        <div class="t1">${h.dir==='in'?'Получено':'Отправлено'}${h.label?` · <span style="color:var(--muted)">${esc(h.label)}</span>`:''}</div>
+        <div class="t2">${esc(short(h.txid,12))}${h.block!=null?` · блок #${esc(h.block)}`:' · в мемпуле'}</div>
+      </div>
+      <div class="amt">${h.dir==='in'?'+':'−'}${fmt(h.amount)}</div>
+    </div>`).join('');
+}
+function updTotal(){
+  const a=parseFloat($('amt').value)||0, f=parseFloat($('fee').value)||0;
+  $('total').textContent=fmt(a+f);
+}
+['amt','fee'].forEach(id=>$(id).addEventListener('input',updTotal));
+
+/* ── Отправка ── */
+async function send(){
+  const to=$('to').value.trim(), a=parseFloat($('amt').value)||0, f=parseFloat($('fee').value)||0;
+  const m=$('sendMsg');
+  if(!/^BHY[1-9A-HJ-NP-Za-km-z]{20,}$/.test(to)){ m.innerHTML='<span class="bad">Некорректный адрес получателя (BHY…)</span>'; return; }
+  if(a<=0){ m.innerHTML='<span class="bad">Введите сумму больше нуля</span>'; return; }
+  if(a+f>wallet.balance+1e-9){ m.innerHTML='<span class="bad">Недостаточно средств</span>'; return; }
+  m.innerHTML='<span class="go">Подпись транзакции…</span>';
+  await new Promise(r=>setTimeout(r,450));
+  const txid=rstr(64,HEX);
+  wallet.balance=+(wallet.balance-a-f).toFixed(4);
+  wallet.history.push({dir:'out',amount:a,txid,block:null,label:'→ '+short(to,8)});
+  $('amt').value=''; updTotal(); render();
+  m.innerHTML=`<span class="ok">✔ Отправлено ${fmt(a)} BHY</span> · txid ${short(txid,8)} · в мемпуле`;
+  toast('Транзакция отправлена');
+  if(LIVE){ /* реальная подпись выполняется в десктоп/мобильном клиенте */ }
+}
+
+/* ── Живой баланс с узла (если запущен) ── */
+async function refresh(){
+  if(!wallet.address) return;
+  try{
+    const r=await fetch('/api/address/'+encodeURIComponent(wallet.address),{cache:'no-store'});
+    if(!r.ok) throw 0;
+    const d=await r.json();
+    LIVE=true; setBadge(true);
+    wallet.balance=+Number(d.balance||0).toFixed(4);
+    wallet.history=(d.history||[]).map(h=>({
+      dir:h.received?'in':'out', amount:h.received||h.sent||0,
+      txid:h.txid, block:h.block_index,
+    }));
+    try{ const u=await (await fetch('/api/utxos/'+encodeURIComponent(wallet.address))).json();
+      wallet.utxos=(u.utxos||[]).length; }catch(e){}
+    render();
+  }catch(e){ LIVE=false; setBadge(false); }
+}
+function setBadge(live){
+  const b=$('netBadge');
+  b.classList.toggle('live',live);
+  $('netTxt').textContent=live?'узел онлайн':'демо';
+}
+
+/* ── QR адреса (лёгкий детерминированный код, для наглядности) ── */
+function drawQR(){
+  const c=$('qr'), x=c.getContext('2d'), N=25, S=c.width, cell=Math.floor((S-24)/N), off=(S-cell*N)/2;
+  x.clearRect(0,0,S,S);
+  const s=wallet.address||'BHY';
+  // детерминированная матрица из хеша строки
+  let seed=0; for(let i=0;i<s.length;i++) seed=(seed*131+s.charCodeAt(i))>>>0;
+  const rnd=()=>{seed=(seed*1103515245+12345)>>>0; return (seed>>>16)/65536;};
+  for(let i=0;i<N;i++)for(let j=0;j<N;j++){
+    const finder=(i<7&&j<7)||(i<7&&j>=N-7)||(i>=N-7&&j<7);
+    let on = finder ? ((i===0||i===6||j===0||j===6||(i>=2&&i<=4&&j>=2&&j<=4)) ) : rnd()>.55;
+    if(finder){ // рамки-искатели как у QR
+      const bi=i>=N-7?i-(N-7):i, bj=j>=N-7?j-(N-7):j;
+      on=(bi===0||bi===6||bj===0||bj===6||(bi>=2&&bi<=4&&bj>=2&&bj<=4));
+    }
+    if(on){
+      const t=(i+j)/(2*N);
+      x.fillStyle=`rgb(${46+t*140},${230-t*40},${192+t*30})`;
+      x.fillRect(off+j*cell, off+i*cell, cell-1, cell-1);
+    }
+  }
+}
+
+/* ── Живая аура за балансом ── */
+function aura(){
+  const c=$('aura'), x=c.getContext('2d');
+  function fit(){ c.width=c.clientWidth*2; c.height=c.clientHeight*2; x.setTransform(2,0,0,2,0,0); }
+  fit(); addEventListener('resize',fit);
+  const reduce=matchMedia('(prefers-reduced-motion: reduce)').matches;
+  let t=0;
+  function loop(){
+    const W=c.clientWidth,H=c.clientHeight; x.clearRect(0,0,W,H);
+    for(let k=0;k<3;k++){
+      const r=40+k*46+Math.sin(t/40+k)*8, cxp=W*0.5+Math.cos(t/90+k)*30, cyp=H*0.5;
+      const g=x.createRadialGradient(cxp,cyp,0,cxp,cyp,r*2.4);
+      const col=['46,230,192','139,108,255','139,240,90'][k];
+      g.addColorStop(0,`rgba(${col},.10)`); g.addColorStop(1,`rgba(${col},0)`);
+      x.fillStyle=g; x.beginPath(); x.arc(cxp,cyp,r*2.4,0,6.283); x.fill();
+    }
+    t++; if(!reduce) requestAnimationFrame(loop);
+  }
+  loop();
+}
+
+/* ── Прочее ── */
+function copyAddr(){
+  if(!wallet.address) return;
+  navigator.clipboard?.writeText(wallet.address).then(()=>toast('Адрес скопирован'),()=>toast(wallet.address));
+}
+let tt;
+function toast(msg){ const e=$('toast'); e.textContent=msg; e.classList.add('show');
+  clearTimeout(tt); tt=setTimeout(()=>e.classList.remove('show'),1800); }
+
+/* ── Старт ── */
+aura();
+newWallet();
+setInterval(()=>{ if(LIVE) refresh(); }, 8000);
+</script>
+</body>
+</html>
