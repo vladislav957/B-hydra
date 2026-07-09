@@ -242,14 +242,28 @@ function newWallet(){
   render(); drawQR(); toast('Кошелёк создан');
   if(LIVE) refresh();
 }
-function importWallet(){
+async function importWallet(){
   const k=prompt('Введите приватный ключ (64 hex) или адрес BHY…');
   if(!k) return;
   const v=k.trim();
-  if(/^BHY[1-9A-HJ-NP-Za-km-z]{20,}$/.test(v)){ wallet.address=v; wallet.key='(импортирован адрес — только просмотр)'; }
-  else if(/^[0-9a-fA-F]{64}$/.test(v)){ wallet.key=v.toLowerCase(); wallet.address="BHY"+rstr(34,B58); }
-  else { toast('Неверный формат ключа/адреса'); return; }
   wallet.balance=0; wallet.utxos=0; wallet.history=[];
+  if(/^[0-9a-fA-F]{64}$/.test(v)){
+    wallet.key=v.toLowerCase();
+    // Реальный адрес выводит узел из ключа (иначе — демо-адрес офлайн).
+    try{
+      const r=await fetch('/api/wallet',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({private_key:wallet.key})});
+      const j=await r.json();
+      if(r.ok && j.address){
+        LIVE=true; setBadge(true);
+        wallet.address=j.address;
+        render(); drawQR(); refresh(); toast('Ключ импортирован'); return;
+      }
+      if(j.error){ toast(j.error); return; }
+    }catch(e){ wallet.address="BHY"+rstr(34,B58); }  // офлайн-демо
+  } else if(/^BHY[1-9A-HJ-NP-Za-km-z]{20,}$/.test(v)){
+    wallet.address=v; wallet.key='(импортирован адрес — только просмотр)';
+  } else { toast('Неверный формат ключа/адреса'); return; }
   render(); drawQR(); refresh(); toast('Импортировано');
 }
 function toggleKey(){
@@ -293,16 +307,31 @@ async function send(){
   const m=$('sendMsg');
   if(!/^BHY[1-9A-HJ-NP-Za-km-z]{20,}$/.test(to)){ m.innerHTML='<span class="bad">Некорректный адрес получателя (BHY…)</span>'; return; }
   if(a<=0){ m.innerHTML='<span class="bad">Введите сумму больше нуля</span>'; return; }
+  const hasKey=/^[0-9a-fA-F]{64}$/.test(wallet.key||'');
+
+  // Настоящая отправка: узел подписывает ключом и кладёт в мемпул.
+  if(hasKey){
+    m.innerHTML='<span class="go">Отправка через узел…</span>';
+    try{
+      const r=await fetch('/api/send',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({private_key:wallet.key,to,amount:a,fee:f})});
+      const j=await r.json();
+      if(!r.ok||j.error){ m.innerHTML=`<span class="bad">${esc(j.error||'Ошибка отправки')}</span>`; return; }
+      m.innerHTML=`<span class="ok">✔ Отправлено ${fmt(a)} BHY</span> · txid ${short(j.txid,8)} · в мемпуле`;
+      $('amt').value=''; updTotal(); toast('Транзакция отправлена'); refresh(); return;
+    }catch(e){ /* узел недоступен → демо-режим ниже */ }
+  }
+
+  // Демо-режим (нет узла или адрес импортирован без ключа).
   if(a+f>wallet.balance+1e-9){ m.innerHTML='<span class="bad">Недостаточно средств</span>'; return; }
   m.innerHTML='<span class="go">Подпись транзакции…</span>';
-  await new Promise(r=>setTimeout(r,450));
+  await new Promise(r=>setTimeout(r,420));
   const txid=rstr(64,HEX);
   wallet.balance=+(wallet.balance-a-f).toFixed(4);
   wallet.history.push({dir:'out',amount:a,txid,block:null,label:'→ '+short(to,8)});
   $('amt').value=''; updTotal(); render();
-  m.innerHTML=`<span class="ok">✔ Отправлено ${fmt(a)} BHY</span> · txid ${short(txid,8)} · в мемпуле`;
+  m.innerHTML=`<span class="ok">✔ Отправлено ${fmt(a)} BHY</span> · txid ${short(txid,8)} <span style="color:var(--muted)">(демо)</span>`;
   toast('Транзакция отправлена');
-  if(LIVE){ /* реальная подпись выполняется в десктоп/мобильном клиенте */ }
 }
 
 /* ── Живой баланс с узла (если запущен) ── */

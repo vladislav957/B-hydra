@@ -16,6 +16,8 @@ api.py — REST API узла B-hydra (для мобильных кошелько
     GET  /api/address/<address>  — баланс и история транзакций адреса
     GET  /api/mempool            — число неподтверждённых транзакций
     POST /api/transaction        — отправить ПОДПИСАННУЮ транзакцию (vin/vout)
+    POST /api/send               — перевод {"private_key","to","amount","fee"}
+                                   (узел подписывает сам — для своего локального узла)
     POST /api/mine               — добыть блок {"miner": "<address>"}
 
 Запуск:
@@ -37,15 +39,15 @@ if __name__ == "__main__" and __package__ in (None, ""):
 from .blockchain import MAX_SUPPLY
 from .node import BHydraNode
 from .transaction import Transaction
-from .wallet import is_valid_address
+from .wallet import is_valid_address, Wallet
 
 DEFAULT_STATE = "bhydra_chain.json"
 DEFAULT_DIFFICULTY = 3
 MAX_BODY_SIZE = 16 * 1024 * 1024   # анти-DoS: предел размера тела запроса (16 МБ)
-# explorer.html лежит в корне репозитория (на уровень выше пакета).
-_EXPLORER_HTML = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "explorer.html"
-)
+# explorer.html и wallet.html лежат в корне репозитория (на уровень выше пакета).
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_EXPLORER_HTML = os.path.join(_ROOT, "explorer.html")
+_WALLET_HTML = os.path.join(_ROOT, "wallet.html")
 
 
 class BHydraAPI(BaseHTTPRequestHandler):
@@ -107,6 +109,13 @@ class BHydraAPI(BaseHTTPRequestHandler):
                         self._send_html(200, fh.read())
                 except OSError:
                     self._send_html(404, "<h1>explorer.html not found</h1>")
+                return
+            if parts in (["wallet"], ["wallet.html"]):
+                try:
+                    with open(_WALLET_HTML, encoding="utf-8") as fh:
+                        self._send_html(200, fh.read())
+                except OSError:
+                    self._send_html(404, "<h1>wallet.html not found</h1>")
                 return
             if parts == ["api", "block"] or (len(parts) == 3 and parts[:2] == ["api", "block"]):
                 index = int(parts[2]) if len(parts) == 3 else -1
@@ -178,6 +187,80 @@ class BHydraAPI(BaseHTTPRequestHandler):
                         self._save()
                 self._send(200 if accepted else 400,
                            {"accepted": accepted, "txid": tx.txid})
+            elif parts == ["api", "wallet"]:
+                # По приватному ключу вернуть его АДРЕС + баланс/историю, чтобы
+                # кошелёк показал реальные данные после импорта ключа.
+                # (Ключ уходит на узел — как и в /api/send; для своего узла.)
+                pk = data.get("private_key")
+                if not pk:
+                    self._send(400, {"error": "нужен приватный ключ (private_key)"})
+                    return
+                try:
+                    w = Wallet.from_private_hex(pk)
+                except ValueError as err:
+                    self._send(400, {"error": str(err)})
+                    return
+                self._send(200, {
+                    "address": w.address,
+                    "public_key": w.public_key_hex,
+                    "balance": self.node.get_balance(w.address),
+                    "history": self.node.address_history(w.address),
+                })
+            elif parts == ["api", "send"]:
+                # Перевод на другой адрес: узел подписывает транзакцию ключом
+                # отправителя и кладёт в мемпул. Возвращает ЧЁТКУЮ причину отказа
+                # (неверный адрес / сумма / нехватка средств), а не общий отказ.
+                # ВНИМАНИЕ: приватный ключ уходит на узел — годится для СВОЕГО
+                # локального узла; для чужого узла подписывайте на устройстве.
+                pk = data.get("private_key")
+                to = data.get("to")
+                if not pk:
+                    self._send(400, {"error": "нужен приватный ключ (private_key)"})
+                    return
+                try:
+                    sender = Wallet.from_private_hex(pk)
+                except ValueError as err:
+                    self._send(400, {"error": str(err)})
+                    return
+                if not is_valid_address(to):
+                    self._send(400, {"error": "неверный адрес получателя (BHY…)"})
+                    return
+                try:
+                    amount = float(data.get("amount"))
+                    fee = float(data.get("fee", 0.0))
+                except (TypeError, ValueError):
+                    self._send(400, {"error": "сумма и комиссия должны быть числом"})
+                    return
+                if amount <= 0:
+                    self._send(400, {"error": "сумма должна быть больше нуля"})
+                    return
+                if fee < 0:
+                    self._send(400, {"error": "комиссия не может быть отрицательной"})
+                    return
+                balance = self.node.get_balance(sender.address)
+                if amount + fee > balance + 1e-9:
+                    self._send(400, {"error": (
+                        f"недостаточно средств: нужно {amount + fee:.4f} BHY, "
+                        f"доступно {balance:.4f} BHY")})
+                    return
+                with self.lock:
+                    tx = self.node.create_transaction(sender, to, amount, fee)
+                    if tx is None:
+                        self._send(400, {"error": "не удалось собрать транзакцию из UTXO"})
+                        return
+                    accepted = self.node.add_transaction(tx)
+                    if accepted:
+                        self._save()
+                self._send(200 if accepted else 400, {
+                    "accepted": accepted,
+                    "txid": tx.txid,
+                    "from": sender.address,
+                    "to": to,
+                    "amount": amount,
+                    "fee": fee,
+                    "sender_balance": self.node.get_balance(sender.address),
+                    "error": None if accepted else "транзакция отклонена (двойная трата?)",
+                })
             elif parts == ["api", "mine"]:
                 miner = data.get("miner")
                 if not miner:

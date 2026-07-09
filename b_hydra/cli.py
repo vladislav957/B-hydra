@@ -26,7 +26,7 @@ if __name__ == "__main__" and __package__ in (None, ""):
 
 from .blockchain import DEFAULT_FEE
 from .node import BHydraNode
-from .wallet import Wallet, generate_wallet
+from .wallet import Wallet, generate_wallet, is_valid_address
 
 DEFAULT_FILE = "bhydra_chain.json"
 DEFAULT_DIFFICULTY = 3
@@ -69,10 +69,29 @@ def cmd_mine(args):
 
 def cmd_send(args):
     node = _load_or_init(args.file)
-    sender = Wallet.from_private_hex(args.private_key)
+    # Чёткие, различимые ошибки — вместо общего «недостаточно средств» на всё.
+    try:
+        sender = Wallet.from_private_hex(args.private_key)
+    except ValueError as err:
+        print(f"Ошибка приватного ключа: {err}")
+        return
+    if not is_valid_address(args.to):
+        print("Неверный адрес получателя (должен начинаться с BHY…).")
+        return
+    if args.amount <= 0:
+        print("Сумма перевода должна быть больше нуля.")
+        return
+    if args.fee < 0:
+        print("Комиссия не может быть отрицательной.")
+        return
+    balance = node.get_balance(sender.address)
+    if args.amount + args.fee > balance + 1e-9:
+        print(f"Недостаточно средств: нужно {args.amount + args.fee:.4f} BHY, "
+              f"доступно {balance:.4f} BHY.")
+        return
     tx = node.create_transaction(sender, args.to, amount=args.amount, fee=args.fee)
     if tx is None:
-        print("Недостаточно средств (UTXO) для отправки.")
+        print("Не удалось собрать транзакцию из доступных UTXO.")
         return
     if node.add_transaction(tx):
         node.save(args.file)

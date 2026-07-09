@@ -110,7 +110,7 @@ def _get(url, path):
 
 def test_explorer_html_served(server):
     html = _get(server, "/")
-    assert "обозреватель блоков" in html
+    assert "B-hydra" in html
     assert "<html" in html.lower()
 
 
