@@ -1113,9 +1113,19 @@ class BHydraApp(tk.Tk):
                if self.wallet else 0.0)
         peers = len(self.p2p.peers) if self.p2p else 0
         running = bool(self.p2p and self.p2p._running)
+        # Показываем сложность следующего блока: ретаргетинг поднимает её, если
+        # блоки майнились быстрее цели (~48.6 мин) — пользователь должен видеть,
+        # почему майнинг вдруг стал долгим.
+        from .blockchain import TARGET_BLOCK_TIME
+        bc = self.node.blockchain
+        next_target = bc.expected_target(self.node.height)
+        next_diff = max(0, 129 - len(f"{next_target:x}"))
+        work_x = bc.genesis_target // max(1, next_target)   # во сколько раз тяжелее базы
         self.mine_info.set(
             f"Высота: {self.node.height} | эмиссия: "
-            f"{self.node.blockchain.total_supply:.0f} BHY")
+            f"{bc.total_supply:.0f} BHY | сложность: {next_diff} "
+            f"(×{work_x} к базовой) | цель сети: 1 блок ≈ "
+            f"{TARGET_BLOCK_TIME / 60:.0f} мин — быстрый майнинг поднимает сложность")
         self.status.set(
             f"SHA: {hashing.backend()} | блоков: {self.node.height} | "
             f"баланс: {bal:.2f} BHY | узел: {'вкл' if running else 'выкл'} | "
