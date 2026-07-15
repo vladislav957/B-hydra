@@ -126,6 +126,21 @@ class BHydraApp(tk.Tk):
         tab = ttk.Frame(nb, padding=12)
         nb.add(tab, text="💼 Кошелёк")
 
+        # Шапка с логотипом-монетой и именем клиента.
+        header = ttk.Frame(tab)
+        header.pack(fill="x", pady=(0, 8))
+        try:
+            self._logo_img = tk.PhotoImage(file=_asset("bhydra_small.png"))
+            ttk.Label(header, image=self._logo_img).pack(side="left")
+        except tk.TclError:
+            pass                                  # нет файла — просто без логотипа
+        title_box = ttk.Frame(header)
+        title_box.pack(side="left", padx=10)
+        ttk.Label(title_box, text="B-hydra Core",
+                  font=("TkDefaultFont", 14, "bold")).pack(anchor="w")
+        ttk.Label(title_box, text="кошелёк · майнинг · сеть",
+                  foreground="gray").pack(anchor="w")
+
         btns = ttk.Frame(tab)
         btns.pack(fill="x")
         ttk.Button(btns, text="Создать кошелёк",
