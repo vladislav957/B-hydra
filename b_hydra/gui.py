@@ -36,7 +36,7 @@ if __name__ == "__main__" and __package__ in (None, ""):
     __package__ = "b_hydra"
 
 from . import __version__, hashing
-from .blockchain import DEFAULT_FEE
+from .blockchain import DEFAULT_FEE, TARGET_BLOCK_TIME
 from .node import BHydraNode
 from .p2p import P2PNode
 from .wallet import Wallet, generate_wallet, is_valid_address
@@ -227,23 +227,21 @@ class BHydraApp(tk.Tk):
 
         top = ttk.Frame(tab)
         top.pack(fill="x")
-        ttk.Label(top, text="Сколько блоков:").pack(side="left")
-        self.mine_count = tk.StringVar(value="5")
-        ttk.Entry(top, textvariable=self.mine_count, width=8).pack(
-            side="left", padx=6)
-        self.mine_btn = ttk.Button(top, text="Майнить",
+        # Просто кнопка: один блок за нажатие (темп сети держит сложность).
+        self.mine_btn = ttk.Button(top, text="⛏ Майнить блок",
                                    command=self._mine_clicked)
         self.mine_btn.pack(side="left")
 
-        # Авто-майнинг: блок создаётся сам каждые N минут (как 10-минутный
-        # ритм Bitcoin), пока окно открыто и галочка включена.
+        # Авто-майнинг: блок создаётся сам каждые N минут. По умолчанию — цель
+        # сети (~48.6 мин), тогда сложность не растёт от слишком частых блоков.
         auto = ttk.Frame(tab)
         auto.pack(fill="x", pady=(8, 0))
         self.auto_mine = tk.BooleanVar(value=False)
         ttk.Checkbutton(auto, text="Авто-майнинг: блок каждые",
                         variable=self.auto_mine,
                         command=self._toggle_auto_mine).pack(side="left")
-        self.auto_interval = tk.StringVar(value="10")
+        self.auto_interval = tk.StringVar(
+            value=f"{TARGET_BLOCK_TIME / 60:.1f}")
         ttk.Entry(auto, textvariable=self.auto_interval, width=5).pack(
             side="left", padx=4)
         ttk.Label(auto, text="мин.").pack(side="left")
@@ -710,11 +708,7 @@ class BHydraApp(tk.Tk):
             return messagebox.showwarning("Кошелёк", "Сначала создайте кошелёк.")
         if self._mining:
             return
-        try:
-            count = int(self.mine_count.get())
-        except ValueError:
-            return messagebox.showerror("Ошибка", "Неверное число блоков.")
-        self._begin_mining(count)
+        self._begin_mining(1)          # один блок за нажатие — темп держит сложность
 
     def _begin_mining(self, count: int) -> bool:
         """Запустить фоновый майнинг `count` блоков. Общий код для ручного
@@ -760,7 +754,7 @@ class BHydraApp(tk.Tk):
         """Срабатывает по таймеру: майнит один блок и планирует следующий."""
         if not self.auto_mine.get():
             return
-        minutes = self._auto_minutes() or 10.0
+        minutes = self._auto_minutes() or TARGET_BLOCK_TIME / 60
         if self.wallet is not None and not self._mining:
             self._begin_mining(1)
         else:
@@ -1116,7 +1110,6 @@ class BHydraApp(tk.Tk):
         # Показываем сложность следующего блока: ретаргетинг поднимает её, если
         # блоки майнились быстрее цели (~48.6 мин) — пользователь должен видеть,
         # почему майнинг вдруг стал долгим.
-        from .blockchain import TARGET_BLOCK_TIME
         bc = self.node.blockchain
         next_target = bc.expected_target(self.node.height)
         next_diff = max(0, 129 - len(f"{next_target:x}"))
