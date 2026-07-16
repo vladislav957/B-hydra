@@ -112,3 +112,71 @@ def test_contract_roundtrip_dict():
     assert back.owner == "BHYowner"
     assert back.balance == 100
     assert back.get_data("note") == "hi"
+
+
+# --- On-chain HTLC (скриптовые выходы UTXO) ---------------------------------
+from b_hydra.contract import (
+    fund_cheque, redeem_cheque_onchain, refund_cheque_onchain,
+)
+from b_hydra.transaction import TxOutput
+
+
+def _node():
+    n = BHydraNode(difficulty=2)
+    n.blockchain.retarget_interval = 1000        # без ретаргета в тестах
+    return n
+
+
+def test_htlc_output_serialization():
+    o = TxOutput.htlc(5, "abc", "BHYpayee", "BHYpayer", 42)
+    back = TxOutput.from_dict(o.to_dict())
+    assert back.script["type"] == "htlc" and back.script["expiry"] == 42
+    # обычный выход остаётся без поля script (обратная совместимость txid)
+    assert "script" not in TxOutput(1, "BHYx").to_dict()
+
+
+def test_htlc_redeem_with_secret_moves_coins():
+    n = _node(); payer = generate_wallet(); payee = generate_wallet()
+    n.mine_pending(payer.address)
+    ch = SmartCheque.issue(payer, payee.address, 10, "sec", expiry=n.height + 10,
+                           fee=0.0001)
+    f = fund_cheque(n, payer, ch); assert f is not None
+    n.mine_pending(payer.address)
+    assert n.get_balance(payee.address) == 0          # заперто, не в балансе
+    assert redeem_cheque_onchain(n, payee, f, ch, "sec") is not None
+    n.mine_pending(payer.address)
+    assert n.get_balance(payee.address) == 10
+    assert n.is_valid()
+
+
+def test_htlc_wrong_secret_rejected():
+    n = _node(); payer = generate_wallet(); payee = generate_wallet()
+    n.mine_pending(payer.address)
+    ch = SmartCheque.issue(payer, payee.address, 5, "right", expiry=n.height + 10)
+    f = fund_cheque(n, payer, ch); n.mine_pending(payer.address)
+    assert redeem_cheque_onchain(n, payee, f, ch, "wrong") is None
+    assert n.get_balance(payee.address) == 0
+
+
+def test_htlc_refund_only_after_expiry():
+    n = _node(); payer = generate_wallet(); payee = generate_wallet()
+    n.mine_pending(payer.address)
+    ch = SmartCheque.issue(payer, payee.address, 7, "s", expiry=n.height + 1)
+    f = fund_cheque(n, payer, ch); n.mine_pending(payer.address)
+    assert refund_cheque_onchain(n, payer, f, ch) is None      # срок не вышел
+    n.mine_pending(payer.address); n.mine_pending(payer.address)
+    assert refund_cheque_onchain(n, payer, f, ch) is not None  # срок вышел
+    n.mine_pending(payer.address)
+    assert n.get_balance(payee.address) == 0                   # получатель не забрал
+    assert n.is_valid()
+
+
+def test_htlc_output_not_spendable_as_p2pkh():
+    """Скриптовый выход не попадает в обычные траты/баланс получателя."""
+    n = _node(); payer = generate_wallet(); payee = generate_wallet()
+    n.mine_pending(payer.address)
+    ch = SmartCheque.issue(payer, payee.address, 9, "s", expiry=n.height + 10)
+    f = fund_cheque(n, payer, ch); n.mine_pending(payer.address)
+    # получатель не может потратить запертые монеты обычным переводом
+    assert n.create_transaction(payee, payer.address, 9) is None
+    assert (f.txid, 0) not in dict(n.find_spendable(payee.address))

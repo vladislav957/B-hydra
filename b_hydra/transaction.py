@@ -30,31 +30,61 @@ NULL_TXID = "0" * 128
 
 
 class TxOutput:
-    """Выход транзакции: сумма, заблокированная на адрес получателя."""
+    """Выход транзакции: сумма и условие траты.
 
-    def __init__(self, amount, address):
+    По умолчанию — обычный P2PKH: тратит тот, чей адрес = `address`. Если задан
+    `script` (dict), выход становится СКРИПТОВЫМ: условие траты описывает скрипт
+    (например, HTLC — хеш-замок + время-замок). Скрипт детерминированно проверяют
+    все узлы. У обычных выходов `script` отсутствует и в словаре, и в хеше — так
+    старые транзакции остаются побитово теми же (txid не меняется).
+    """
+
+    def __init__(self, amount, address, script=None):
         self.amount = float(amount)
-        self.address = address
+        self.address = address        # для P2PKH — владелец; для скрипта — справочно
+        self.script = script          # None → P2PKH; dict → условие (HTLC и т.п.)
 
     def to_dict(self):
-        return {"amount": self.amount, "address": self.address}
+        d = {"amount": self.amount, "address": self.address}
+        if self.script is not None:
+            d["script"] = self.script
+        return d
 
     @classmethod
     def from_dict(cls, data):
-        return cls(amount=data["amount"], address=data["address"])
+        return cls(amount=data["amount"], address=data["address"],
+                   script=data.get("script"))
+
+    @classmethod
+    def htlc(cls, amount, secret_hash, recipient, refund, expiry):
+        """Скриптовый выход HTLC: обналичить может получатель, зная секрет, до
+        блока `expiry`; после — возврат плательщику (`refund`)."""
+        return cls(amount, recipient, script={
+            "type": "htlc",
+            "hash": secret_hash,       # SHA-512(секрет) — хеш-замок
+            "recipient": recipient,    # кто обналичивает секретом
+            "refund": refund,          # кому возврат после срока
+            "expiry": int(expiry),     # высота блока — время-замок
+        })
 
     def __repr__(self):
-        return f"<TxOut {self.amount} BHY → {self.address[:12]}…>"
+        kind = f" [{self.script['type']}]" if self.script else ""
+        return f"<TxOut {self.amount} BHY → {self.address[:12]}…{kind}>"
 
 
 class TxInput:
     """Вход транзакции: ссылка на конкретный выход (txid, index) + подпись."""
 
-    def __init__(self, txid, index, public_key=None, signature=None):
+    def __init__(self, txid, index, public_key=None, signature=None,
+                 preimage=None):
         self.txid = txid            # id транзакции, чей выход расходуется
         self.index = index          # номер выхода в той транзакции (vout)
         self.public_key = public_key  # hex публичного ключа владельца
         self.signature = signature    # hex подписи входа
+        # Секрет (preimage) для раскрытия хеш-замка HTLC. Это «свидетель», в
+        # подпись/txid он не входит (как witness в Bitcoin): подделать нельзя —
+        # неверный секрет не пройдёт хеш-проверку.
+        self.preimage = preimage
 
     @property
     def outpoint(self):
@@ -62,12 +92,15 @@ class TxInput:
         return (self.txid, self.index)
 
     def to_dict(self):
-        return {
+        d = {
             "txid": self.txid,
             "index": self.index,
             "public_key": self.public_key,
             "signature": self.signature,
         }
+        if self.preimage is not None:
+            d["preimage"] = self.preimage
+        return d
 
     @classmethod
     def from_dict(cls, data):
@@ -76,6 +109,7 @@ class TxInput:
             index=data["index"],
             public_key=data.get("public_key"),
             signature=data.get("signature"),
+            preimage=data.get("preimage"),
         )
 
     def __repr__(self):

@@ -258,6 +258,93 @@ def honor_cheque(cheque: "SmartCheque", secret, payer_wallet, node):
     return tx
 
 
+# --- On-chain HTLC: настоящие скриптовые выходы UTXO -------------------------
+# Здесь чек становится ПО-НАСТОЯЩЕМУ on-chain и trustless: средства блокируются
+# в скриптовом выходе (hash+time lock). Получатель забирает их, раскрыв секрет,
+# до срока; после срока плательщик возвращает — и никто не может обмануть, всё
+# проверяет сеть. В отличие от honor_cheque(), плательщик НЕ нужен для выплаты.
+
+def _htlc_output(cheque):
+    from .transaction import TxOutput
+    return TxOutput.htlc(cheque.amount, cheque.secret_hash,
+                         cheque.payee, cheque.payer, cheque.expiry)
+
+
+def fund_cheque(node, payer_wallet, cheque, fee=None):
+    """Плательщик БЛОКИРУЕТ сумму чека в HTLC-выходе (on-chain).
+
+    Возвращает funding-транзакцию (в мемпуле) или None. После майнинга средства
+    заперты условием: забрать сможет только получатель по секрету (до срока) или
+    сам плательщик (после срока)."""
+    from .transaction import Transaction, TxInput, TxOutput
+    if payer_wallet.address != cheque.payer or not cheque.verify():
+        return None
+    fee = cheque.fee if fee is None else fee
+    need = cheque.amount + fee
+    reserved = node.mempool.spent_outpoints()
+    chosen, gathered = [], 0.0
+    for outpoint, value in node.find_spendable(payer_wallet.address):
+        if outpoint in reserved:
+            continue
+        chosen.append((outpoint, value))
+        gathered += value
+        if gathered >= need:
+            break
+    if gathered < need:
+        return None
+    vin = [TxInput(op[0], op[1]) for op, _ in chosen]
+    vout = [_htlc_output(cheque)]
+    change = gathered - need
+    if change > 0:
+        vout.append(TxOutput(change, payer_wallet.address))
+    tx = Transaction(vin=vin, vout=vout)
+    tx.sign(payer_wallet)
+    return tx if node.add_transaction(tx) else None
+
+
+def _find_htlc_outpoint(funding_tx, cheque):
+    """Индекс HTLC-выхода в funding-транзакции (по хеш-замку) или None."""
+    for idx, out in enumerate(funding_tx.vout):
+        if out.script and out.script.get("hash") == cheque.secret_hash:
+            return idx
+    return None
+
+
+def redeem_cheque_onchain(node, recipient_wallet, funding_tx, cheque, secret, fee=0.0):
+    """Получатель обналичивает HTLC-выход, раскрыв секрет (до истечения срока)."""
+    from .transaction import Transaction, TxInput, TxOutput
+    if recipient_wallet.address != cheque.payee:
+        return None
+    idx = _find_htlc_outpoint(funding_tx, cheque)
+    if idx is None:
+        return None
+    amount = funding_tx.vout[idx].amount - fee
+    if amount <= 0:
+        return None
+    inp = TxInput(funding_tx.txid, idx)
+    tx = Transaction(vin=[inp], vout=[TxOutput(amount, recipient_wallet.address)])
+    tx.sign(recipient_wallet)
+    inp.preimage = secret if isinstance(secret, str) else secret.decode("utf-8")
+    return tx if node.add_transaction(tx) else None
+
+
+def refund_cheque_onchain(node, payer_wallet, funding_tx, cheque, fee=0.0):
+    """Плательщик возвращает средства HTLC-выхода после истечения срока."""
+    from .transaction import Transaction, TxInput, TxOutput
+    if payer_wallet.address != cheque.payer:
+        return None
+    idx = _find_htlc_outpoint(funding_tx, cheque)
+    if idx is None:
+        return None
+    amount = funding_tx.vout[idx].amount - fee
+    if amount <= 0:
+        return None
+    inp = TxInput(funding_tx.txid, idx)
+    tx = Transaction(vin=[inp], vout=[TxOutput(amount, payer_wallet.address)])
+    tx.sign(payer_wallet)
+    return tx if node.add_transaction(tx) else None
+
+
 if __name__ == "__main__":
     contract = SmartContract(owner="alice")
     print(contract.deposit(100))

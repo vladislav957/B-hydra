@@ -18,6 +18,7 @@ if __name__ == "__main__" and __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     __package__ = "b_hydra"
 
+from . import hashing
 from .blockchain import (
     Block, Blockchain, DEFAULT_DIFFICULTY,
     MAX_BLOCK_TRANSACTIONS, MAX_FUTURE_DRIFT,
@@ -58,27 +59,80 @@ class BHydraNode:
                 # Сначала удаляем потраченные входами выходы.
                 for inp in tx.get("vin", []):
                     utxos.pop((inp["txid"], inp["index"]), None)
-                # Затем добавляем новые выходы.
+                # Затем добавляем новые выходы (с условием-скриптом, если есть).
                 for index, out in enumerate(tx.get("vout", [])):
                     utxos[(txid, index)] = {
-                        "amount": out["amount"], "address": out["address"]
+                        "amount": out["amount"], "address": out["address"],
+                        "script": out.get("script"),
                     }
         return utxos
 
     def get_balance(self, address: str) -> float:
-        """Баланс адреса = сумма его непотраченных выходов (UTXO)."""
+        """Баланс адреса = сумма его обычных (P2PKH) UTXO.
+
+        Скриптовые выходы (например, средства, запертые в HTLC-чеке) в обычный
+        баланс не входят — они заперты условием и тратятся отдельным путём.
+        """
         return sum(u["amount"] for u in self.utxo_set().values()
-                   if u["address"] == address)
+                   if u["address"] == address and not u.get("script"))
 
     def find_spendable(self, address: str):
-        """UTXO, принадлежащие адресу: список (outpoint, amount)."""
+        """Обычные (P2PKH) UTXO адреса: список (outpoint, amount).
+
+        Скриптовые выходы сюда не попадают — их нельзя тратить обычной подписью.
+        """
         return [(outpoint, u["amount"])
                 for outpoint, u in self.utxo_set().items()
-                if u["address"] == address]
+                if u["address"] == address and not u.get("script")]
+
+    # --- Авторизация траты выхода (P2PKH или скрипт) ---------------------
+    @staticmethod
+    def _authorize_input(inp, utxo, payload, height) -> bool:
+        """Разрешена ли трата выхода `utxo` входом `inp` на высоте `height`.
+
+        Обычный выход (без скрипта) — трата по подписи владельца (P2PKH).
+        Скриптовый выход — по правилам своего типа (сейчас: HTLC).
+        `payload` — подписываемые байты транзакции (привязывают трату к ней).
+        """
+        script = utxo.get("script")
+        if not script:
+            # P2PKH: публичный ключ соответствует адресу выхода + верная подпись.
+            if not inp.public_key or not inp.signature:
+                return False
+            if Wallet.address_from_public_key(inp.public_key) != utxo["address"]:
+                return False
+            return Wallet.verify(inp.public_key, payload, inp.signature)
+        return BHydraNode._eval_htlc(script, inp, payload, height)
+
+    @staticmethod
+    def _eval_htlc(script, inp, payload, height) -> bool:
+        """Проверка условий HTLC-выхода при трате.
+
+        Две ветки:
+          * ВОЗВРАТ: тратит плательщик (`refund`), если срок вышел (height > expiry);
+          * ПОЛУЧЕНИЕ: тратит получатель (`recipient`), зная секрет (preimage,
+            чей SHA-512 равен hash), пока срок не вышел (height <= expiry).
+        В обоих случаях трата обязана быть подписана тратящим (привязка к tx).
+        """
+        if script.get("type") != "htlc":
+            return False
+        if not inp.public_key or not inp.signature:
+            return False
+        if not Wallet.verify(inp.public_key, payload, inp.signature):
+            return False
+        spender = Wallet.address_from_public_key(inp.public_key)
+        expiry = script.get("expiry")
+        if spender == script.get("refund") and height is not None and height > expiry:
+            return True
+        if spender == script.get("recipient") and (height is None or height <= expiry):
+            pre = inp.preimage
+            if pre is not None and hashing.sha512(pre) == script.get("hash"):
+                return True
+        return False
 
     # --- Проверка транзакции ---------------------------------------------
     def validate_transaction(self, tx: Transaction, utxos=None,
-                             reserved=None) -> bool:
+                             reserved=None, height=None) -> bool:
         """
         Проверяет обычную (не coinbase) транзакцию:
           * входы ссылаются на существующие непотраченные выходы;
@@ -97,6 +151,9 @@ class BHydraNode:
         utxos = utxos if utxos is not None else self.utxo_set()
         reserved = reserved if reserved is not None else set()
         payload = tx.signing_payload()
+        # Прогнозная высота — индекс следующего блока (для время-замков HTLC).
+        if height is None:
+            height = len(self.blockchain.chain)
 
         total_in = 0.0
         seen = set()
@@ -108,13 +165,8 @@ class BHydraNode:
             utxo = utxos.get(outpoint)
             if utxo is None:
                 return False  # вход ссылается на несуществующий/потраченный выход
-            if not inp.public_key or not inp.signature:
-                return False
-            # Публичный ключ должен соответствовать адресу расходуемого выхода.
-            if Wallet.address_from_public_key(inp.public_key) != utxo["address"]:
-                return False
-            if not Wallet.verify(inp.public_key, payload, inp.signature):
-                return False
+            if not self._authorize_input(inp, utxo, payload, height):
+                return False  # подпись/скрипт не разрешают трату
             total_in += utxo["amount"]
 
         return total_in >= tx.total_output
@@ -261,11 +313,9 @@ class BHydraNode:
                     return False  # двойная трата / несуществующий выход
                 spent.add(outpoint)
                 utxo = utxos[outpoint]
-                if not inp.public_key or not inp.signature:
-                    return False
-                if Wallet.address_from_public_key(inp.public_key) != utxo["address"]:
-                    return False
-                if not Wallet.verify(inp.public_key, payload, inp.signature):
+                # Трата разрешается подписью (P2PKH) или скриптом (HTLC), с
+                # учётом высоты блока для время-замков.
+                if not self._authorize_input(inp, utxo, payload, height):
                     return False
                 total_in += utxo["amount"]
             if total_in + _EPS < tx.total_output:
@@ -285,7 +335,9 @@ class BHydraNode:
             for inp in tx.vin:
                 utxos.pop(inp.outpoint, None)
             for idx, out in enumerate(tx.vout):
-                utxos[(tx.txid, idx)] = {"amount": out.amount, "address": out.address}
+                utxos[(tx.txid, idx)] = {"amount": out.amount,
+                                         "address": out.address,
+                                         "script": out.script}
 
     def _validate_chain(self, blockchain) -> bool:
         """Полная проверка цепочки: структура (PoW/Меркл/связность) + транзакции."""
