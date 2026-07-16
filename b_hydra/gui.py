@@ -15,8 +15,10 @@ gui.py — десктоп-приложение B-hydra (tkinter).
 
 from __future__ import annotations
 
+import json
 import os
 import queue
+import secrets
 import sys
 import threading
 import tkinter as tk
@@ -37,6 +39,7 @@ if __name__ == "__main__" and __package__ in (None, ""):
 
 from . import __version__, hashing
 from .blockchain import DEFAULT_FEE, TARGET_BLOCK_TIME
+from .contract import SmartCheque, honor_cheque
 from .node import BHydraNode
 from .p2p import P2PNode
 from .wallet import Wallet, generate_wallet, is_valid_address
@@ -117,6 +120,7 @@ class BHydraApp(tk.Tk):
         self._nb = nb
         self._build_wallet_tab(nb)
         self._build_mining_tab(nb)
+        self._build_cheque_tab(nb)
         self._build_network_tab(nb)
         self._build_mempool_tab(nb)
         self._build_blocks_tab(nb)
@@ -271,6 +275,74 @@ class BHydraApp(tk.Tk):
 
         self.mine_log = tk.Text(tab, height=14, state="disabled")
         self.mine_log.pack(fill="both", expand=True)
+
+    def _build_cheque_tab(self, nb: ttk.Notebook) -> None:
+        tab = ttk.Frame(nb, padding=12)
+        nb.add(tab, text="📝 Смарт-чек")
+
+        ttk.Label(
+            tab, foreground="gray", wraplength=640, justify="left",
+            text="Смарт-чек (HTLC): подписанное обязательство. Обналичить можно, "
+                 "только зная СЕКРЕТ, и до истечения срока в блоках. Секрет "
+                 "передай получателю приватно — в самом чеке лежит лишь его хеш."
+        ).pack(anchor="w", pady=(0, 8))
+
+        # --- Выписать чек (я — плательщик) ---
+        issue = ttk.LabelFrame(tab, text="Выписать чек (я — плательщик)", padding=8)
+        issue.pack(fill="x")
+        issue.columnconfigure(1, weight=1)
+        self.chq_to = tk.StringVar()
+        self.chq_amount = tk.StringVar(value="10")
+        self.chq_fee = tk.StringVar(value=f"{DEFAULT_FEE:g}")
+        self.chq_secret = tk.StringVar(value=secrets.token_hex(6))
+        self.chq_expiry = tk.StringVar(value="100")
+
+        ttk.Label(issue, text="Кому (адрес):").grid(row=0, column=0, sticky="w")
+        e_to = ttk.Entry(issue, textvariable=self.chq_to)
+        e_to.grid(row=0, column=1, columnspan=2, sticky="we", padx=4, pady=2)
+        self._add_paste_menu(e_to)
+        ttk.Label(issue, text="Сумма (BHY):").grid(row=1, column=0, sticky="w")
+        ttk.Entry(issue, textvariable=self.chq_amount, width=14).grid(
+            row=1, column=1, sticky="w", padx=4, pady=2)
+        ttk.Label(issue, text="Комиссия:").grid(row=2, column=0, sticky="w")
+        ttk.Entry(issue, textvariable=self.chq_fee, width=14).grid(
+            row=2, column=1, sticky="w", padx=4, pady=2)
+        ttk.Label(issue, text="Секрет:").grid(row=3, column=0, sticky="w")
+        ttk.Entry(issue, textvariable=self.chq_secret).grid(
+            row=3, column=1, sticky="we", padx=4, pady=2)
+        ttk.Button(issue, text="Случайный",
+                   command=lambda: self.chq_secret.set(secrets.token_hex(6))).grid(
+            row=3, column=2, padx=2)
+        ttk.Label(issue, text="Срок (блоков):").grid(row=4, column=0, sticky="w")
+        ttk.Entry(issue, textvariable=self.chq_expiry, width=14).grid(
+            row=4, column=1, sticky="w", padx=4, pady=2)
+        ttk.Button(issue, text="📝 Выписать чек", command=self._issue_cheque).grid(
+            row=5, column=1, sticky="w", padx=4, pady=(6, 0))
+
+        self.cheque_out = tk.Text(tab, height=7, state="disabled", wrap="word")
+        self.cheque_out.pack(fill="x", pady=(6, 0))
+        ttk.Button(tab, text="Копировать чек",
+                   command=self._copy_cheque).pack(anchor="w", pady=(2, 8))
+
+        # --- Оплатить чек (плательщик исполняет обязательство) ---
+        honor = ttk.LabelFrame(
+            tab, text="Оплатить чек (я — плательщик, секрет раскрыт)", padding=8)
+        honor.pack(fill="both", expand=True)
+        ttk.Label(honor, text="Вставьте чек (JSON):").pack(anchor="w")
+        self.cheque_in = tk.Text(honor, height=6, wrap="word")
+        self.cheque_in.pack(fill="both", expand=True, pady=2)
+        self._add_text_paste_menu(self.cheque_in)
+        row = ttk.Frame(honor)
+        row.pack(fill="x", pady=2)
+        ttk.Label(row, text="Секрет:").pack(side="left")
+        self.honor_secret = tk.StringVar()
+        ttk.Entry(row, textvariable=self.honor_secret, width=24).pack(
+            side="left", padx=4)
+        ttk.Button(row, text="💸 Оплатить чек",
+                   command=self._honor_cheque).pack(side="left", padx=6)
+        self.cheque_msg = tk.StringVar()
+        ttk.Label(honor, textvariable=self.cheque_msg, wraplength=640,
+                  justify="left").pack(anchor="w", pady=(4, 0))
 
     def _build_network_tab(self, nb: ttk.Notebook) -> None:
         tab = ttk.Frame(nb, padding=12)
@@ -609,6 +681,110 @@ class BHydraApp(tk.Tk):
 
         entry.bind("<Button-3>", popup)          # ПКМ (Windows/Linux)
         entry.bind("<Button-2>", popup)          # средняя кнопка (на всякий)
+
+    def _add_text_paste_menu(self, text: tk.Text) -> None:
+        """Меню правой кнопки для многострочного поля (Text)."""
+        menu = tk.Menu(text, tearoff=0)
+        menu.add_command(label="Вставить",
+                         command=lambda: text.event_generate("<<Paste>>"))
+        menu.add_command(label="Копировать",
+                         command=lambda: text.event_generate("<<Copy>>"))
+        menu.add_command(label="Выделить всё",
+                         command=lambda: (text.tag_add("sel", "1.0", "end"), "break"))
+        text.bind("<Button-3>", lambda e: menu.tk_popup(e.x_root, e.y_root))
+
+    # --- Смарт-чек (HTLC) ------------------------------------------------
+    def _issue_cheque(self) -> None:
+        """Выписать и подписать смарт-чек текущим кошельком (плательщик)."""
+        if self.wallet is None:
+            return messagebox.showwarning("Кошелёк", "Сначала создайте кошелёк.")
+        to = self.chq_to.get().strip()
+        if not is_valid_address(to):
+            return messagebox.showerror("Смарт-чек", "Неверный адрес получателя (BHY…).")
+        try:
+            amount = float(self.chq_amount.get().replace(",", "."))
+            fee = float(self.chq_fee.get().replace(",", "."))
+        except ValueError:
+            return messagebox.showerror("Смарт-чек", "Сумма и комиссия — числа.")
+        if amount <= 0:
+            return messagebox.showerror("Смарт-чек", "Сумма должна быть больше нуля.")
+        secret = self.chq_secret.get().strip()
+        if not secret:
+            return messagebox.showerror("Смарт-чек", "Задайте секрет (или «Случайный»).")
+        try:
+            blocks = int(self.chq_expiry.get())
+            if blocks <= 0:
+                raise ValueError
+        except ValueError:
+            return messagebox.showerror("Смарт-чек", "Срок — целое число блоков > 0.")
+
+        expiry = self.node.height + blocks
+        cheque = SmartCheque.issue(self.wallet, to, amount, secret,
+                                   expiry=expiry, fee=fee)
+        self._last_cheque = json.dumps(cheque.to_dict(), ensure_ascii=False, indent=2)
+        self.cheque_out.config(state="normal")
+        self.cheque_out.delete("1.0", "end")
+        self.cheque_out.insert("end",
+                               "✅ Чек выписан и подписан. Отдайте получателю ЭТОТ "
+                               f"чек, а СЕКРЕТ «{secret}» — приватно (иначе кто "
+                               "угодно обналичит).\nДействует до блока "
+                               f"{expiry} (сейчас {self.node.height}).\n\n"
+                               + self._last_cheque)
+        self.cheque_out.config(state="disabled")
+        self.status.set("Смарт-чек выписан.")
+
+    def _copy_cheque(self) -> None:
+        text = getattr(self, "_last_cheque", "")
+        if not text:
+            return self.status.set("Сначала выпишите чек.")
+        self.clipboard_clear()
+        self.clipboard_append(text)
+        self.update()
+        self.status.set("Чек скопирован в буфер обмена.")
+
+    def _honor_cheque(self) -> None:
+        """Исполнить чек: секрет раскрыт и срок не вышел → реальная транзакция."""
+        if self.wallet is None:
+            return messagebox.showwarning("Кошелёк", "Сначала создайте кошелёк.")
+        raw = self.cheque_in.get("1.0", "end").strip()
+        if not raw:
+            self.cheque_msg.set("Вставьте JSON чека в поле выше.")
+            return
+        try:
+            cheque = SmartCheque.from_dict(json.loads(raw))
+        except (ValueError, KeyError, TypeError):
+            self.cheque_msg.set("❌ Не удалось разобрать чек (это должен быть JSON чека).")
+            return
+        if not cheque.verify():
+            self.cheque_msg.set("❌ Подпись чека неверна (чек подделан или повреждён).")
+            return
+        if cheque.payer != self.wallet.address:
+            self.cheque_msg.set(
+                "❌ Оплатить чек может только ПЛАТЕЛЬЩИК (его выписавший). "
+                "Загрузите кошелёк плательщика.")
+            return
+        secret = self.honor_secret.get().strip()
+        if not cheque.secret_matches(secret):
+            self.cheque_msg.set("❌ Неверный секрет — хеш-замок не открылся.")
+            return
+        if self.node.height > cheque.expiry:
+            self.cheque_msg.set(
+                f"❌ Срок чека вышел (до блока {cheque.expiry}, сейчас "
+                f"{self.node.height}). Средства остаются у плательщика.")
+            return
+
+        tx = honor_cheque(cheque, secret, self.wallet, self.node)
+        if tx is None:
+            self.cheque_msg.set("❌ Не удалось оплатить (недостаточно средств?).")
+            return
+        if self.p2p and self.p2p._running:
+            self.p2p.broadcast({"type": "transaction", "transaction": tx.to_dict(),
+                                "from": [self.p2p.host, self.p2p.port]})
+        self.node.save(STATE_FILE)
+        self.cheque_msg.set(
+            f"✅ Чек оплачен: {cheque.amount:.4f} BHY → {cheque.payee[:20]}… "
+            f"txid {tx.txid[:16]}… (в мемпуле, подтвердится при майнинге).")
+        self._refresh_status()
 
     def _show_qr(self) -> None:
         """Показать QR-код адреса в отдельном окне (для сканирования телефоном)."""
