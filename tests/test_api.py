@@ -144,3 +144,59 @@ def test_tx_and_address_endpoints(server):
     addr = json.loads(_get(server, "/api/address/" + alice.address))
     assert addr["balance"] == 39.5
     assert len(addr["history"]) == 2
+
+
+def test_contract_cheque_flow_over_api(server):
+    payer = MobileWallet(server)
+    holder = MobileWallet(server)
+    _post(server, "/api/mine", {"miner": payer.address})
+
+    cheque = _post(server, "/api/contract/cheque", {
+        "private_key": payer.private_key_hex, "amount": 7, "fee": 0.5,
+    })
+    assert cheque["status"] == "active"
+    assert cheque["secret"]                      # секрет выдан один раз
+
+    # Неверный секрет — понятная ошибка, деньги не уходят.
+    err = _post(server, "/api/contract/cheque/cash", {
+        "cheque_id": cheque["cheque_id"], "secret": "xxx",
+        "to": holder.address,
+    })
+    assert "секрет" in err["error"]
+
+    cashed = _post(server, "/api/contract/cheque/cash", {
+        "cheque_id": cheque["cheque_id"], "secret": cheque["secret"],
+        "to": holder.address,
+    })
+    assert cashed["status"] == "cashed"
+    _post(server, "/api/mine", {"miner": MobileWallet(server).address})
+    assert holder.balance() == 7
+
+    # Хеш секрета публичен, сам секрет узел не хранит.
+    info = json.loads(_get(server, "/api/contract"))
+    assert info["cheques"][0]["cheque_id"] == cheque["cheque_id"]
+    assert "secret" not in info["cheques"][0]
+
+
+def test_contract_escrow_flow_over_api(server):
+    buyer = MobileWallet(server)
+    seller = MobileWallet(server)
+    _post(server, "/api/mine", {"miner": buyer.address})
+
+    escrow = _post(server, "/api/contract/escrow", {
+        "private_key": buyer.private_key_hex, "seller": seller.address,
+        "amount": 10,
+    })
+    assert escrow["status"] == "open"
+
+    for key in (buyer.private_key_hex, seller.private_key_hex):
+        escrow = _post(server, "/api/contract/escrow/confirm", {
+            "escrow_id": escrow["escrow_id"], "private_key": key,
+        })
+    assert escrow["status"] == "completed"
+    _post(server, "/api/mine", {"miner": MobileWallet(server).address})
+    assert seller.balance() == 10
+
+    got = json.loads(_get(server, "/api/contract/escrow/"
+                          + escrow["escrow_id"]))
+    assert got["status"] == "completed"
