@@ -13,12 +13,13 @@ UTXO-транзакции к блокчейну, узлу, P2P-сети и REST 
     node                — узел: UTXO-набор, балансы, майнинг, синхронизация
     p2p, tcp            — одноранговая сеть
     api, mobile_client  — REST API и эталонный мобильный кошелёк
-    contract            — смарт-контракт и эскроу
+    contract            — смарт-контракты на цепочке: эскроу и смарт-чеки
 """
 
 from __future__ import annotations
 
 from .blockchain import Block, Blockchain
+from .contract import ContractManager, verify_cheque
 from .node import BHydraNode
 from .transaction import (
     Transaction,
@@ -40,6 +41,8 @@ __all__ = [
     "coinbase",
     "Wallet",
     "generate_wallet",
+    "ContractManager",
+    "verify_cheque",
 ]
 
 __version__ = "0.0.2"

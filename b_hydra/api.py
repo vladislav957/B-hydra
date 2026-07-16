@@ -20,6 +20,21 @@ api.py — REST API узла B-hydra (для мобильных кошелько
                                    (узел подписывает сам — для своего локального узла)
     POST /api/mine               — добыть блок {"miner": "<address>"}
 
+Смарт-контракты (средства реально блокируются на адресе контракта):
+    GET  /api/contract                    — адрес контракта, эскроу и чеки
+    GET  /api/contract/escrow/<id>        — эскроу-сделка по идентификатору
+    GET  /api/contract/cheque/<id>        — смарт-чек по идентификатору
+    POST /api/contract/escrow             — открыть {"private_key","seller",
+                                            "amount","fee","deadline"?}
+    POST /api/contract/escrow/confirm     — подтвердить {"escrow_id","private_key"}
+    POST /api/contract/escrow/cancel      — отменить    {"escrow_id","private_key"}
+    POST /api/contract/cheque             — выписать чек {"private_key","amount",
+                                            "fee","expires_in"?,"recipient"?}
+                                            → чек + секрет (выдаётся один раз)
+    POST /api/contract/cheque/cash        — обналичить {"cheque_id","secret","to"}
+    POST /api/contract/cheque/refund      — возврат по истёкшему чеку
+                                            {"cheque_id","private_key"}
+
 Запуск:
     python api.py            # http://0.0.0.0:8000  (обозреватель + API)
 """
@@ -37,6 +52,7 @@ if __name__ == "__main__" and __package__ in (None, ""):
     __package__ = "b_hydra"
 
 from .blockchain import MAX_SUPPLY
+from .contract import ContractManager
 from .node import BHydraNode
 from .transaction import Transaction
 from .wallet import is_valid_address, Wallet
@@ -54,7 +70,9 @@ class BHydraAPI(BaseHTTPRequestHandler):
     """Обработчик REST-запросов к узлу B-hydra."""
 
     node = None             # общий BHydraNode (устанавливается в make_server)
+    contracts = None        # общий ContractManager (эскроу и смарт-чеки)
     state_file = None
+    contracts_file = None
     lock = threading.Lock()
 
     # --- Вспомогательное -------------------------------------------------
@@ -86,6 +104,78 @@ class BHydraAPI(BaseHTTPRequestHandler):
     def _save(self):
         if self.state_file:
             self.node.save(self.state_file)
+        if self.contracts_file and self.contracts is not None:
+            with open(self.contracts_file, "w", encoding="utf-8") as f:
+                json.dump(self.contracts.to_dict(), f,
+                          ensure_ascii=False, indent=2)
+
+    def _wallet_from(self, data):
+        """Кошелёк из private_key тела запроса (модель доверия — как /api/send)."""
+        pk = data.get("private_key")
+        if not pk:
+            raise ValueError("нужен приватный ключ (private_key)")
+        return Wallet.from_private_hex(pk)
+
+    def _handle_contract_post(self, action, data):
+        """POST-операции смарт-контрактов; ValueError → понятный ответ 400."""
+        def _num(name, default=None, required=False):
+            raw = data.get(name, default)
+            if raw is None:
+                if required:
+                    raise ValueError(f"нужно числовое поле '{name}'")
+                return None
+            try:
+                return float(raw)
+            except (TypeError, ValueError):
+                raise ValueError(f"поле '{name}' должно быть числом")
+
+        if action == ["escrow"]:
+            buyer = self._wallet_from(data)
+            with self.lock:
+                escrow = self.contracts.open_escrow(
+                    buyer, data.get("seller"), _num("amount", required=True),
+                    fee=_num("fee", 0.0), deadline=_num("deadline"))
+                self._save()
+            self._send(200, escrow)
+        elif action == ["escrow", "confirm"]:
+            party = self._wallet_from(data).address
+            with self.lock:
+                escrow = self.contracts.confirm_escrow(
+                    data.get("escrow_id"), party)
+                self._save()
+            self._send(200, escrow)
+        elif action == ["escrow", "cancel"]:
+            party = self._wallet_from(data).address
+            with self.lock:
+                escrow = self.contracts.cancel_escrow(
+                    data.get("escrow_id"), party)
+                self._save()
+            self._send(200, escrow)
+        elif action == ["cheque"]:
+            payer = self._wallet_from(data)
+            with self.lock:
+                cheque, secret = self.contracts.write_cheque(
+                    payer, _num("amount", required=True), fee=_num("fee", 0.0),
+                    expires_in=_num("expires_in", 86400.0),
+                    recipient=data.get("recipient"))
+                self._save()
+            # Секрет отдаётся ровно один раз — узел хранит только его хеш.
+            self._send(200, {**cheque, "secret": secret})
+        elif action == ["cheque", "cash"]:
+            with self.lock:
+                cheque = self.contracts.cash_cheque(
+                    data.get("cheque_id"), data.get("secret"), data.get("to"))
+                self._save()
+            self._send(200, cheque)
+        elif action == ["cheque", "refund"]:
+            payer = self._wallet_from(data).address
+            with self.lock:
+                cheque = self.contracts.refund_cheque(
+                    data.get("cheque_id"), payer)
+                self._save()
+            self._send(200, cheque)
+        else:
+            self._send(404, {"error": "not found"})
 
     def log_message(self, *args):
         pass  # тихий режим
@@ -169,6 +259,21 @@ class BHydraAPI(BaseHTTPRequestHandler):
                                  "chain": self.node.blockchain.to_dicts()})
             elif parts == ["api", "mempool"]:
                 self._send(200, {"pending": len(self.node.mempool)})
+            elif parts == ["api", "contract"]:
+                self._send(200, {
+                    "address": self.contracts.address,
+                    "balance": self.node.get_balance(self.contracts.address),
+                    "escrows": list(self.contracts.escrows.values()),
+                    "cheques": list(self.contracts.cheques.values()),
+                })
+            elif len(parts) == 4 and parts[:3] == ["api", "contract", "escrow"]:
+                escrow = self.contracts.escrows.get(unquote(parts[3]))
+                self._send(200 if escrow else 404,
+                           escrow or {"error": "эскроу не найден"})
+            elif len(parts) == 4 and parts[:3] == ["api", "contract", "cheque"]:
+                cheque = self.contracts.cheques.get(unquote(parts[3]))
+                self._send(200 if cheque else 404,
+                           cheque or {"error": "чек не найден"})
             else:
                 self._send(404, {"error": "not found"})
         except Exception as exc:  # noqa: BLE001 — вернуть ошибку клиенту
@@ -261,6 +366,12 @@ class BHydraAPI(BaseHTTPRequestHandler):
                     "sender_balance": self.node.get_balance(sender.address),
                     "error": None if accepted else "транзакция отклонена (двойная трата?)",
                 })
+            elif len(parts) >= 3 and parts[:2] == ["api", "contract"]:
+                # Смарт-контракты: понятная ошибка (400) вместо общего отказа.
+                try:
+                    self._handle_contract_post(parts[2:], data)
+                except ValueError as err:
+                    self._send(400, {"error": str(err)})
             elif parts == ["api", "mine"]:
                 miner = data.get("miner")
                 if not miner:
@@ -293,8 +404,18 @@ def make_server(host="0.0.0.0", port=8000, state_file=DEFAULT_STATE,
         node = BHydraNode.load(state_file)
     else:
         node = BHydraNode(difficulty=difficulty)
+    # Смарт-контракты (эскроу, чеки) — в отдельном файле рядом с цепочкой:
+    # там лежит приватный ключ контрактного кошелька, терять его нельзя.
+    contracts_file = state_file + ".contracts" if state_file else None
+    if contracts_file and os.path.exists(contracts_file):
+        with open(contracts_file, encoding="utf-8") as f:
+            contracts = ContractManager.from_dict(node, json.load(f))
+    else:
+        contracts = ContractManager(node)
     BHydraAPI.node = node
+    BHydraAPI.contracts = contracts
     BHydraAPI.state_file = state_file
+    BHydraAPI.contracts_file = contracts_file
     return ThreadingHTTPServer((host, port), BHydraAPI)
 
 

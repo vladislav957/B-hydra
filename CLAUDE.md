@@ -12,7 +12,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 pip install pytest                            # единственная dev-зависимость
-python -m pytest -q                           # 107 тестов — держать зелёными
+python -m pytest -q                           # 120 тестов — держать зелёными
 python -m pytest tests/test_node.py -q        # один файл
 python -m pytest tests/test_node.py -k mempool -q   # один тест по имени
 
@@ -39,7 +39,8 @@ python P2P.py --demo                          # демо-сеть из трёх 
 | `wallet.py` | ECDSA secp256k1 (свой на Python + опц. нативный бэкенд), адреса |
 | `hashing.py`, `sha2.py` | SHA-256/512 с нуля + подключаемый бэкенд |
 | `hashcash.py`, `economics.py` | proof-of-work, награда/эмиссия/halving |
-| `merkle.py`, `contract.py`, `qrcode_gen.py` | дерево Меркла, эскроу, QR с нуля |
+| `merkle.py`, `qrcode_gen.py` | дерево Меркла, QR с нуля |
+| `contract.py` | `ContractManager`: эскроу и смарт-чеки НА ЦЕПОЧКЕ (+ учебные in-memory классы) |
 | `node.py` | узел: блокчейн + мемпул + кэш UTXO, майнинг, переводы |
 | `p2p.py`, `tcp.py` | gossip-сеть, обмен пирами, фрейминг сообщений |
 | `api.py`, `cli.py`, `gui.py`, `mobile_client.py` | REST/HTTP, CLI, tkinter-GUI, моб. клиент |
@@ -56,8 +57,14 @@ python P2P.py --demo                          # демо-сеть из трёх 
 `POST /api/mine {miner} | /api/transaction {подписанная tx} | /api/send`
 `{private_key,to,amount,fee} | /api/wallet {private_key}→адрес+баланс`.
 
-⚠️ `/api/send` и `/api/wallet` принимают приватный ключ — это для СВОЕГО
-локального узла. Для чужого узла нужна подпись на устройстве.
+Смарт-контракты: `GET /api/contract | /api/contract/escrow/<id>`
+`| /api/contract/cheque/<id>`; `POST /api/contract/escrow (open) |`
+`/api/contract/escrow/confirm | /api/contract/escrow/cancel |`
+`/api/contract/cheque (write, возвращает секрет ОДИН раз) |`
+`/api/contract/cheque/cash {cheque_id,secret,to} | /api/contract/cheque/refund`.
+
+⚠️ `/api/send`, `/api/wallet` и контрактные POST принимают приватный ключ —
+это для СВОЕГО локального узла. Для чужого узла нужна подпись на устройстве.
 
 ## Ключевые факты и подводные камни
 
@@ -80,6 +87,12 @@ python P2P.py --demo                          # демо-сеть из трёх 
 - **Мемпул** вмещает 10 000+ **связанных** транзакций (кэш «эффективного» UTXO —
   подтверждённые + мемпул — позволяет тратить неподтверждённую сдачу),
   `max_size=50000`; `mine_pending` берёт до `MAX_BLOCK_TRANSACTIONS-1` (4999).
+- **Смарт-контракты** (`ContractManager`) НЕ меняют консенсус: у менеджера свой
+  контрактный кошелёк, депозит/выплата/возврат — обычные UTXO-транзакции.
+  Конвенция комиссий: плательщик тратит `amount + 2·fee` (депозит + выплата).
+  Чек подписан ключом плательщика (`verify_cheque` — офлайн-проверка); секрет
+  выдаётся один раз, хранится только его SHA-512. Состояние контрактов API
+  сохраняет в `<state>.contracts` (там приватный ключ контракта — не терять).
 - **Скорость подписи**: `Wallet.verify` использует нативный `coincurve`
   (libsecp256k1), если он установлен и прошёл self-test на байт-совместимость
   (иначе чистый Python). Ускорение проверки ~55× (20 мс → 0.36 мс). Активный
@@ -89,7 +102,7 @@ python P2P.py --demo                          # демо-сеть из трёх 
 
 - Разработка на ветке `claude/*` (для сессии её задаёт задание), PR в `main`;
   напрямую в `main` не пушить.
-- **Перед push — `python -m pytest -q` должно быть зелёным** (107/107).
+- **Перед push — `python -m pytest -q` должно быть зелёным** (120/120).
 - Коммиты по-русски, осмысленные; заканчиваются трейлерами
   `Co-Authored-By:` и `Claude-Session:`.
 - Не хардкодить идентификатор модели в коде/коммитах/артефактах.
@@ -98,7 +111,8 @@ python P2P.py --demo                          # демо-сеть из трёх 
 
 Сделано (PR #1–#4 влиты в `main`): чинка багов ядра, мемпул на 10k+, живой
 веб-обозреватель и кошелёк, настоящие переводы через узел с понятными ошибками,
-нативный ECDSA-ускоритель.
+нативный ECDSA-ускоритель, смарт-контракты на цепочке (эскроу + смарт-чеки,
+REST-эндпоинты `/api/contract/...`).
 
 Дальше (по приоритету пользователя — «сначала скорость, потом DAG»):
 1. скорость — сделано частично (ECDSA); можно добавить кэш проверок и параллелизм;
