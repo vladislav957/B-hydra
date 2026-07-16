@@ -42,7 +42,8 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y python3-tk
 
       - name: Install PyInstaller
-        run: pip install pyinstaller
+        # pillow нужен macOS для автоконвертации PNG-иконки в .icns
+        run: pip install pyinstaller pillow
 
       - name: Build executable
         run: >
