@@ -148,6 +148,22 @@ def is_valid_address(address) -> bool:
     return hashing.double_sha512(payload)[:4] == checksum
 
 
+# --- Подключаемое ядро проверки подписи (скорость) --------------------------
+def _verify_core_pure(x, y, z, r, s) -> bool:
+    """Проверка уравнения ECDSA на чистом Python (эталон)."""
+    w = _inverse_mod(s, _N)
+    u1 = (z * w) % _N
+    u2 = (r * w) % _N
+    point = _point_add(_scalar_mult(u1, _G), _scalar_mult(u2, (x, y)))
+    return point is not None and (point[0] % _N) == r
+
+
+# По умолчанию — чистый Python. Ниже (после класса) при наличии coincurve и
+# успешном self-test ядро заменяется на нативный libsecp256k1.
+_VERIFY_CORE = _verify_core_pure
+_BACKEND = "pure-python"
+
+
 class Wallet:
     """Кошелёк B-hydra: пара ключей ECDSA (secp256k1) + адрес."""
 
@@ -228,13 +244,10 @@ class Wallet:
         if not (1 <= r < _N and 1 <= s < _N):
             return False
         z = _hash_to_int(payload)
-        w = _inverse_mod(s, _N)
-        u1 = (z * w) % _N
-        u2 = (r * w) % _N
-        point = _point_add(_scalar_mult(u1, _G), _scalar_mult(u2, (x, y)))
-        if point is None:
-            return False
-        return (point[0] % _N) == r
+        # Само уравнение проверки считает подключаемое ядро: быстрый нативный
+        # secp256k1 (libsecp256k1), если доступен и прошёл self-test, иначе
+        # чистый Python. Множество принимаемых подписей у них одинаковое.
+        return _VERIFY_CORE(x, y, z, r, s)
 
     # --- Баланс ----------------------------------------------------------
     def balance(self, node) -> float:
@@ -271,6 +284,61 @@ class Wallet:
 def generate_wallet() -> Wallet:
     """Создаёт новый кошелёк."""
     return Wallet()
+
+
+# --- Ускорение: нативный secp256k1 (libsecp256k1 через coincurve) ------------
+# Включается ТОЛЬКО если библиотека есть и прошла self-test на байт-совместимость
+# с эталонной проверкой. Иначе тихо остаётся чистый Python. Множество
+# принимаемых подписей идентично: перед вызовом ядра verify() уже проверил
+# принадлежность точки кривой и диапазон r, s, а высокий s нормализуется.
+def _der_sig(r: int, s: int) -> bytes:
+    def _int(i):
+        b = i.to_bytes((i.bit_length() + 7) // 8 or 1, "big")
+        if b[0] & 0x80:
+            b = b"\x00" + b
+        return b"\x02" + bytes([len(b)]) + b
+    body = _int(r) + _int(s)
+    return b"\x30" + bytes([len(body)]) + body
+
+
+try:
+    import coincurve as _coincurve
+
+    def _verify_core_fast(x, y, z, r, s) -> bool:
+        try:
+            pub = _coincurve.PublicKey(
+                b"\x04" + x.to_bytes(32, "big") + y.to_bytes(32, "big"))
+            s_low = s if s <= _N // 2 else _N - s   # libsecp256k1 принимает low-s
+            return pub.verify(_der_sig(r, s_low), z.to_bytes(32, "big"), hasher=None)
+        except Exception:
+            return False
+
+    def _selftest_fast_backend() -> bool:
+        """Быстрое ядро обязано совпасть с эталоном на нескольких примерах."""
+        for _ in range(8):
+            w = Wallet()
+            msg = b"b-hydra ecdsa backend self-test"
+            sig = bytes.fromhex(w.sign(msg))
+            pb = w.public_key_bytes
+            x = int.from_bytes(pb[1:33], "big")
+            y = int.from_bytes(pb[33:65], "big")
+            r = int.from_bytes(sig[:32], "big")
+            s = int.from_bytes(sig[32:], "big")
+            z = _hash_to_int(msg)
+            z_bad = _hash_to_int(b"tampered payload")
+            if not _verify_core_fast(x, y, z, r, s):
+                return False                       # верную подпись отверг
+            if _verify_core_fast(x, y, z_bad, r, s):
+                return False                       # чужой payload принял
+        return True
+
+    if _selftest_fast_backend():
+        _VERIFY_CORE = _verify_core_fast
+        _BACKEND = "coincurve (libsecp256k1)"
+    else:
+        _BACKEND = "pure-python (self-test не пройден)"
+except Exception:
+    _BACKEND = "pure-python (coincurve недоступен)"
 
 
 if __name__ == "__main__":
