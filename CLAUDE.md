@@ -39,6 +39,13 @@ public_key + signature, но без приватного ключа) через 
 - Выбор главной цепи — по СУММАРНОЙ работе (`total_work`), не по длине.
 - Replay-защита: `CHAIN_ID` вшит в подпись транзакции.
 - Лимит блока: `MAX_BLOCK_TRANSACTIONS = 5000` (≈3.7 МБ).
+- Скриптовые выходы UTXO: `TxOutput.script` (None → обычный P2PKH; dict → условие).
+  Первый тип — HTLC (hash+time lock), проверяется в `node._authorize_input` /
+  `_eval_htlc` с учётом высоты блока. Обычные выходы сериализуются БЕЗ поля
+  `script` — иначе изменятся txid и сломается совместимость. `get_balance` /
+  `find_spendable` пропускают скриптовые выходы. `TxInput.preimage` — witness
+  (не входит в подпись/txid). Трест-лесс смарт-чек: `contract.fund_cheque` /
+  `redeem_cheque_onchain` / `refund_cheque_onchain`.
 
 ## Экономика (параметры жёстко связаны!)
 `INITIAL_REWARD=50`, `HALVING_INTERVAL=310_000`, `MAX_SUPPLY=31_000_000`,
