@@ -39,7 +39,7 @@ if __name__ == "__main__" and __package__ in (None, ""):
 
 from . import __version__, hashing
 from .blockchain import DEFAULT_FEE, TARGET_BLOCK_TIME
-from .contract import SmartCheque, SmartContract, honor_cheque
+from .contract import SmartCheque, SmartContract
 from .node import BHydraNode
 from .p2p import P2PNode
 from .wallet import Wallet, generate_wallet, is_valid_address
@@ -327,24 +327,38 @@ class BHydraApp(tk.Tk):
         ttk.Button(tab, text="Копировать чек",
                    command=self._copy_cheque).pack(anchor="w", pady=(2, 8))
 
-        # --- Оплатить чек (плательщик исполняет обязательство) ---
-        honor = ttk.LabelFrame(
-            tab, text="Оплатить чек (я — плательщик, секрет раскрыт)", padding=8)
-        honor.pack(fill="both", expand=True)
-        ttk.Label(honor, text="Вставьте чек (JSON):").pack(anchor="w")
-        self.cheque_in = tk.Text(honor, height=6, wrap="word")
+        # --- On-chain (trustless HTLC): блокировка / забрать / вернуть ---
+        htlc = ttk.LabelFrame(
+            tab, text="On-chain HTLC (средства запирает сеть, не плательщик)",
+            padding=8)
+        htlc.pack(fill="both", expand=True)
+        ttk.Label(htlc, text="Вставьте чек (JSON):").pack(anchor="w")
+        self.cheque_in = tk.Text(htlc, height=5, wrap="word")
         self.cheque_in.pack(fill="both", expand=True, pady=2)
         self._add_text_paste_menu(self.cheque_in)
-        row = ttk.Frame(honor)
+
+        row = ttk.Frame(htlc)
         row.pack(fill="x", pady=2)
         ttk.Label(row, text="Секрет:").pack(side="left")
         self.honor_secret = tk.StringVar()
-        ttk.Entry(row, textvariable=self.honor_secret, width=24).pack(
+        ttk.Entry(row, textvariable=self.honor_secret, width=18).pack(
             side="left", padx=4)
-        ttk.Button(row, text="💸 Оплатить чек",
-                   command=self._honor_cheque).pack(side="left", padx=6)
+        ttk.Label(row, text="Funding txid:").pack(side="left")
+        self.funding_txid = tk.StringVar()
+        e_fund = ttk.Entry(row, textvariable=self.funding_txid, width=24)
+        e_fund.pack(side="left", padx=4)
+        self._add_paste_menu(e_fund)
+
+        brow = ttk.Frame(htlc)
+        brow.pack(fill="x", pady=2)
+        ttk.Button(brow, text="🔒 Заблокировать (я плательщик)",
+                   command=self._htlc_fund).pack(side="left")
+        ttk.Button(brow, text="💰 Забрать секретом (я получатель)",
+                   command=self._htlc_redeem).pack(side="left", padx=4)
+        ttk.Button(brow, text="↩ Вернуть после срока (я плательщик)",
+                   command=self._htlc_refund).pack(side="left")
         self.cheque_msg = tk.StringVar()
-        ttk.Label(honor, textvariable=self.cheque_msg, wraplength=640,
+        ttk.Label(htlc, textvariable=self.cheque_msg, wraplength=640,
                   justify="left").pack(anchor="w", pady=(4, 0))
 
     def _build_contract_tab(self, nb: ttk.Notebook) -> None:
@@ -905,49 +919,123 @@ class BHydraApp(tk.Tk):
         self.update()
         self.status.set("Чек скопирован в буфер обмена.")
 
-    def _honor_cheque(self) -> None:
-        """Исполнить чек: секрет раскрыт и срок не вышел → реальная транзакция."""
-        if self.wallet is None:
-            return messagebox.showwarning("Кошелёк", "Сначала создайте кошелёк.")
+    def _parse_cheque_in(self):
+        """Разобрать чек из поля ввода. Возвращает SmartCheque или None (+сообщение)."""
         raw = self.cheque_in.get("1.0", "end").strip()
         if not raw:
             self.cheque_msg.set("Вставьте JSON чека в поле выше.")
-            return
+            return None
         try:
             cheque = SmartCheque.from_dict(json.loads(raw))
         except (ValueError, KeyError, TypeError):
-            self.cheque_msg.set("❌ Не удалось разобрать чек (это должен быть JSON чека).")
-            return
+            self.cheque_msg.set("❌ Не удалось разобрать чек (нужен JSON чека).")
+            return None
         if not cheque.verify():
-            self.cheque_msg.set("❌ Подпись чека неверна (чек подделан или повреждён).")
+            self.cheque_msg.set("❌ Подпись чека неверна (подделан/повреждён).")
+            return None
+        return cheque
+
+    def _lookup_funding(self):
+        """Найти funding-транзакцию по txid из поля (в цепочке). Или None."""
+        from .transaction import Transaction
+        txid = self.funding_txid.get().strip()
+        if not txid:
+            self.cheque_msg.set("Укажите Funding txid (id транзакции блокировки).")
+            return None
+        found = self.node.find_transaction(txid)
+        if not found:
+            self.cheque_msg.set("❌ Funding-транзакция не найдена в цепочке "
+                                "(она уже намайнена?).")
+            return None
+        return Transaction.from_dict(found["transaction"])
+
+    def _broadcast_and_save(self, tx) -> None:
+        if self.p2p and self.p2p._running:
+            self.p2p.broadcast({"type": "transaction", "transaction": tx.to_dict(),
+                                "from": [self.p2p.host, self.p2p.port]})
+        self.node.save(STATE_FILE)
+        self._refresh_status()
+
+    def _htlc_fund(self) -> None:
+        """Плательщик блокирует сумму чека в скриптовом выходе (on-chain)."""
+        if self.wallet is None:
+            return messagebox.showwarning("Кошелёк", "Сначала создайте кошелёк.")
+        cheque = self._parse_cheque_in()
+        if cheque is None:
             return
         if cheque.payer != self.wallet.address:
-            self.cheque_msg.set(
-                "❌ Оплатить чек может только ПЛАТЕЛЬЩИК (его выписавший). "
-                "Загрузите кошелёк плательщика.")
+            self.cheque_msg.set("❌ Блокировать средства может только ПЛАТЕЛЬЩИК "
+                                "(тот, кто выписал чек).")
+            return
+        from .contract import fund_cheque
+        tx = fund_cheque(self.node, self.wallet, cheque)
+        if tx is None:
+            self.cheque_msg.set("❌ Не удалось заблокировать (недостаточно средств?).")
+            return
+        self.funding_txid.set(tx.txid)
+        self._broadcast_and_save(tx)
+        self.cheque_msg.set(
+            f"🔒 Заблокировано {cheque.amount:.4f} BHY. Funding txid подставлен. "
+            "Намайните блок — и средства запрёт сеть. Передайте получателю чек, "
+            "секрет и этот txid.")
+
+    def _htlc_redeem(self) -> None:
+        """Получатель забирает средства, раскрыв секрет (до истечения срока)."""
+        if self.wallet is None:
+            return messagebox.showwarning("Кошелёк", "Сначала создайте кошелёк.")
+        cheque = self._parse_cheque_in()
+        if cheque is None:
+            return
+        if cheque.payee != self.wallet.address:
+            self.cheque_msg.set("❌ Забрать средства может только ПОЛУЧАТЕЛЬ чека.")
             return
         secret = self.honor_secret.get().strip()
         if not cheque.secret_matches(secret):
             self.cheque_msg.set("❌ Неверный секрет — хеш-замок не открылся.")
             return
         if self.node.height > cheque.expiry:
-            self.cheque_msg.set(
-                f"❌ Срок чека вышел (до блока {cheque.expiry}, сейчас "
-                f"{self.node.height}). Средства остаются у плательщика.")
+            self.cheque_msg.set(f"❌ Срок вышел (до блока {cheque.expiry}, сейчас "
+                                f"{self.node.height}). Забрать уже нельзя.")
             return
-
-        tx = honor_cheque(cheque, secret, self.wallet, self.node)
+        funding = self._lookup_funding()
+        if funding is None:
+            return
+        from .contract import redeem_cheque_onchain
+        tx = redeem_cheque_onchain(self.node, self.wallet, funding, cheque, secret)
         if tx is None:
-            self.cheque_msg.set("❌ Не удалось оплатить (недостаточно средств?).")
+            self.cheque_msg.set("❌ Не удалось забрать (выход уже потрачен или "
+                                "неверный funding txid).")
             return
-        if self.p2p and self.p2p._running:
-            self.p2p.broadcast({"type": "transaction", "transaction": tx.to_dict(),
-                                "from": [self.p2p.host, self.p2p.port]})
-        self.node.save(STATE_FILE)
+        self._broadcast_and_save(tx)
         self.cheque_msg.set(
-            f"✅ Чек оплачен: {cheque.amount:.4f} BHY → {cheque.payee[:20]}… "
-            f"txid {tx.txid[:16]}… (в мемпуле, подтвердится при майнинге).")
-        self._refresh_status()
+            f"💰 Забрано {funding.vout[0].amount:.4f} BHY секретом. txid "
+            f"{tx.txid[:16]}… (подтвердится при майнинге).")
+
+    def _htlc_refund(self) -> None:
+        """Плательщик возвращает средства после истечения срока."""
+        if self.wallet is None:
+            return messagebox.showwarning("Кошелёк", "Сначала создайте кошелёк.")
+        cheque = self._parse_cheque_in()
+        if cheque is None:
+            return
+        if cheque.payer != self.wallet.address:
+            self.cheque_msg.set("❌ Вернуть средства может только ПЛАТЕЛЬЩИК.")
+            return
+        if self.node.height <= cheque.expiry:
+            self.cheque_msg.set(f"❌ Срок ещё не вышел (до блока {cheque.expiry}, "
+                                f"сейчас {self.node.height}). Возврат позже.")
+            return
+        funding = self._lookup_funding()
+        if funding is None:
+            return
+        from .contract import refund_cheque_onchain
+        tx = refund_cheque_onchain(self.node, self.wallet, funding, cheque)
+        if tx is None:
+            self.cheque_msg.set("❌ Не удалось вернуть (уже забрано/потрачено?).")
+            return
+        self._broadcast_and_save(tx)
+        self.cheque_msg.set(
+            f"↩ Возвращено себе, txid {tx.txid[:16]}… (подтвердится при майнинге).")
 
     def _show_qr(self) -> None:
         """Показать QR-код адреса в отдельном окне (для сканирования телефоном)."""
