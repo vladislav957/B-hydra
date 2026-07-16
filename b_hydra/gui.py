@@ -19,6 +19,7 @@ import os
 import queue
 import sys
 import threading
+import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
@@ -36,7 +37,7 @@ if __name__ == "__main__" and __package__ in (None, ""):
     __package__ = "b_hydra"
 
 from . import __version__, hashing
-from .blockchain import DEFAULT_FEE
+from .blockchain import DEFAULT_FEE, TARGET_BLOCK_TIME
 from .node import BHydraNode
 from .p2p import P2PNode
 from .wallet import Wallet, generate_wallet, is_valid_address
@@ -63,8 +64,9 @@ class BHydraApp(tk.Tk):
                      if os.path.exists(STATE_FILE) else BHydraNode(difficulty=3))
         self.wallet: Wallet | None = None
         self.p2p: P2PNode | None = None
-        self._mining = False
-        self._auto_after_id = None       # id запланированного авто-майнинга
+        self._mining = False             # PoW прямо сейчас идёт в фоне
+        self._mining_on = False          # майнер включён (кнопкой)
+        self._auto_after_id = None       # id таймера темпа сети (раз в секунду)
         self._net_sync_id = None         # id периодической авто-синхронизации
         self.autosync_var = tk.BooleanVar(value=True)   # автосинк включён по умолчанию
         self.discover_var = tk.BooleanVar(value=True)   # авто-поиск в сети (WiFi/LAN)
@@ -225,28 +227,18 @@ class BHydraApp(tk.Tk):
         tab = ttk.Frame(nb, padding=12)
         nb.add(tab, text="⛏ Майнинг")
 
+        # Никаких ручных настроек: майнер либо работает, либо нет. Темп задаёт
+        # СЕТЬ (TARGET_BLOCK_TIME ≈ 48.6 мин на блок, как ретаргет сложности),
+        # а не пользователь — иначе ломается расписание эмиссии.
         top = ttk.Frame(tab)
         top.pack(fill="x")
-        ttk.Label(top, text="Сколько блоков:").pack(side="left")
-        self.mine_count = tk.StringVar(value="5")
-        ttk.Entry(top, textvariable=self.mine_count, width=8).pack(
-            side="left", padx=6)
-        self.mine_btn = ttk.Button(top, text="Майнить",
-                                   command=self._mine_clicked)
+        self.mine_btn = ttk.Button(top, text="▶ Начать майнинг",
+                                   command=self._toggle_mining)
         self.mine_btn.pack(side="left")
-
-        # Авто-майнинг: блок создаётся сам каждые N минут (как 10-минутный
-        # ритм Bitcoin), пока окно открыто и галочка включена.
-        auto = ttk.Frame(tab)
-        auto.pack(fill="x", pady=(8, 0))
-        self.auto_mine = tk.BooleanVar(value=False)
-        ttk.Checkbutton(auto, text="Авто-майнинг: блок каждые",
-                        variable=self.auto_mine,
-                        command=self._toggle_auto_mine).pack(side="left")
-        self.auto_interval = tk.StringVar(value="10")
-        ttk.Entry(auto, textvariable=self.auto_interval, width=5).pack(
-            side="left", padx=4)
-        ttk.Label(auto, text="мин.").pack(side="left")
+        ttk.Label(top,
+                  text=f"Темп сети: один блок раз в "
+                       f"~{TARGET_BLOCK_TIME / 60:.1f} мин.").pack(
+            side="left", padx=10)
 
         self.mine_info = tk.StringVar()
         ttk.Label(tab, textvariable=self.mine_info).pack(anchor="w", pady=6)
@@ -704,102 +696,90 @@ class BHydraApp(tk.Tk):
                             "Будет подтверждена при майнинге следующего блока.")
         self._refresh_status()
 
-    # --- Логика: майнинг -------------------------------------------------
-    def _mine_clicked(self) -> None:
-        if self.wallet is None:
-            return messagebox.showwarning("Кошелёк", "Сначала создайте кошелёк.")
-        if self._mining:
-            return
-        try:
-            count = int(self.mine_count.get())
-        except ValueError:
-            return messagebox.showerror("Ошибка", "Неверное число блоков.")
-        self._begin_mining(count)
-
-    def _begin_mining(self, count: int) -> bool:
-        """Запустить фоновый майнинг `count` блоков. Общий код для ручного
-        и авто-майнинга. Возвращает False, если запуск невозможен."""
-        if self.wallet is None or self._mining or count < 1:
-            return False
-        self._mining = True
-        self.mine_btn.config(state="disabled")
-        self.progress.config(maximum=count, value=0)
-        self.mine_status.set(f"Майнинг… 0/{count}")
-        threading.Thread(target=self._mine_worker, args=(count,),
-                         daemon=True).start()
-        return True
-
-    # --- Логика: авто-майнинг (блок раз в N минут) -----------------------
-    def _auto_minutes(self) -> float | None:
-        try:
-            minutes = float(self.auto_interval.get().replace(",", "."))
-        except ValueError:
-            return None
-        return minutes if minutes > 0 else None
-
-    def _toggle_auto_mine(self) -> None:
-        if self.auto_mine.get():
-            if self.wallet is None:
-                self.auto_mine.set(False)
-                return messagebox.showwarning("Кошелёк",
-                                              "Сначала создайте кошелёк.")
-            minutes = self._auto_minutes()
-            if minutes is None:
-                self.auto_mine.set(False)
-                return messagebox.showerror("Ошибка", "Неверный интервал (минуты).")
-            self._log(self.mine_log,
-                      f"🤖 Авто-майнинг включён: блок каждые {minutes:g} мин.")
-            self._auto_tick()                      # первый блок сразу + расписание
-        else:
+    # --- Логика: майнинг в темпе сети ------------------------------------
+    # Блок добывается, когда наступает его срок: время вершины цепочки +
+    # TARGET_BLOCK_TIME (≈48.6 мин). Отстала цепочка — блок добывается сразу,
+    # дальше — строго по расписанию. Никакого «добыть N блоков» вручную:
+    # темп эмиссии контролирует сеть, а не пользователь.
+    def _toggle_mining(self) -> None:
+        if self._mining_on:
+            self._mining_on = False
             if self._auto_after_id is not None:
                 self.after_cancel(self._auto_after_id)
                 self._auto_after_id = None
-            self._log(self.mine_log, "🤖 Авто-майнинг выключен.")
-
-    def _auto_tick(self) -> None:
-        """Срабатывает по таймеру: майнит один блок и планирует следующий."""
-        if not self.auto_mine.get():
+            self.mine_btn.config(text="▶ Начать майнинг")
+            self.progress.config(value=0)
+            self.mine_status.set("Майнинг остановлен.")
+            self._log(self.mine_log, "⏹ Майнинг остановлен.")
             return
-        minutes = self._auto_minutes() or 10.0
-        if self.wallet is not None and not self._mining:
-            self._begin_mining(1)
-        else:
-            self._log(self.mine_log, "⏳ Пропуск: предыдущий майнинг ещё идёт.")
-        self._auto_after_id = self.after(int(minutes * 60_000), self._auto_tick)
+        if self.wallet is None:
+            return messagebox.showwarning("Кошелёк", "Сначала создайте кошелёк.")
+        self._mining_on = True
+        self.mine_btn.config(text="⏹ Остановить майнинг")
+        self._log(self.mine_log,
+                  f"▶ Майнинг запущен. Темп сети: блок раз в "
+                  f"~{TARGET_BLOCK_TIME / 60:.1f} мин.")
+        self._mining_tick()
 
-    def _mine_worker(self, count: int) -> None:
-        # Только майнинг и запись в очередь — НИКАКИХ обращений к tkinter.
-        for i in range(count):
-            if self.p2p and self.p2p._running:
-                # Сначала встаём на самую длинную цепочку сети, потом майним
-                # поверх неё — иначе свой блок «улетит» в форк и не примется.
-                try:
-                    self.p2p.sync()
-                except Exception:
-                    pass
-                block = self.p2p.mine(self.wallet.address)   # майнит + рассылает
+    def _next_block_due(self) -> float:
+        """Когда пора добывать следующий блок: вершина + целевой темп сети."""
+        return self.node.blockchain.last_block.timestamp + TARGET_BLOCK_TIME
+
+    def _mining_tick(self) -> None:
+        """Раз в секунду: обновляет обратный отсчёт; в срок — добывает блок."""
+        if not self._mining_on:
+            return
+        if not self._mining:
+            wait = self._next_block_due() - time.time()
+            if wait <= 0:
+                self._begin_mining()
             else:
-                block = self.node.mine_pending(self.wallet.address)
-            self._queue.put(("block", i + 1, count, block.index,
-                             block.mining_attempts, block.nonce))
+                self.mine_status.set(
+                    f"Следующий блок через {int(wait // 60)}:"
+                    f"{int(wait % 60):02d} (темп сети)")
+                self.progress.config(maximum=TARGET_BLOCK_TIME,
+                                     value=TARGET_BLOCK_TIME - wait)
+        self._auto_after_id = self.after(1000, self._mining_tick)
+
+    def _begin_mining(self) -> bool:
+        """Фоновая добыча одного блока (PoW в отдельном потоке)."""
+        if self.wallet is None or self._mining:
+            return False
+        self._mining = True
+        self.progress.config(maximum=100, value=100)
+        self.mine_status.set("Майнинг: перебор nonce…")
+        threading.Thread(target=self._mine_worker, daemon=True).start()
+        return True
+
+    def _mine_worker(self) -> None:
+        # Только майнинг и запись в очередь — НИКАКИХ обращений к tkinter.
+        if self.p2p and self.p2p._running:
+            # Сначала встаём на самую длинную цепочку сети, потом майним
+            # поверх неё — иначе свой блок «улетит» в форк и не примется.
+            try:
+                self.p2p.sync()
+            except Exception:
+                pass
+            block = self.p2p.mine(self.wallet.address)   # майнит + рассылает
+        else:
+            block = self.node.mine_pending(self.wallet.address)
         self.node.save(STATE_FILE)
-        self._queue.put(("done", count))
+        self._queue.put(("mined", block.index,
+                         block.mining_attempts, block.nonce))
 
     def _poll_queue(self) -> None:
         """Главный поток: забирает события воркера и обновляет интерфейс."""
         try:
             while True:
                 msg = self._queue.get_nowait()
-                if msg[0] == "block":
-                    _, done, total, idx, attempts, nonce = msg
-                    self.progress.config(value=done)
-                    self.mine_status.set(f"Майнинг… {done}/{total}")
+                if msg[0] == "mined":
+                    _, idx, attempts, nonce = msg
+                    self._mining = False
+                    self.progress.config(value=0)
                     self._log(self.mine_log, f"⛏ блок #{idx} | перебрано "
                                              f"{attempts} хешей | nonce {nonce}")
-                elif msg[0] == "done":
-                    self._mining = False
-                    self.mine_btn.config(state="normal")
-                    self.mine_status.set(f"Готово ✓ намайнено {msg[1]} блоков")
+                    self.mine_status.set(f"Блок #{idx} добыт ✓ — следующий "
+                                         "по темпу сети.")
                     self._refresh_status()
                     self._refresh_blocks()
                 elif msg[0] == "synced":
