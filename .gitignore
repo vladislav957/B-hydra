@@ -33,3 +33,5 @@ CppProperties.json
 build/
 dist/
 *.spec
+bhydra_contract.json
+bhydra_seeds.txt

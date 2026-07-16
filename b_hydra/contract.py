@@ -55,6 +55,17 @@ class SmartContract:
             return "Key not found."
         return self.storage[key]
 
+    # --- Сериализация (для сохранения между запусками) -------------------
+    def to_dict(self) -> dict:
+        return {"owner": self.owner, "balance": self.balance,
+                "storage": dict(self.storage)}
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "SmartContract":
+        c = cls(d["owner"], d.get("balance", 0))
+        c.storage = dict(d.get("storage", {}))
+        return c
+
 
 # Историческое имя класса с опечаткой — сохранено для совместимости.
 SmartContrat = SmartContract

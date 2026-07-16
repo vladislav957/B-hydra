@@ -39,7 +39,7 @@ if __name__ == "__main__" and __package__ in (None, ""):
 
 from . import __version__, hashing
 from .blockchain import DEFAULT_FEE, TARGET_BLOCK_TIME
-from .contract import SmartCheque, honor_cheque
+from .contract import SmartCheque, SmartContract, honor_cheque
 from .node import BHydraNode
 from .p2p import P2PNode
 from .wallet import Wallet, generate_wallet, is_valid_address
@@ -47,6 +47,7 @@ from .wallet import Wallet, generate_wallet, is_valid_address
 STATE_FILE = "bhydra_chain.json"
 WALLET_FILE = "wallet.key"
 SEEDS_FILE = "bhydra_seeds.txt"     # список seed-узлов (host:port), как в Bitcoin
+CONTRACT_FILE = "bhydra_contract.json"   # состояние локального смарт-контракта
 
 
 class BHydraApp(tk.Tk):
@@ -72,6 +73,7 @@ class BHydraApp(tk.Tk):
         self.autosync_var = tk.BooleanVar(value=True)   # автосинк включён по умолчанию
         self.discover_var = tk.BooleanVar(value=True)   # авто-поиск в сети (WiFi/LAN)
         self.seeds_var = tk.StringVar(value=self._load_seeds())  # seed-узлы
+        self.contract = self._load_contract()   # локальный смарт-контракт (или None)
         # Очередь «фоновый поток → главный поток»: tkinter нельзя трогать из
         # чужого потока, поэтому воркер кладёт события сюда, а главный поток
         # забирает их в _poll_queue.
@@ -121,6 +123,7 @@ class BHydraApp(tk.Tk):
         self._build_wallet_tab(nb)
         self._build_mining_tab(nb)
         self._build_cheque_tab(nb)
+        self._build_contract_tab(nb)
         self._build_network_tab(nb)
         self._build_mempool_tab(nb)
         self._build_blocks_tab(nb)
@@ -343,6 +346,166 @@ class BHydraApp(tk.Tk):
         self.cheque_msg = tk.StringVar()
         ttk.Label(honor, textvariable=self.cheque_msg, wraplength=640,
                   justify="left").pack(anchor="w", pady=(4, 0))
+
+    def _build_contract_tab(self, nb: ttk.Notebook) -> None:
+        tab = ttk.Frame(nb, padding=12)
+        nb.add(tab, text="📜 Контракт")
+
+        ttk.Label(
+            tab, foreground="gray", wraplength=640, justify="left",
+            text="Смарт-контракт: счёт с владельцем и хранилищем «ключ→значение». "
+                 "Пополнить может любой, а снимать средства и записывать данные — "
+                 "только владелец (нужен его кошелёк). Состояние хранится локально "
+                 "в bhydra_contract.json."
+        ).pack(anchor="w", pady=(0, 8))
+
+        top = ttk.Frame(tab)
+        top.pack(fill="x")
+        ttk.Button(top, text="Создать контракт (владелец — я)",
+                   command=self._new_contract).pack(side="left")
+        self.contract_info = tk.StringVar()
+        ttk.Label(top, textvariable=self.contract_info).pack(side="left", padx=10)
+
+        # Средства.
+        funds = ttk.LabelFrame(tab, text="Средства", padding=8)
+        funds.pack(fill="x", pady=(10, 0))
+        self.contract_amount = tk.StringVar(value="10")
+        ttk.Label(funds, text="Сумма:").pack(side="left")
+        ttk.Entry(funds, textvariable=self.contract_amount, width=12).pack(
+            side="left", padx=4)
+        ttk.Button(funds, text="Пополнить",
+                   command=self._contract_deposit).pack(side="left", padx=2)
+        ttk.Button(funds, text="Снять (владелец)",
+                   command=self._contract_withdraw).pack(side="left", padx=2)
+
+        # Хранилище.
+        store = ttk.LabelFrame(tab, text="Хранилище (ключ → значение)", padding=8)
+        store.pack(fill="x", pady=(10, 0))
+        store.columnconfigure(1, weight=1)
+        self.contract_key = tk.StringVar()
+        self.contract_value = tk.StringVar()
+        ttk.Label(store, text="Ключ:").grid(row=0, column=0, sticky="w")
+        ttk.Entry(store, textvariable=self.contract_key).grid(
+            row=0, column=1, sticky="we", padx=4, pady=2)
+        ttk.Label(store, text="Значение:").grid(row=1, column=0, sticky="w")
+        ttk.Entry(store, textvariable=self.contract_value).grid(
+            row=1, column=1, sticky="we", padx=4, pady=2)
+        brow = ttk.Frame(store)
+        brow.grid(row=2, column=1, sticky="w", pady=(4, 0))
+        ttk.Button(brow, text="Записать (владелец)",
+                   command=self._contract_set).pack(side="left")
+        ttk.Button(brow, text="Прочитать",
+                   command=self._contract_get).pack(side="left", padx=6)
+
+        self.contract_msg = tk.StringVar()
+        ttk.Label(tab, textvariable=self.contract_msg, wraplength=640,
+                  justify="left").pack(anchor="w", pady=(8, 0))
+        self.contract_store_view = tk.Text(tab, height=8, state="disabled")
+        self.contract_store_view.pack(fill="both", expand=True, pady=(6, 0))
+        self._refresh_contract()
+
+    # --- Смарт-контракт: файл и логика -----------------------------------
+    def _load_contract(self):
+        try:
+            with open(CONTRACT_FILE, encoding="utf-8") as fh:
+                return SmartContract.from_dict(json.load(fh))
+        except (OSError, ValueError, KeyError):
+            return None
+
+    def _save_contract(self) -> None:
+        if self.contract is None:
+            return
+        try:
+            with open(CONTRACT_FILE, "w", encoding="utf-8") as fh:
+                json.dump(self.contract.to_dict(), fh, ensure_ascii=False, indent=2)
+        except OSError:
+            pass
+
+    def _is_contract_owner(self) -> bool:
+        return (self.wallet is not None and self.contract is not None
+                and self.wallet.address == self.contract.owner)
+
+    def _new_contract(self) -> None:
+        if self.wallet is None:
+            return messagebox.showwarning("Кошелёк", "Сначала создайте кошелёк.")
+        if self.contract is not None and not messagebox.askyesno(
+                "Контракт", "Контракт уже есть. Создать новый (старый сотрётся)?"):
+            return
+        self.contract = SmartContract(owner=self.wallet.address)
+        self._save_contract()
+        self.contract_msg.set("Контракт создан. Владелец — ваш адрес.")
+        self._refresh_contract()
+
+    def _contract_amount_value(self):
+        try:
+            return float(self.contract_amount.get().replace(",", "."))
+        except ValueError:
+            messagebox.showerror("Контракт", "Сумма должна быть числом.")
+            return None
+
+    def _contract_deposit(self) -> None:
+        if self.contract is None:
+            return messagebox.showwarning("Контракт", "Сначала создайте контракт.")
+        amount = self._contract_amount_value()
+        if amount is None:
+            return
+        self.contract_msg.set(self.contract.deposit(amount))
+        self._save_contract()
+        self._refresh_contract()
+
+    def _contract_withdraw(self) -> None:
+        if self.contract is None:
+            return messagebox.showwarning("Контракт", "Сначала создайте контракт.")
+        if not self._is_contract_owner():
+            return messagebox.showerror(
+                "Контракт", "Снять средства может только владелец — загрузите его кошелёк.")
+        amount = self._contract_amount_value()
+        if amount is None:
+            return
+        self.contract_msg.set(self.contract.withdraw(amount, self.wallet.address))
+        self._save_contract()
+        self._refresh_contract()
+
+    def _contract_set(self) -> None:
+        if self.contract is None:
+            return messagebox.showwarning("Контракт", "Сначала создайте контракт.")
+        if not self._is_contract_owner():
+            return messagebox.showerror(
+                "Контракт", "Записывать данные может только владелец.")
+        key = self.contract_key.get().strip()
+        if not key:
+            return messagebox.showerror("Контракт", "Укажите ключ.")
+        self.contract_msg.set(
+            self.contract.set_data(key, self.contract_value.get(), self.wallet.address))
+        self._save_contract()
+        self._refresh_contract()
+
+    def _contract_get(self) -> None:
+        if self.contract is None:
+            return messagebox.showwarning("Контракт", "Сначала создайте контракт.")
+        key = self.contract_key.get().strip()
+        self.contract_msg.set(f"{key} = {self.contract.get_data(key)}")
+
+    def _refresh_contract(self) -> None:
+        view = getattr(self, "contract_store_view", None)
+        if view is None:
+            return
+        if self.contract is None:
+            self.contract_info.set("контракта нет")
+        else:
+            owner = self.contract.owner
+            mine = " (это я)" if self._is_contract_owner() else ""
+            self.contract_info.set(
+                f"владелец: {owner[:18]}…{mine} | баланс: {self.contract.balance:g}")
+        view.config(state="normal")
+        view.delete("1.0", "end")
+        if self.contract and self.contract.storage:
+            view.insert("end", "Хранилище:\n")
+            for k, v in self.contract.storage.items():
+                view.insert("end", f"  {k} = {v}\n")
+        elif self.contract:
+            view.insert("end", "Хранилище пусто.")
+        view.config(state="disabled")
 
     def _build_network_tab(self, nb: ttk.Notebook) -> None:
         tab = ttk.Frame(nb, padding=12)

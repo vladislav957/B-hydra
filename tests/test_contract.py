@@ -101,3 +101,14 @@ def test_cheque_roundtrip_dict():
                            expiry=node.height + 9, fee=0.0002)
     back = SmartCheque.from_dict(ch.to_dict())
     assert back.verify() and back.amount == 7 and back.secret_matches("x")
+
+
+def test_contract_roundtrip_dict():
+    """Контракт сохраняется и восстанавливается без потерь."""
+    c = SmartContract("BHYowner")
+    c.deposit(100)
+    c.set_data("note", "hi", "BHYowner")
+    back = SmartContract.from_dict(c.to_dict())
+    assert back.owner == "BHYowner"
+    assert back.balance == 100
+    assert back.get_data("note") == "hi"
