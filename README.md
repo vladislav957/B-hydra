@@ -1,5 +1,9 @@
 # B-hydra Core — одноранговая электронная денежная система (P2P)
 
+<p align="center">
+  <img src="assets/bhydra_master.png" alt="B-hydra — Decentralized. Encrypted. Unstoppable." width="480">
+</p>
+
 **B-hydra Core** — эталонный клиент сети B-hydra (полный узел): кошелёк, майнинг
 и P2P-сеть в одном приложении (как Bitcoin Core).
 
