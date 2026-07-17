@@ -53,7 +53,7 @@ class BHydraApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("B-hydra Core — кошелёк · майнинг · сеть")
-        self.geometry("680x560")
+        self.geometry("760x640")
         self._set_icon()
         self._text_widgets: list[tk.Text] = []
         self._dark = tk.BooleanVar(value=False)
@@ -123,14 +123,43 @@ class BHydraApp(tk.Tk):
         self._build_mempool_tab(nb)
         self._build_blocks_tab(nb)
         self._text_widgets = [self.mine_log, self.net_log, self.block_details]
+        self._apply_theme(self._dark.get())      # фирменные стили с самого старта
 
     def _build_wallet_tab(self, nb: ttk.Notebook) -> None:
         tab = ttk.Frame(nb, padding=12)
         nb.add(tab, text="💼 Кошелёк")
 
+        self.addr_var = tk.StringVar()
+        self.priv_var = tk.StringVar()
+        self.bal_var = tk.StringVar(value="—")
+
+        # Шапка-«карточка»: логотип, имя клиента и крупный баланс.
+        head = ttk.Frame(tab, style="Card.TFrame", padding=14)
+        head.pack(fill="x", pady=(0, 10))
+        try:
+            # 256px → 64px (логотип уже загружен для иконки окна — свой экземпляр,
+            # т.к. subsample создаёт новый объект, который нужно удерживать).
+            self._logo_img = tk.PhotoImage(file=_asset("bhydra.png")).subsample(4, 4)
+            ttk.Label(head, image=self._logo_img,
+                      style="Card.TLabel").pack(side="left", padx=(0, 12))
+        except tk.TclError:
+            pass
+        titles = ttk.Frame(head, style="Card.TFrame")
+        titles.pack(side="left")
+        ttk.Label(titles, text="B-hydra Core",
+                  style="CardTitle.TLabel").pack(anchor="w")
+        ttk.Label(titles, text="кошелёк · майнинг · сеть",
+                  style="CardSub.TLabel").pack(anchor="w")
+        bal_box = ttk.Frame(head, style="Card.TFrame")
+        bal_box.pack(side="right")
+        ttk.Label(bal_box, text="Баланс",
+                  style="CardSub.TLabel").pack(anchor="e")
+        ttk.Label(bal_box, textvariable=self.bal_var,
+                  style="Balance.TLabel").pack(anchor="e")
+
         btns = ttk.Frame(tab)
         btns.pack(fill="x")
-        ttk.Button(btns, text="Создать кошелёк",
+        ttk.Button(btns, text="Создать кошелёк", style="Accent.TButton",
                    command=self._new_wallet).pack(side="left")
         ttk.Button(btns, text="Обновить баланс",
                    command=self._refresh_status).pack(side="left", padx=6)
@@ -139,24 +168,31 @@ class BHydraApp(tk.Tk):
         ttk.Button(btns, text="Загрузить из файла…",
                    command=self._load_wallet_from).pack(side="left", padx=6)
 
-        self.addr_var = tk.StringVar()
-        self.priv_var = tk.StringVar()
-        self.bal_var = tk.StringVar()
-        for label, var, copyable, qr in (("Адрес:", self.addr_var, True, True),
-                                         ("Приватный ключ:", self.priv_var, True, False),
-                                         ("Баланс:", self.bal_var, False, False)):
-            row = ttk.Frame(tab)
-            row.pack(fill="x", pady=4)
-            ttk.Label(row, text=label, width=16).pack(side="left")
-            ttk.Entry(row, textvariable=var, state="readonly").pack(
-                side="left", fill="x", expand=True)
-            if copyable:
-                ttk.Button(row, text="Копировать", width=12,
-                           command=lambda v=var, n=label: self._copy(v, n)).pack(
-                    side="left", padx=(6, 0))
-            if qr:
-                ttk.Button(row, text="QR", width=4,
-                           command=self._show_qr).pack(side="left", padx=(6, 0))
+        # Адрес — с копированием и QR.
+        row = ttk.Frame(tab)
+        row.pack(fill="x", pady=(10, 4))
+        ttk.Label(row, text="Адрес:", width=16).pack(side="left")
+        ttk.Entry(row, textvariable=self.addr_var, state="readonly").pack(
+            side="left", fill="x", expand=True)
+        ttk.Button(row, text="Копировать", width=12,
+                   command=lambda: self._copy(self.addr_var, "Адрес:")).pack(
+            side="left", padx=(6, 0))
+        ttk.Button(row, text="QR", width=4,
+                   command=self._show_qr).pack(side="left", padx=(6, 0))
+
+        # Приватный ключ — скрыт точками; 👁 показывает (защита от чужих глаз).
+        row = ttk.Frame(tab)
+        row.pack(fill="x", pady=4)
+        ttk.Label(row, text="Приватный ключ:", width=16).pack(side="left")
+        self._priv_entry = ttk.Entry(row, textvariable=self.priv_var,
+                                     state="readonly", show="•")
+        self._priv_entry.pack(side="left", fill="x", expand=True)
+        ttk.Button(row, text="👁", width=3,
+                   command=self._toggle_priv).pack(side="left", padx=(6, 0))
+        ttk.Button(row, text="Копировать", width=12,
+                   command=lambda: self._copy(self.priv_var,
+                                              "Приватный ключ:")).pack(
+            side="left", padx=(6, 0))
 
         # Импорт ключа.
         imp = ttk.LabelFrame(tab, text="Импорт по приватному ключу", padding=8)
@@ -164,8 +200,8 @@ class BHydraApp(tk.Tk):
         self.import_var = tk.StringVar()
         ttk.Entry(imp, textvariable=self.import_var).pack(
             side="left", fill="x", expand=True)
-        ttk.Button(imp, text="Импорт", command=self._import_wallet).pack(
-            side="left", padx=6)
+        ttk.Button(imp, text="Импорт", style="Accent.TButton",
+                   command=self._import_wallet).pack(side="left", padx=6)
 
         # Перевод.
         send = ttk.LabelFrame(tab, text="Отправить перевод", padding=8)
@@ -189,8 +225,8 @@ class BHydraApp(tk.Tk):
         ttk.Entry(fee_row, textvariable=self.fee_var, width=12).pack(
             side="left", padx=4)
         ttk.Label(fee_row, text="BHY (низкая, по стандарту крипты)").pack(side="left")
-        ttk.Button(send, text="Отправить", command=self._send).grid(
-            row=1, column=2, sticky="w", padx=2)
+        ttk.Button(send, text="Отправить", style="Accent.TButton",
+                   command=self._send).grid(row=1, column=2, sticky="w", padx=2)
 
         # История операций: пополнения и отправки (от кого / куда, когда).
         hist = ttk.LabelFrame(tab, text="История операций", padding=8)
@@ -233,6 +269,7 @@ class BHydraApp(tk.Tk):
         top = ttk.Frame(tab)
         top.pack(fill="x")
         self.mine_btn = ttk.Button(top, text="▶ Начать майнинг",
+                                   style="Accent.TButton",
                                    command=self._toggle_mining)
         self.mine_btn.pack(side="left")
         ttk.Label(top,
@@ -1036,22 +1073,47 @@ class BHydraApp(tk.Tk):
     def _toggle_theme(self) -> None:
         self._apply_theme(self._dark.get())
 
+    def _toggle_priv(self) -> None:
+        """Показать/скрыть приватный ключ (по умолчанию скрыт точками)."""
+        shown = self._priv_entry.cget("show") == ""
+        self._priv_entry.configure(show="•" if shown else "")
+
     def _apply_theme(self, dark: bool) -> None:
         style = ttk.Style(self)
         if dark:
-            bg, fg, field = "#1e1e1e", "#e6edf3", "#2a2a2a"
+            bg, fg, field = "#0d1117", "#e6edf3", "#161b22"
+            card, sub = "#161b22", "#8b949e"
         else:
             bg, fg, field = "#f0f0f0", "#000000", "#ffffff"
+            card, sub = "#ffffff", "#57606a"
+        accent, accent_hi = "#2ea043", "#3fb950"   # фирменный зелёный B-hydra
         self.configure(bg=bg)
         for elem in (".", "TFrame", "TLabel", "TNotebook",
                      "TLabelframe", "TLabelframe.Label"):
             style.configure(elem, background=bg, foreground=fg)
         style.configure("TButton", background=field, foreground=fg)
-        style.configure("TNotebook.Tab", background=field, foreground=fg)
+        style.configure("TNotebook.Tab", background=field, foreground=fg,
+                        padding=(12, 6))
+        style.map("TNotebook.Tab",
+                  background=[("selected", bg)],
+                  foreground=[("selected", accent_hi)])
         style.configure("TEntry", fieldbackground=field, foreground=fg)
         style.configure("Treeview", background=field, foreground=fg,
                         fieldbackground=field)
         style.configure("Treeview.Heading", background=bg, foreground=fg)
+        # Фирменные стили: карточка кошелька, крупный баланс, зелёные кнопки.
+        style.configure("Card.TFrame", background=card)
+        style.configure("Card.TLabel", background=card)
+        style.configure("CardTitle.TLabel", background=card, foreground=fg,
+                        font=("TkDefaultFont", 14, "bold"))
+        style.configure("CardSub.TLabel", background=card, foreground=sub)
+        style.configure("Balance.TLabel", background=card, foreground=accent_hi,
+                        font=("TkDefaultFont", 18, "bold"))
+        style.configure("Accent.TButton", background=accent,
+                        foreground="#ffffff")
+        style.map("Accent.TButton",
+                  background=[("active", accent_hi), ("disabled", field)],
+                  foreground=[("disabled", sub)])
         for widget in self._text_widgets:
             widget.configure(bg=field, fg=fg, insertbackground=fg)
 
