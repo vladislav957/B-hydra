@@ -57,19 +57,32 @@ def _stroke_bezier(d, p0, p1, p2, p3, width0, width1, color0, color1, steps=120)
         d.ellipse([x - r, y - r, x + r, y + r], fill=c)
 
 
-def _head(d, tip, angle, size, color):
-    """Стреловидная голова гидры: наконечник копья, повёрнутый по ходу шеи."""
+def _head(d, center, angle, size, color, eye_color):
+    """Змеиная голова в профиль: округлый череп, вытянутая морда и глаз.
+
+    center — середина черепа, angle — куда смотрит морда (градусы),
+    size — радиус черепа. Никаких стрелок: силуэт именно змеи."""
     a = math.radians(angle)
     ca, sa = math.cos(a), math.sin(a)
 
-    def pt(dx, dy):  # локальные координаты (x — вперёд к кончику)
-        return (tip[0] + dx * ca - dy * sa, tip[1] + dx * sa + dy * ca)
+    def pt(dx, dy):  # локальные координаты (x — вперёд, к кончику морды)
+        return (center[0] + dx * ca - dy * sa, center[1] + dx * sa + dy * ca)
 
-    d.polygon([pt(size, 0),                 # кончик
-               pt(-size * 0.55, size * 0.62),
-               pt(-size * 0.18, 0),          # выемка сзади (хищный силуэт)
-               pt(-size * 0.55, -size * 0.62)],
-              fill=color)
+    r = size
+    # Череп — круг.
+    d.ellipse([center[0] - r, center[1] - r,
+               center[0] + r, center[1] + r], fill=color)
+    # Морда — широкий клин вперёд (верхняя и нижняя челюсти единым силуэтом).
+    snout = 1.9 * r
+    d.polygon([pt(-0.15 * r, -0.95 * r), pt(snout, -0.55 * r),
+               pt(snout, 0.55 * r), pt(-0.15 * r, 0.95 * r)], fill=color)
+    # РАСКРЫТАЯ ПАСТЬ — клин цвета фона, врезанный спереди: сразу «змея».
+    d.polygon([pt(snout + 0.05 * r, -0.5 * r), pt(0.25 * r, 0),
+               pt(snout + 0.05 * r, 0.5 * r)], fill=eye_color)
+    # Глаз — тёмная точка в верхней части черепа.
+    ex, ey = pt(0.15 * r, -0.45 * r)
+    er = 0.21 * r
+    d.ellipse([ex - er, ey - er, ex + er, ey + er], fill=eye_color)
 
 
 def make() -> None:
@@ -91,30 +104,46 @@ def make() -> None:
     d.polygon(_hexagon((cx, cy), 100 * SS), outline=HEX_DIM, width=3 * SS)
     d.polygon(_hexagon((cx, cy), 88 * SS), outline=GREEN, width=6 * SS)
 
-    # --- Гидра: три шеи из одного основания -------------------------------
-    base = (cx, cy + 60 * SS)                      # общее основание (туловище)
-    r0 = 13 * SS                                   # толщина у основания
-    d.ellipse([base[0] - r0, base[1] - r0 * 0.8,
-               base[0] + r0, base[1] + r0 * 0.8], fill=GREEN)
+    # --- Гидра: свернувшееся тело и три ЗМЕИНЫЕ головы --------------------
+    # Асимметричная композиция, головы смотрят в стороны (не трезубец!).
+    eye = BG_TOP
 
-    neck_w0, neck_w1 = 14 * SS, 8 * SS             # сужение к голове
+    # Тело — кольцо (свернувшаяся змея) внизу, чуть смещено влево.
+    bx, by = cx - 10 * SS, cy + 46 * SS
+    ring_r, ring_w = 16 * SS, 14 * SS
+    d.ellipse([bx - ring_r - ring_w, by - ring_r - ring_w,
+               bx + ring_r + ring_w, by + ring_r + ring_w], fill=GREEN)
+    d.ellipse([bx - ring_r + ring_w, by - ring_r + ring_w,
+               bx + ring_r - ring_w, by + ring_r - ring_w], fill=BG_BOTTOM)
+    # Кончик хвоста выглядывает из-под кольца вправо.
+    _stroke_bezier(d, (bx + ring_r + ring_w * 0.4, by + 8 * SS),
+                   (bx + ring_r + 16 * SS, by + 12 * SS),
+                   (bx + ring_r + 24 * SS, by + 6 * SS),
+                   (bx + ring_r + 30 * SS, by + 2 * SS),
+                   10 * SS, 3 * SS, GREEN, GREEN)
 
-    # Центральная шея — лёгкий S-изгиб, голова смотрит строго вверх.
-    _stroke_bezier(d, base,
-                   (cx - 8 * SS, cy + 18 * SS), (cx + 8 * SS, cy - 16 * SS),
-                   (cx, cy - 42 * SS),
+    neck_w0, neck_w1 = 16 * SS, 11 * SS            # сужение к голове
+
+    # Левая шея: выгибается влево, голова смотрит ВЛЕВО.
+    _stroke_bezier(d, (bx - 16 * SS, by - 10 * SS),
+                   (cx - 50 * SS, cy + 16 * SS), (cx - 58 * SS, cy - 12 * SS),
+                   (cx - 42 * SS, cy - 24 * SS),
+                   neck_w0, neck_w1, GREEN, MINT)
+    _head(d, (cx - 46 * SS, cy - 28 * SS), 172, 12 * SS, MINT, eye)
+
+    # Центральная шея: высокий S-изгиб, голова наверху смотрит ВПРАВО.
+    _stroke_bezier(d, (bx + 4 * SS, by - 14 * SS),
+                   (cx - 24 * SS, cy - 8 * SS), (cx + 14 * SS, cy - 28 * SS),
+                   (cx - 2 * SS, cy - 48 * SS),
                    neck_w0, neck_w1, GREEN, CYAN)
-    _head(d, (cx, cy - 58 * SS), -90, 19 * SS, CYAN)
+    _head(d, (cx + 4 * SS, cy - 53 * SS), 4, 13 * SS, CYAN, eye)
 
-    # Боковые шеи — плавный изгиб наружу, головы смотрят вверх-в-стороны.
-    for sgn in (-1, 1):
-        _stroke_bezier(d, base,
-                       (cx + sgn * 30 * SS, cy + 26 * SS),
-                       (cx + sgn * 50 * SS, cy - 2 * SS),
-                       (cx + sgn * 46 * SS, cy - 26 * SS),
-                       neck_w0, neck_w1, GREEN, MINT)
-        _head(d, (cx + sgn * 53 * SS, cy - 41 * SS),
-              -90 + sgn * 27, 17 * SS, MINT)
+    # Правая шея: изгибается вправо-вниз, голова смотрит ВПРАВО-ВНИЗ.
+    _stroke_bezier(d, (bx + 18 * SS, by - 6 * SS),
+                   (cx + 32 * SS, cy + 24 * SS), (cx + 52 * SS, cy + 4 * SS),
+                   (cx + 44 * SS, cy - 12 * SS),
+                   neck_w0, neck_w1, GREEN, MINT)
+    _head(d, (cx + 49 * SS, cy - 17 * SS), 24, 12 * SS, MINT, eye)
 
     # --- Уменьшение (сглаживание) и сохранение ---------------------------
     img = img.resize((SIZE, SIZE), Image.LANCZOS)
