@@ -1079,14 +1079,17 @@ class BHydraApp(tk.Tk):
         self._priv_entry.configure(show="•" if shown else "")
 
     def _apply_theme(self, dark: bool) -> None:
+        # Палитра — под официальный логотип (неон: циан + магента на тёмном).
         style = ttk.Style(self)
         if dark:
             bg, fg, field = "#0d1117", "#e6edf3", "#161b22"
             card, sub = "#161b22", "#8b949e"
+            balance, magenta = "#22d3ee", "#f472b6"    # яркие на тёмном
         else:
             bg, fg, field = "#f0f0f0", "#000000", "#ffffff"
             card, sub = "#ffffff", "#57606a"
-        accent, accent_hi = "#2ea043", "#3fb950"   # фирменный зелёный B-hydra
+            balance, magenta = "#0e7490", "#be185d"    # тёмные на светлом
+        accent, accent_hi = "#0891b2", "#06b6d4"       # циан кнопок (как «B»)
         self.configure(bg=bg)
         for elem in (".", "TFrame", "TLabel", "TNotebook",
                      "TLabelframe", "TLabelframe.Label"):
@@ -1096,18 +1099,20 @@ class BHydraApp(tk.Tk):
                         padding=(12, 6))
         style.map("TNotebook.Tab",
                   background=[("selected", bg)],
-                  foreground=[("selected", accent_hi)])
+                  foreground=[("selected", magenta)])
         style.configure("TEntry", fieldbackground=field, foreground=fg)
         style.configure("Treeview", background=field, foreground=fg,
                         fieldbackground=field)
         style.configure("Treeview.Heading", background=bg, foreground=fg)
-        # Фирменные стили: карточка кошелька, крупный баланс, зелёные кнопки.
+        style.configure("Horizontal.TProgressbar", background=accent_hi,
+                        troughcolor=field)
+        # Фирменные стили: карточка кошелька, крупный баланс, неон-кнопки.
         style.configure("Card.TFrame", background=card)
         style.configure("Card.TLabel", background=card)
         style.configure("CardTitle.TLabel", background=card, foreground=fg,
                         font=("TkDefaultFont", 14, "bold"))
         style.configure("CardSub.TLabel", background=card, foreground=sub)
-        style.configure("Balance.TLabel", background=card, foreground=accent_hi,
+        style.configure("Balance.TLabel", background=card, foreground=balance,
                         font=("TkDefaultFont", 18, "bold"))
         style.configure("Accent.TButton", background=accent,
                         foreground="#ffffff")
