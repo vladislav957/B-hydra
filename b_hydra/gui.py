@@ -122,8 +122,13 @@ class BHydraApp(tk.Tk):
         self._build_network_tab(nb)
         self._build_mempool_tab(nb)
         self._build_blocks_tab(nb)
+        self._build_addresses_tab(nb)
         self._text_widgets = [self.mine_log, self.net_log, self.block_details]
         self._apply_theme(self._dark.get())      # фирменные стили с самого старта
+        # Обозреватель адресов пересчитывается при открытии его вкладки.
+        nb.bind("<<NotebookTabChanged>>",
+                lambda _e: (self._refresh_addresses()
+                            if nb.select() == str(self._addresses_tab) else None))
 
     def _build_wallet_tab(self, nb: ttk.Notebook) -> None:
         tab = ttk.Frame(nb, padding=12)
@@ -491,6 +496,97 @@ class BHydraApp(tk.Tk):
         self.block_details.pack(fill="x")
         self.block_details.tag_configure("hl", background="#fff3a0",
                                          foreground="#000000")
+
+    def _build_addresses_tab(self, nb: ttk.Notebook) -> None:
+        """Обозреватель адресов: rich list всех адресов цепочки."""
+        tab = ttk.Frame(nb, padding=12)
+        nb.add(tab, text="💰 Адреса")
+        self._addresses_tab = tab
+
+        top = ttk.Frame(tab)
+        top.pack(fill="x")
+        ttk.Button(top, text="Обновить", style="Accent.TButton",
+                   command=self._refresh_addresses).pack(side="left")
+        self.addresses_info = tk.StringVar()
+        ttk.Label(top, textvariable=self.addresses_info).pack(
+            side="left", padx=10)
+
+        wrap = ttk.Frame(tab)
+        wrap.pack(fill="both", expand=True, pady=6)
+        cols = ("rank", "addr", "balance", "share", "txs", "last")
+        self.addresses_tree = ttk.Treeview(wrap, columns=cols,
+                                           show="headings", height=14)
+        for col, title, width, anchor in (
+                ("rank", "№", 44, "center"),
+                ("addr", "адрес", 300, "w"),
+                ("balance", "баланс BHY", 110, "e"),
+                ("share", "доля", 64, "e"),
+                ("txs", "транз.", 60, "center"),
+                ("last", "актив. блок", 90, "center")):
+            self.addresses_tree.heading(col, text=title)
+            self.addresses_tree.column(col, width=width, anchor=anchor)
+        vsb = ttk.Scrollbar(wrap, orient="vertical",
+                            command=self.addresses_tree.yview)
+        self.addresses_tree.configure(yscrollcommand=vsb.set)
+        self.addresses_tree.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+
+        ttk.Label(tab, text="(двойной клик — детали адреса, "
+                            "правый клик — копировать адрес)",
+                  foreground="gray").pack(anchor="w")
+        self._addr_stats = {}                    # iid → запись address_stats
+        self.addresses_tree.bind("<Double-1>", self._show_address_details)
+        self._addr_menu = tk.Menu(self.addresses_tree, tearoff=0)
+        self._addr_menu.add_command(label="Копировать адрес",
+                                    command=self._copy_selected_address)
+        self.addresses_tree.bind("<Button-3>", self._addr_popup)
+
+    def _refresh_addresses(self) -> None:
+        stats = self.node.address_stats(limit=100)
+        supply = self.node.blockchain.total_supply
+        tree = self.addresses_tree
+        tree.delete(*tree.get_children())
+        self._addr_stats = {}
+        for rank, s in enumerate(stats, 1):
+            share = s["balance"] / supply * 100 if supply else 0.0
+            iid = str(rank)
+            self._addr_stats[iid] = s
+            tree.insert("", "end", iid=iid, values=(
+                rank, s["address"], f"{s['balance']:.4f}", f"{share:.1f}%",
+                s["tx_count"], s["last_block"]))
+        self.addresses_info.set(f"адресов в сети: {len(stats)} | "
+                                f"эмиссия: {supply:.0f} BHY | топ-100 по балансу")
+
+    def _selected_address(self):
+        sel = self.addresses_tree.selection()
+        return self._addr_stats.get(sel[0]) if sel else None
+
+    def _show_address_details(self, _event=None) -> None:
+        s = self._selected_address()
+        if s is None:
+            return
+        messagebox.showinfo(
+            "Адрес", f"{s['address']}\n\n"
+                     f"Баланс: {s['balance']:.4f} BHY\n"
+                     f"Всего получено: {s['received']:.4f} BHY\n"
+                     f"Всего отправлено: {s['sent']:.4f} BHY\n"
+                     f"Транзакций: {s['tx_count']}\n"
+                     f"Активность: блоки #{s['first_block']}–#{s['last_block']}")
+
+    def _copy_selected_address(self) -> None:
+        s = self._selected_address()
+        if s is None:
+            return
+        self.clipboard_clear()
+        self.clipboard_append(s["address"])
+        self.update()
+        self.status.set("Адрес скопирован в буфер обмена.")
+
+    def _addr_popup(self, event) -> None:
+        row = self.addresses_tree.identify_row(event.y)
+        if row:
+            self.addresses_tree.selection_set(row)
+            self._addr_menu.tk_popup(event.x_root, event.y_root)
 
     def _refresh_blocks(self) -> None:
         self.blocks_tree.delete(*self.blocks_tree.get_children())
