@@ -14,6 +14,7 @@ api.py — REST API узла B-hydra (для мобильных кошелько
     GET  /api/block/<index>      — блок по высоте
     GET  /api/tx/<txid>          — транзакция по идентификатору
     GET  /api/address/<address>  — баланс и история транзакций адреса
+    GET  /api/addresses[?limit=N]— обозреватель адресов: rich list цепочки
     GET  /api/mempool            — число неподтверждённых транзакций
     POST /api/transaction        — отправить ПОДПИСАННУЮ транзакцию (vin/vout)
     POST /api/send               — перевод {"private_key","to","amount","fee"}
@@ -259,6 +260,21 @@ class BHydraAPI(BaseHTTPRequestHandler):
                                  "chain": self.node.blockchain.to_dicts()})
             elif parts == ["api", "mempool"]:
                 self._send(200, {"pending": len(self.node.mempool)})
+            elif parts == ["api", "addresses"]:
+                # Обозреватель адресов: rich list всех адресов цепочки.
+                query = dict(p.split("=", 1) for p in
+                             urlparse(self.path).query.split("&") if "=" in p)
+                try:
+                    limit = max(1, min(int(query.get("limit", 100)), 1000))
+                except ValueError:
+                    limit = 100
+                ranked = self.node.address_stats()
+                supply = self.node.blockchain.total_supply
+                self._send(200, {
+                    "count": len(ranked),
+                    "total_supply": supply,
+                    "addresses": ranked[:limit],
+                })
             elif parts == ["api", "contract"]:
                 self._send(200, {
                     "address": self.contracts.address,

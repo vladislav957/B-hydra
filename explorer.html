@@ -224,6 +224,11 @@
         <h3><span class="ic">✦</span> Узлы сети</h3>
         <div class="legend" id="peers"></div>
       </div>
+      <div class="panel">
+        <h3><span class="ic">◈</span> Богатейшие адреса</h3>
+        <div class="legend" id="rich"></div>
+        <div class="sub" id="richNote"></div>
+      </div>
     </div>
   </div>
 </div>
@@ -286,6 +291,17 @@ function demoInfo(){const last=demoChain[demoChain.length-1];
 async function fInfo(){ try{return await getJSON('/api/info');}catch(e){DEMO=true;return demoInfo();} }
 async function fChain(){ try{const d=await getJSON('/api/chain');return d.chain;}catch(e){DEMO=true;return demoChain;} }
 async function fMempool(){ try{const d=await getJSON('/api/mempool');return d.pending;}catch(e){DEMO=true;return demoMempool;} }
+async function fAddresses(){ try{return await getJSON('/api/addresses?limit=8');}catch(e){DEMO=true;return demoAddresses();} }
+function demoAddresses(){ // rich list по демо-цепочке (сумма выходов адреса)
+  const m={};
+  demoChain.forEach(b=>b.data.forEach(t=>(t.vout||[]).forEach(o=>{
+    m[o.address]=(m[o.address]||0)+o.amount;})));
+  const addrs=Object.entries(m).map(([a,v])=>({address:a,balance:v}))
+    .sort((x,y)=>y.balance-x.balance);
+  return {count:addrs.length,
+          total_supply:addrs.reduce((s,a)=>s+a.balance,0),
+          addresses:addrs.slice(0,8)};
+}
 
 /* ─────────── Живая сеть (canvas) ─────────── */
 const cv=$('net'), cx=cv.getContext('2d');
@@ -470,6 +486,22 @@ async function loadMempool(){
     ? `неподтверждённых транзакций · вмещает <b style="color:var(--venom)">10 000+</b> связанных`
     : `пусто · вмещает <b style="color:var(--venom)">10 000+</b> связанных транзакций`;
 }
+async function loadAddresses(){
+  const d=await fAddresses();
+  const sup=+d.total_supply||0;
+  $('rich').innerHTML=(d.addresses||[]).map((a,i)=>{
+    const pct=sup?(a.balance/sup*100):0;
+    return `<div class="lg" data-action="address" data-id="${esc(a.address)}"
+      style="cursor:pointer" title="${esc(a.address)}">
+      <span class="swatch" style="color:var(--teal);background:var(--teal)"></span>
+      <span>#${i+1} <span class="sub">${esc(short(a.address,9))}</span></span>
+      <b style="color:var(--venom)">${esc((+a.balance).toFixed(2))}
+        <small class="sub">${pct.toFixed(1)}%</small></b>
+    </div>`;
+  }).join('')||'<div class="sub">пока пусто — добудьте первый блок</div>';
+  $('richNote').textContent =
+    `адресов в сети: ${fmtNum(d.count||0)} · баланс BHY · доля эмиссии`;
+}
 function loadPeers(){
   const c=k=>nodes.filter(n=>n.kind===k).length;
   const rows=[
@@ -595,6 +627,7 @@ async function refresh(){
   await loadStats();
   await loadBlocks();
   await loadMempool();
+  await loadAddresses();
   loadPeers();
   // живой отклик на новый блок
   const h=demoChain.length? (DEMO?demoChain.length:lastHeight):lastHeight;

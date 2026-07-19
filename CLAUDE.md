@@ -12,7 +12,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 pip install pytest                            # единственная dev-зависимость
-python -m pytest -q                           # 120 тестов — держать зелёными
+python -m pytest -q                           # 123 теста — держать зелёными
 python -m pytest tests/test_node.py -q        # один файл
 python -m pytest tests/test_node.py -k mempool -q   # один тест по имени
 
@@ -53,7 +53,7 @@ python P2P.py --demo                          # демо-сеть из трёх 
 ## REST API (`b_hydra/api.py`)
 
 `GET /api/info | /api/chain | /api/block/<i> | /api/tx/<txid> | /api/address/<a>`
-`| /api/balance/<a> | /api/utxos/<a> | /api/mempool`
+`| /api/addresses?limit=N (rich list) | /api/balance/<a> | /api/utxos/<a> | /api/mempool`
 `POST /api/mine {miner} | /api/transaction {подписанная tx} | /api/send`
 `{private_key,to,amount,fee} | /api/wallet {private_key}→адрес+баланс`.
 
@@ -102,7 +102,7 @@ python P2P.py --demo                          # демо-сеть из трёх 
 
 - Разработка на ветке `claude/*` (для сессии её задаёт задание), PR в `main`;
   напрямую в `main` не пушить.
-- **Перед push — `python -m pytest -q` должно быть зелёным** (120/120).
+- **Перед push — `python -m pytest -q` должно быть зелёным** (123/123).
 - Коммиты по-русски, осмысленные; заканчиваются трейлерами
   `Co-Authored-By:` и `Claude-Session:`.
 - Не хардкодить идентификатор модели в коде/коммитах/артефактах.
