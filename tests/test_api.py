@@ -200,3 +200,15 @@ def test_contract_escrow_flow_over_api(server):
     got = json.loads(_get(server, "/api/contract/escrow/"
                           + escrow["escrow_id"]))
     assert got["status"] == "completed"
+
+
+def test_addresses_endpoint(server):
+    w = MobileWallet(server)
+    _post(server, "/api/mine", {"miner": w.address})
+    d = json.loads(_get(server, "/api/addresses?limit=5"))
+    assert d["count"] == 1
+    assert d["total_supply"] == 50.0
+    top = d["addresses"][0]
+    assert top["address"] == w.address
+    assert top["balance"] == 50.0
+    assert top["tx_count"] == 1

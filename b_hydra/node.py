@@ -526,6 +526,52 @@ class BHydraNode:
                 })
         return history
 
+    def address_stats(self, limit: int = None):
+        """Сводка по ВСЕМ адресам цепочки — для обозревателя адресов.
+
+        Один проход по цепочке: для каждого адреса считаются баланс (по
+        непотраченным выходам), всего получено/отправлено, число транзакций
+        и первый/последний блок активности. Возвращает список словарей,
+        отсортированный по балансу (rich list); limit обрезает вершину.
+        """
+        stats = {}
+        outputs = {}                      # (txid, index) -> {amount, address}
+
+        def rec(addr):
+            return stats.setdefault(addr, {
+                "address": addr, "balance": 0.0,
+                "received": 0.0, "sent": 0.0, "tx_count": 0,
+                "first_block": None, "last_block": None})
+
+        for block in self.blockchain.chain:
+            for tx in self._block_transactions(block):
+                touched = set()
+                for inp in tx.get("vin", []):
+                    spent = outputs.pop((inp.get("txid"), inp.get("index")),
+                                        None)
+                    if spent:
+                        s = rec(spent["address"])
+                        s["sent"] += spent["amount"]
+                        s["balance"] -= spent["amount"]
+                        touched.add(spent["address"])
+                for index, out in enumerate(tx.get("vout", [])):
+                    outputs[(tx["txid"], index)] = {
+                        "amount": out["amount"], "address": out["address"]}
+                    s = rec(out["address"])
+                    s["received"] += out["amount"]
+                    s["balance"] += out["amount"]
+                    touched.add(out["address"])
+                for addr in touched:
+                    s = stats[addr]
+                    s["tx_count"] += 1
+                    if s["first_block"] is None:
+                        s["first_block"] = block.index
+                    s["last_block"] = block.index
+
+        ranked = sorted(stats.values(),
+                        key=lambda s: (-s["balance"], s["address"]))
+        return ranked[:limit] if limit else ranked
+
     def mempool_info(self):
         """Сведения о неподтверждённых транзакциях (мемпул).
 
