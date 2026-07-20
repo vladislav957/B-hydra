@@ -15,6 +15,7 @@ gui.py — десктоп-приложение B-hydra (tkinter).
 
 from __future__ import annotations
 
+import json
 import os
 import queue
 import sys
@@ -38,11 +39,13 @@ if __name__ == "__main__" and __package__ in (None, ""):
 
 from . import __version__, hashing
 from .blockchain import DEFAULT_FEE, TARGET_BLOCK_TIME
+from .contract import ContractManager
 from .node import BHydraNode
 from .p2p import P2PNode
 from .wallet import Wallet, generate_wallet, is_valid_address
 
 STATE_FILE = "bhydra_chain.json"
+CONTRACTS_FILE = STATE_FILE + ".contracts"   # эскроу/чеки + ключ контракта
 WALLET_FILE = "wallet.key"
 SEEDS_FILE = "bhydra_seeds.txt"     # список seed-узлов (host:port), как в Bitcoin
 
@@ -62,6 +65,14 @@ class BHydraApp(tk.Tk):
         import os
         self.node = (BHydraNode.load(STATE_FILE)
                      if os.path.exists(STATE_FILE) else BHydraNode(difficulty=3))
+        # Смарт-контракты (эскроу и чеки) — вместе с приватным ключом
+        # контрактного кошелька живут в отдельном файле рядом с цепочкой.
+        try:
+            with open(CONTRACTS_FILE, encoding="utf-8") as fh:
+                self.contracts = ContractManager.from_dict(self.node,
+                                                           json.load(fh))
+        except (OSError, ValueError, KeyError):
+            self.contracts = ContractManager(self.node)
         self.wallet: Wallet | None = None
         self.p2p: P2PNode | None = None
         self._mining = False             # PoW прямо сейчас идёт в фоне
@@ -123,12 +134,18 @@ class BHydraApp(tk.Tk):
         self._build_mempool_tab(nb)
         self._build_blocks_tab(nb)
         self._build_addresses_tab(nb)
+        self._build_contracts_tab(nb)
         self._text_widgets = [self.mine_log, self.net_log, self.block_details]
         self._apply_theme(self._dark.get())      # фирменные стили с самого старта
-        # Обозреватель адресов пересчитывается при открытии его вкладки.
-        nb.bind("<<NotebookTabChanged>>",
-                lambda _e: (self._refresh_addresses()
-                            if nb.select() == str(self._addresses_tab) else None))
+        nb.bind("<<NotebookTabChanged>>", self._on_tab_changed)
+
+    def _on_tab_changed(self, _event=None) -> None:
+        """Вкладки-обозреватели пересчитываются при открытии."""
+        selected = self._nb.select()
+        if selected == str(self._addresses_tab):
+            self._refresh_addresses()
+        elif selected == str(self._contracts_tab):
+            self._refresh_contracts()
 
     def _build_wallet_tab(self, nb: ttk.Notebook) -> None:
         tab = ttk.Frame(nb, padding=12)
@@ -587,6 +604,311 @@ class BHydraApp(tk.Tk):
         if row:
             self.addresses_tree.selection_set(row)
             self._addr_menu.tk_popup(event.x_root, event.y_root)
+
+    # --- Смарт-контракты: эскроу и смарт-чеки ----------------------------
+    _ESC_STATUS = {"open": "открыт", "completed": "завершён",
+                   "cancelled": "отменён"}
+    _CHQ_STATUS = {"active": "действует", "cashed": "погашен",
+                   "refunded": "возврат"}
+
+    def _build_contracts_tab(self, nb: ttk.Notebook) -> None:
+        """Смарт-контракты поверх узла: средства реально блокируются на цепочке."""
+        tab = ttk.Frame(nb, padding=12)
+        nb.add(tab, text="📜 Контракты")
+        self._contracts_tab = tab
+
+        ttk.Label(tab, text="Депозит, выплата и возврат — обычные UTXO-транзакции: "
+                            "попадают в мемпул и подтверждаются майнингом.",
+                  foreground="gray", wraplength=720).pack(anchor="w", pady=(0, 6))
+
+        inner = ttk.Notebook(tab)
+        inner.pack(fill="both", expand=True)
+
+        # ---- Эскроу-сделки ----
+        esc = ttk.Frame(inner, padding=10)
+        inner.add(esc, text="🤝 Эскроу")
+        form = ttk.Frame(esc)
+        form.pack(fill="x")
+        form.columnconfigure(1, weight=1)
+        ttk.Label(form, text="Продавец (адрес):").grid(row=0, column=0, sticky="w")
+        self.esc_seller = tk.StringVar()
+        seller_entry = ttk.Entry(form, textvariable=self.esc_seller, width=44)
+        seller_entry.grid(row=0, column=1, sticky="we", padx=4)
+        self._add_paste_menu(seller_entry)
+        row2 = ttk.Frame(form)
+        row2.grid(row=1, column=0, columnspan=2, sticky="w", pady=4)
+        ttk.Label(row2, text="Сумма:").pack(side="left")
+        self.esc_amount = tk.StringVar(value="10")
+        ttk.Entry(row2, textvariable=self.esc_amount, width=10).pack(
+            side="left", padx=(4, 12))
+        ttk.Label(row2, text="Комиссия:").pack(side="left")
+        self.esc_fee = tk.StringVar(value=f"{DEFAULT_FEE:g}")
+        ttk.Entry(row2, textvariable=self.esc_fee, width=10).pack(
+            side="left", padx=4)
+        ttk.Button(form, text="Открыть эскроу", style="Accent.TButton",
+                   command=self._escrow_open).grid(row=0, column=2,
+                                                   rowspan=2, padx=6)
+
+        self.esc_tree = ttk.Treeview(
+            esc, columns=("id", "seller", "amount", "status", "conf"),
+            show="headings", height=6)
+        for col, title, width, anchor in (
+                ("id", "сделка", 130, "w"), ("seller", "продавец", 190, "w"),
+                ("amount", "сумма", 80, "e"), ("status", "статус", 90, "center"),
+                ("conf", "подтв.", 60, "center")):
+            self.esc_tree.heading(col, text=title)
+            self.esc_tree.column(col, width=width, anchor=anchor)
+        self.esc_tree.pack(fill="both", expand=True, pady=6)
+        ebtns = ttk.Frame(esc)
+        ebtns.pack(fill="x")
+        ttk.Button(ebtns, text="Подтвердить", style="Accent.TButton",
+                   command=self._escrow_confirm).pack(side="left")
+        ttk.Button(ebtns, text="Отменить (возврат покупателю)",
+                   command=self._escrow_cancel).pack(side="left", padx=6)
+        ttk.Label(esc, text="Покупатель — ваш кошелёк. Выплата продавцу — после "
+                            "подтверждения ОБЕИХ сторон (продавец подтверждает "
+                            "со своего клиента).",
+                  foreground="gray", wraplength=700).pack(anchor="w", pady=(4, 0))
+
+        # ---- Смарт-чеки ----
+        chq = ttk.Frame(inner, padding=10)
+        inner.add(chq, text="🧾 Смарт-чеки")
+        wf = ttk.Frame(chq)
+        wf.pack(fill="x")
+        ttk.Label(wf, text="Сумма:").pack(side="left")
+        self.chq_amount = tk.StringVar(value="5")
+        ttk.Entry(wf, textvariable=self.chq_amount, width=9).pack(
+            side="left", padx=(4, 10))
+        ttk.Label(wf, text="Комиссия:").pack(side="left")
+        self.chq_fee = tk.StringVar(value=f"{DEFAULT_FEE:g}")
+        ttk.Entry(wf, textvariable=self.chq_fee, width=9).pack(
+            side="left", padx=(4, 10))
+        ttk.Label(wf, text="Срок, часов:").pack(side="left")
+        self.chq_hours = tk.StringVar(value="24")
+        ttk.Entry(wf, textvariable=self.chq_hours, width=6).pack(
+            side="left", padx=(4, 10))
+        ttk.Button(wf, text="Выписать чек", style="Accent.TButton",
+                   command=self._cheque_write).pack(side="left")
+
+        cf = ttk.Frame(chq)
+        cf.pack(fill="x", pady=(6, 0))
+        cf.columnconfigure(1, weight=1)
+        ttk.Label(cf, text="ID чека:").grid(row=0, column=0, sticky="w")
+        self.chq_id = tk.StringVar()
+        id_entry = ttk.Entry(cf, textvariable=self.chq_id)
+        id_entry.grid(row=0, column=1, sticky="we", padx=4)
+        self._add_paste_menu(id_entry)
+        ttk.Label(cf, text="Секрет:").grid(row=1, column=0, sticky="w", pady=3)
+        self.chq_secret = tk.StringVar()
+        sec_entry = ttk.Entry(cf, textvariable=self.chq_secret)
+        sec_entry.grid(row=1, column=1, sticky="we", padx=4, pady=3)
+        self._add_paste_menu(sec_entry)
+        ttk.Button(cf, text="Обналичить на мой адрес", style="Accent.TButton",
+                   command=self._cheque_cash).grid(row=0, column=2,
+                                                   rowspan=2, padx=6)
+
+        self.chq_tree = ttk.Treeview(
+            chq, columns=("id", "amount", "status", "expires", "who"),
+            show="headings", height=5)
+        for col, title, width, anchor in (
+                ("id", "чек", 130, "w"), ("amount", "сумма", 80, "e"),
+                ("status", "статус", 90, "center"),
+                ("expires", "истекает", 130, "center"),
+                ("who", "получатель", 150, "w")):
+            self.chq_tree.heading(col, text=title)
+            self.chq_tree.column(col, width=width, anchor=anchor)
+        self.chq_tree.pack(fill="both", expand=True, pady=6)
+        self.chq_tree.bind("<Double-1>", self._cheque_fill_id)
+        cbtns = ttk.Frame(chq)
+        cbtns.pack(fill="x")
+        ttk.Button(cbtns, text="Вернуть по истёкшему",
+                   command=self._cheque_refund).pack(side="left")
+        ttk.Label(chq, text="(двойной клик по чеку — подставить его ID; "
+                            "секрет показывается один раз при выписке)",
+                  foreground="gray").pack(anchor="w", pady=(4, 0))
+
+        self._esc_rows: dict[str, dict] = {}
+        self._chq_rows: dict[str, dict] = {}
+
+    def _save_contracts(self) -> None:
+        try:
+            with open(CONTRACTS_FILE, "w", encoding="utf-8") as fh:
+                json.dump(self.contracts.to_dict(), fh,
+                          ensure_ascii=False, indent=2)
+        except OSError:
+            pass
+
+    def _after_contract_op(self) -> None:
+        """Общий хвост операций: сохранить узел и контракты, обновить экраны."""
+        self.node.save(STATE_FILE)
+        self._save_contracts()
+        self._refresh_contracts()
+        self._refresh_status()
+
+    def _contract_num(self, var: tk.StringVar, name: str) -> float:
+        try:
+            return float(var.get().replace(",", "."))
+        except ValueError:
+            raise ValueError(f"{name} должна быть числом") from None
+
+    def _refresh_contracts(self) -> None:
+        tree = self.esc_tree
+        tree.delete(*tree.get_children())
+        self._esc_rows = {}
+        for i, e in enumerate(self.contracts.escrows.values(), 1):
+            iid = str(i)
+            self._esc_rows[iid] = e
+            tree.insert("", "end", iid=iid, values=(
+                e["escrow_id"][:12] + "…", e["seller"][:20] + "…",
+                f"{e['amount']:g}", self._ESC_STATUS.get(e["status"],
+                                                         e["status"]),
+                f"{sum(e['confirmed'].values())}/2"))
+        tree = self.chq_tree
+        tree.delete(*tree.get_children())
+        self._chq_rows = {}
+        for i, c in enumerate(self.contracts.cheques.values(), 1):
+            iid = str(i)
+            self._chq_rows[iid] = c
+            tree.insert("", "end", iid=iid, values=(
+                c["cheque_id"][:12] + "…", f"{c['amount']:g}",
+                self._CHQ_STATUS.get(c["status"], c["status"]),
+                self._fmt_time(c["expires_at"]),
+                (c["recipient"][:18] + "…") if c["recipient"]
+                else "на предъявителя"))
+
+    # ---- Эскроу ----
+    def _escrow_open(self) -> None:
+        if self.wallet is None:
+            return messagebox.showwarning("Эскроу", "Сначала создайте кошелёк.")
+        try:
+            escrow = self.contracts.open_escrow(
+                self.wallet, self.esc_seller.get().strip(),
+                self._contract_num(self.esc_amount, "Сумма"),
+                fee=self._contract_num(self.esc_fee, "Комиссия"))
+        except ValueError as err:
+            return messagebox.showerror("Эскроу", str(err))
+        self._after_contract_op()
+        messagebox.showinfo(
+            "Эскроу", f"Сделка открыта, депозит в мемпуле.\n\n"
+                      f"ID: {escrow['escrow_id'][:32]}…\n"
+                      "Выплата продавцу — после подтверждения обеих сторон.")
+
+    def _escrow_selected(self):
+        sel = self.esc_tree.selection()
+        if not sel:
+            messagebox.showinfo("Эскроу", "Выберите сделку в списке.")
+            return None
+        return self._esc_rows.get(sel[0])
+
+    def _escrow_confirm(self) -> None:
+        escrow = self._escrow_selected()
+        if escrow is None or self.wallet is None:
+            return
+        try:
+            escrow = self.contracts.confirm_escrow(escrow["escrow_id"],
+                                                   self.wallet.address)
+        except ValueError as err:
+            return messagebox.showerror("Эскроу", str(err))
+        self._after_contract_op()
+        if escrow["status"] == "completed":
+            messagebox.showinfo("Эскроу", "Обе стороны подтвердили — "
+                                          "выплата продавцу отправлена!")
+
+    def _escrow_cancel(self) -> None:
+        escrow = self._escrow_selected()
+        if escrow is None or self.wallet is None:
+            return
+        try:
+            self.contracts.cancel_escrow(escrow["escrow_id"],
+                                         self.wallet.address)
+        except ValueError as err:
+            return messagebox.showerror("Эскроу", str(err))
+        self._after_contract_op()
+        messagebox.showinfo("Эскроу", "Сделка отменена, депозит возвращён "
+                                      "покупателю.")
+
+    # ---- Смарт-чеки ----
+    def _cheque_write(self) -> None:
+        if self.wallet is None:
+            return messagebox.showwarning("Чек", "Сначала создайте кошелёк.")
+        try:
+            hours = self._contract_num(self.chq_hours, "Срок")
+            cheque, secret = self.contracts.write_cheque(
+                self.wallet, self._contract_num(self.chq_amount, "Сумма"),
+                fee=self._contract_num(self.chq_fee, "Комиссия"),
+                expires_in=hours * 3600)
+        except ValueError as err:
+            return messagebox.showerror("Чек", str(err))
+        self._after_contract_op()
+        self._show_cheque_secret(cheque, secret)
+
+    def _show_cheque_secret(self, cheque: dict, secret: str) -> None:
+        """Окно с парой (ID, секрет) — секрет показывается ОДИН раз."""
+        win = tk.Toplevel(self)
+        win.title("Чек выписан")
+        win.transient(self)
+        win.resizable(False, False)
+        frame = ttk.Frame(win, padding=14)
+        frame.pack(fill="both", expand=True)
+        ttk.Label(frame, text=f"Чек на {cheque['amount']:g} BHY выписан!",
+                  font=("TkDefaultFont", 12, "bold")).pack(anchor="w")
+        ttk.Label(frame, text="⚠ Секрет показывается ОДИН раз — узел хранит "
+                              "только его хеш.\nПередайте получателю пару "
+                              "(ID + секрет) любым каналом.",
+                  foreground="#be185d").pack(anchor="w", pady=6)
+        for label, value in (("ID чека:", cheque["cheque_id"]),
+                             ("Секрет:", secret)):
+            row = ttk.Frame(frame)
+            row.pack(fill="x", pady=2)
+            ttk.Label(row, text=label, width=10).pack(side="left")
+            var = tk.StringVar(value=value)
+            ttk.Entry(row, textvariable=var, state="readonly",
+                      width=52).pack(side="left", fill="x", expand=True)
+
+        def copy_pair():
+            self.clipboard_clear()
+            self.clipboard_append(f"Чек B-hydra на {cheque['amount']:g} BHY\n"
+                                  f"ID: {cheque['cheque_id']}\n"
+                                  f"Секрет: {secret}")
+            self.update()
+            self.status.set("Чек (ID + секрет) скопирован в буфер обмена.")
+
+        ttk.Button(frame, text="Скопировать чек (ID + секрет)",
+                   style="Accent.TButton", command=copy_pair).pack(pady=(8, 0))
+
+    def _cheque_fill_id(self, _event=None) -> None:
+        sel = self.chq_tree.selection()
+        if sel and sel[0] in self._chq_rows:
+            self.chq_id.set(self._chq_rows[sel[0]]["cheque_id"])
+
+    def _cheque_cash(self) -> None:
+        if self.wallet is None:
+            return messagebox.showwarning("Чек", "Сначала создайте кошелёк.")
+        try:
+            cheque = self.contracts.cash_cheque(
+                self.chq_id.get().strip(), self.chq_secret.get().strip(),
+                self.wallet.address)
+        except ValueError as err:
+            return messagebox.showerror("Чек", str(err))
+        self.chq_secret.set("")
+        self._after_contract_op()
+        messagebox.showinfo("Чек", f"Чек погашен: {cheque['amount']:g} BHY "
+                                   "отправлены на ваш адрес (мемпул).")
+
+    def _cheque_refund(self) -> None:
+        if self.wallet is None:
+            return messagebox.showwarning("Чек", "Сначала создайте кошелёк.")
+        sel = self.chq_tree.selection()
+        cheque = self._chq_rows.get(sel[0]) if sel else None
+        if cheque is None:
+            return messagebox.showinfo("Чек", "Выберите чек в списке.")
+        try:
+            self.contracts.refund_cheque(cheque["cheque_id"],
+                                         self.wallet.address)
+        except ValueError as err:
+            return messagebox.showerror("Чек", str(err))
+        self._after_contract_op()
+        messagebox.showinfo("Чек", "Средства по истёкшему чеку возвращены.")
 
     def _refresh_blocks(self) -> None:
         self.blocks_tree.delete(*self.blocks_tree.get_children())
