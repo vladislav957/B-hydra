@@ -212,3 +212,24 @@ def test_addresses_endpoint(server):
     assert top["address"] == w.address
     assert top["balance"] == 50.0
     assert top["tx_count"] == 1
+
+
+def test_merkle_proof_endpoint(server):
+    from b_hydra.merkle import verify_proof
+    alice = MobileWallet(server)
+    bob = MobileWallet(server)
+    _post(server, "/api/mine", {"miner": alice.address})
+    alice.send(bob.address, 10, fee=0.5)
+    _post(server, "/api/mine", {"miner": bob.address})
+
+    block2 = json.loads(_get(server, "/api/block/2"))
+    txid = block2["data"][1]["txid"]
+    pr = json.loads(_get(server, "/api/proof/" + txid))
+    assert pr["block_index"] == 2
+    assert pr["merkle_root"] == block2["merkle_root"]
+    # SPV-проверка на стороне клиента по audit-пути.
+    assert verify_proof(bytes.fromhex(pr["leaf"]), pr["proof"], pr["merkle_root"])
+
+    with pytest.raises(urllib.error.HTTPError) as exc:
+        _get(server, "/api/proof/" + "00" * 64)
+    assert exc.value.code == 404

@@ -13,6 +13,7 @@ api.py — REST API узла B-hydra (для мобильных кошелько
     GET  /api/chain              — вся цепочка блоков
     GET  /api/block/<index>      — блок по высоте
     GET  /api/tx/<txid>          — транзакция по идентификатору
+    GET  /api/proof/<txid>       — доказательство включения (SPV audit-путь)
     GET  /api/address/<address>  — баланс и история транзакций адреса
     GET  /api/addresses[?limit=N]— обозреватель адресов: rich list цепочки
     GET  /api/mempool            — число неподтверждённых транзакций
@@ -218,6 +219,12 @@ class BHydraAPI(BaseHTTPRequestHandler):
                 found = self.node.find_transaction(unquote(parts[2]))
                 self._send(200 if found else 404,
                            found or {"error": "transaction not found"})
+                return
+            if len(parts) == 3 and parts[:2] == ["api", "proof"]:
+                # Доказательство включения (SPV): audit-путь до merkle_root.
+                proof = self.node.merkle_proof(unquote(parts[2]))
+                self._send(200 if proof else 404,
+                           proof or {"error": "transaction not found"})
                 return
             if len(parts) == 3 and parts[:2] == ["api", "address"]:
                 addr = unquote(parts[2])

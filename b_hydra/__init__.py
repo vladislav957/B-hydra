@@ -20,6 +20,7 @@ from __future__ import annotations
 
 from .blockchain import Block, Blockchain
 from .contract import ContractManager, verify_cheque
+from .merkle import MerkleTree, merkle_proof, merkle_root, verify_proof
 from .node import BHydraNode
 from .transaction import (
     Transaction,
@@ -43,6 +44,10 @@ __all__ = [
     "generate_wallet",
     "ContractManager",
     "verify_cheque",
+    "MerkleTree",
+    "merkle_root",
+    "merkle_proof",
+    "verify_proof",
 ]
 
 __version__ = "0.0.2"
