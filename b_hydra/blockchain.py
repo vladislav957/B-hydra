@@ -116,22 +116,9 @@ def sha512d(data: bytes) -> bytes:
     return hashing.double_sha512(data)
 
 
-def merkle_root(hashes):
-    """Вычисляет корень дерева Меркла из списка хешей (bytes)."""
-    if not hashes:
-        # Корень пустого набора транзакций — хеш пустой строки.
-        return sha512d(b"").hex()
-
-    layer = list(hashes)
-    while len(layer) > 1:
-        # Если число элементов нечётное — дублируем последний.
-        if len(layer) % 2 == 1:
-            layer.append(layer[-1])
-        layer = [
-            sha512d(layer[i] + layer[i + 1])
-            for i in range(0, len(layer), 2)
-        ]
-    return layer[0].hex() if isinstance(layer[0], bytes) else layer[0]
+# Дерево Меркла — единая реализация в merkle.py (корень + доказательства
+# включения). Здесь используется тот же корень, что и лёгкими клиентами.
+from .merkle import merkle_root, merkle_proof  # noqa: E402,F401
 
 
 class Block:
@@ -159,11 +146,22 @@ class Block:
     def work(self) -> int:
         return _HASH_SPACE // self.target
 
+    def _tx_leaves(self):
+        """Листья дерева Меркла блока (хеши транзакций в порядке блока)."""
+        transactions = self.data if isinstance(self.data, (list, tuple)) else [self.data]
+        return [sha512d(str(tx).encode("utf-8")) for tx in transactions]
+
     def _calculate_merkle_root(self):
         """Строит корень Меркла по транзакциям блока."""
-        transactions = self.data if isinstance(self.data, (list, tuple)) else [self.data]
-        leaves = [sha512d(str(tx).encode("utf-8")) for tx in transactions]
-        return merkle_root(leaves)
+        return merkle_root(self._tx_leaves())
+
+    def merkle_proof(self, index: int):
+        """Доказательство включения транзакции №index в этот блок (SPV-путь).
+
+        Путь проверяется verify_proof() против merkle_root из заголовка —
+        лёгкому клиенту не нужны остальные транзакции блока.
+        """
+        return merkle_proof(self._tx_leaves(), index)
 
     def calculate_hash(self):
         """SHA-512 от содержимого заголовка блока (включая target)."""

@@ -19,7 +19,7 @@ if __name__ == "__main__" and __package__ in (None, ""):
     __package__ = "b_hydra"
 
 from .blockchain import (
-    Block, Blockchain, DEFAULT_DIFFICULTY,
+    Block, Blockchain, DEFAULT_DIFFICULTY, sha512d,
     MAX_BLOCK_TRANSACTIONS, MAX_MEMPOOL_TRANSACTIONS, MAX_FUTURE_DRIFT,
 )
 from .transaction import (
@@ -464,6 +464,29 @@ class BHydraNode:
             for tx in self._block_transactions(block):
                 if tx["txid"] == txid:
                     return {"transaction": tx, "block_index": block.index}
+        return None
+
+    def merkle_proof(self, txid: str):
+        """Доказательство включения транзакции txid в её блок (для SPV).
+
+        Возвращает dict с корнем Меркла, позицией транзакции и audit-путём —
+        по нему verify_proof() подтверждает включение без всего блока — или
+        None, если транзакция не найдена в цепочке.
+        """
+        for block in self.blockchain.chain:
+            txs = self._block_transactions(block)
+            for index, tx in enumerate(txs):
+                if tx.get("txid") == txid:
+                    leaf = sha512d(str(tx).encode("utf-8")).hex()
+                    return {
+                        "txid": txid,
+                        "block_index": block.index,
+                        "merkle_root": block.merkle_root,
+                        "leaf": leaf,
+                        "index": index,
+                        "tx_count": len(txs),
+                        "proof": block.merkle_proof(index),
+                    }
         return None
 
     def address_history(self, address: str):
