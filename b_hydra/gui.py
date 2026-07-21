@@ -41,12 +41,14 @@ from . import __version__, hashing
 from .blockchain import DEFAULT_FEE, TARGET_BLOCK_TIME
 from .contract import ContractManager
 from .node import BHydraNode
+from .pqcrypto import HybridWallet
 from .p2p import P2PNode
 from .wallet import Wallet, generate_wallet, is_valid_address
 
 STATE_FILE = "bhydra_chain.json"
 CONTRACTS_FILE = STATE_FILE + ".contracts"   # эскроу/чеки + ключ контракта
 WALLET_FILE = "wallet.key"
+HYBRID_FILE = "bhydra_hybrid.json"           # гибридный кошелёк + индекс ключей
 SEEDS_FILE = "bhydra_seeds.txt"     # список seed-узлов (host:port), как в Bitcoin
 
 
@@ -93,6 +95,15 @@ class BHydraApp(tk.Tk):
             except (ValueError, OSError):
                 self.wallet = None
 
+        # Гибридный (квантово-защищённый) кошелёк — со своим индексом ключей.
+        self.hybrid: HybridWallet | None = None
+        if os.path.exists(HYBRID_FILE):
+            try:
+                with open(HYBRID_FILE, encoding="utf-8") as fh:
+                    self.hybrid = HybridWallet.from_dict(json.load(fh))
+            except (ValueError, OSError, KeyError):
+                self.hybrid = None
+
         self._build_ui()
         self._refresh_status()
         self._refresh_blocks()
@@ -135,6 +146,7 @@ class BHydraApp(tk.Tk):
         self._build_blocks_tab(nb)
         self._build_addresses_tab(nb)
         self._build_contracts_tab(nb)
+        self._build_quantum_tab(nb)
         self._text_widgets = [self.mine_log, self.net_log, self.block_details]
         self._apply_theme(self._dark.get())      # фирменные стили с самого старта
         nb.bind("<<NotebookTabChanged>>", self._on_tab_changed)
@@ -146,6 +158,8 @@ class BHydraApp(tk.Tk):
             self._refresh_addresses()
         elif selected == str(self._contracts_tab):
             self._refresh_contracts()
+        elif selected == str(self._quantum_tab):
+            self._refresh_hybrid()
 
     def _build_wallet_tab(self, nb: ttk.Notebook) -> None:
         tab = ttk.Frame(nb, padding=12)
@@ -513,6 +527,162 @@ class BHydraApp(tk.Tk):
         self.block_details.pack(fill="x")
         self.block_details.tag_configure("hl", background="#fff3a0",
                                          foreground="#000000")
+
+    # --- Гибридный квантово-защищённый кошелёк ---------------------------
+    def _build_quantum_tab(self, nb: ttk.Notebook) -> None:
+        tab = ttk.Frame(nb, padding=12)
+        nb.add(tab, text="🛡 Квантовый")
+        self._quantum_tab = tab
+
+        ttk.Label(
+            tab, style="CardTitle.TLabel",
+            text="🛡 Квантово-защищённый кошелёк (ECDSA + пост-квантовая XMSS)"
+        ).pack(anchor="w")
+        ttk.Label(
+            tab, foreground="gray", wraplength=720,
+            text="Адрес привязан к ДВУМ ключам, и трата требует обе подписи. "
+                 "Квантовый компьютер ломает только ECDSA — монеты на этом "
+                 "адресе остаются недоступны. XMSS-ключи одноразовые: каждая "
+                 "трата расходует ключи (по одному на вход)."
+        ).pack(anchor="w", pady=(2, 10))
+
+        btns = ttk.Frame(tab)
+        btns.pack(fill="x")
+        ttk.Button(btns, text="Создать квантовый кошелёк", style="Accent.TButton",
+                   command=self._new_hybrid).pack(side="left")
+        self.hybrid_strong = tk.BooleanVar(value=False)
+        ttk.Checkbutton(btns, text="усиленный (SHA-512, 256 бит)",
+                        variable=self.hybrid_strong).pack(side="left", padx=8)
+        ttk.Button(btns, text="Майнить на этот адрес",
+                   command=self._mine_hybrid).pack(side="left", padx=6)
+
+        # Адрес.
+        row = ttk.Frame(tab)
+        row.pack(fill="x", pady=(12, 4))
+        ttk.Label(row, text="Адрес (BHY…):", width=16).pack(side="left")
+        self.hybrid_addr = tk.StringVar(value="—")
+        ttk.Entry(row, textvariable=self.hybrid_addr, state="readonly").pack(
+            side="left", fill="x", expand=True)
+        ttk.Button(row, text="Копировать", width=12,
+                   command=lambda: self._copy(self.hybrid_addr, "Адрес:")).pack(
+            side="left", padx=(6, 0))
+
+        # Баланс + остаток одноразовых ключей.
+        info = ttk.Frame(tab)
+        info.pack(fill="x", pady=4)
+        ttk.Label(info, text="Баланс:", width=16).pack(side="left")
+        self.hybrid_bal = tk.StringVar(value="—")
+        ttk.Label(info, textvariable=self.hybrid_bal,
+                  style="Balance.TLabel").pack(side="left")
+        ttk.Label(info, textvariable=tk.StringVar(), width=4).pack(side="left")
+        self.hybrid_keys = tk.StringVar(value="")
+        ttk.Label(info, textvariable=self.hybrid_keys,
+                  foreground="gray").pack(side="left")
+
+        # Перевод с гибридного адреса.
+        send = ttk.LabelFrame(tab, text="Отправить (обе подписи)", padding=8)
+        send.pack(fill="x", pady=(12, 0))
+        send.columnconfigure(1, weight=1)
+        ttk.Label(send, text="Кому (адрес):").grid(row=0, column=0, sticky="w")
+        self.hybrid_to = tk.StringVar()
+        to_entry = ttk.Entry(send, textvariable=self.hybrid_to, width=44)
+        to_entry.grid(row=0, column=1, sticky="we", padx=4)
+        self._add_paste_menu(to_entry)
+        row2 = ttk.Frame(send)
+        row2.grid(row=1, column=0, columnspan=2, sticky="w", pady=4)
+        ttk.Label(row2, text="Сумма:").pack(side="left")
+        self.hybrid_amount = tk.StringVar(value="10")
+        ttk.Entry(row2, textvariable=self.hybrid_amount, width=10).pack(
+            side="left", padx=(4, 12))
+        ttk.Label(row2, text="Комиссия:").pack(side="left")
+        self.hybrid_fee = tk.StringVar(value=f"{DEFAULT_FEE:g}")
+        ttk.Entry(row2, textvariable=self.hybrid_fee, width=10).pack(
+            side="left", padx=4)
+        ttk.Button(send, text="Отправить (квант)", style="Accent.TButton",
+                   command=self._send_hybrid).grid(row=0, column=2, padx=6)
+
+        self._refresh_hybrid()
+
+    def _save_hybrid(self) -> None:
+        if self.hybrid is None:
+            return
+        try:
+            with open(HYBRID_FILE, "w", encoding="utf-8") as fh:
+                json.dump(self.hybrid.to_dict(), fh, ensure_ascii=False, indent=2)
+        except OSError:
+            pass
+
+    def _refresh_hybrid(self) -> None:
+        if self.hybrid is None:
+            self.hybrid_addr.set("— (создайте квантовый кошелёк)")
+            self.hybrid_bal.set("—")
+            self.hybrid_keys.set("")
+            return
+        self.hybrid_addr.set(self.hybrid.address)
+        self.hybrid_bal.set(f"{self.node.get_balance(self.hybrid.address):.4f} BHY")
+        self.hybrid_keys.set(f"🔑 одноразовых ключей осталось: "
+                             f"{self.hybrid.remaining}")
+
+    def _new_hybrid(self) -> None:
+        if self.hybrid is not None and not messagebox.askyesno(
+                "Квантовый кошелёк",
+                "Заменить существующий квантовый кошелёк? Старый адрес и его "
+                "средства станут недоступны из этого приложения."):
+            return
+        # height=8 → 256 трат; усиленный режим — на SHA-512.
+        self.hybrid = HybridWallet(height=8, strong=self.hybrid_strong.get())
+        self._save_hybrid()
+        self._refresh_hybrid()
+        messagebox.showinfo(
+            "Квантовый кошелёк",
+            f"Создан квантово-защищённый кошелёк!\n\n{self.hybrid.address}\n\n"
+            f"Режим: {'SHA-512 (256 бит)' if self.hybrid_strong.get() else 'SHA-256 (128 бит)'}\n"
+            f"Доступно трат: {self.hybrid.remaining}")
+
+    def _mine_hybrid(self) -> None:
+        if self.hybrid is None:
+            return messagebox.showwarning("Квантовый кошелёк",
+                                          "Сначала создайте квантовый кошелёк.")
+        block = self.node.mine_pending(self.hybrid.address)
+        self.node.save(STATE_FILE)
+        self._refresh_hybrid()
+        self._refresh_status()
+        self._refresh_blocks()
+        messagebox.showinfo("Майнинг", f"Блок #{block.index} добыт — награда "
+                                       "зачислена на квантовый адрес.")
+
+    def _send_hybrid(self) -> None:
+        if self.hybrid is None:
+            return messagebox.showwarning("Квантовый кошелёк",
+                                          "Сначала создайте квантовый кошелёк.")
+        to = self.hybrid_to.get().strip()
+        if not is_valid_address(to):
+            return messagebox.showerror("Ошибка", "Неверный адрес получателя (BHY…).")
+        try:
+            amount = float(self.hybrid_amount.get().replace(",", "."))
+            fee = float(self.hybrid_fee.get().replace(",", "."))
+        except ValueError:
+            return messagebox.showerror("Ошибка", "Сумма и комиссия — числа.")
+        if self.hybrid.remaining < 1:
+            return messagebox.showerror(
+                "Квантовый кошелёк",
+                "Одноразовые ключи исчерпаны — создайте новый квантовый кошелёк.")
+        tx = self.node.create_hybrid_transaction(self.hybrid, to, amount, fee)
+        if tx is None:
+            return messagebox.showerror(
+                "Ошибка", "Не удалось собрать перевод (недостаточно средств "
+                          "или ключей).")
+        if not self.node.add_transaction(tx):
+            return messagebox.showerror("Ошибка", "Перевод отклонён узлом.")
+        self.node.save(STATE_FILE)
+        self._save_hybrid()                 # сохранить израсходованный индекс!
+        self._refresh_hybrid()
+        self._refresh_status()
+        messagebox.showinfo(
+            "Перевод отправлен",
+            f"{amount:g} BHY → {to[:20]}…\nПодписано ECDSA + XMSS.\n"
+            f"Осталось ключей: {self.hybrid.remaining}\n\n"
+            "Подтвердится при майнинге следующего блока.")
 
     def _build_addresses_tab(self, nb: ttk.Notebook) -> None:
         """Обозреватель адресов: rich list всех адресов цепочки."""

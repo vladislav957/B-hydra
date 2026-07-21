@@ -350,6 +350,30 @@ class HybridWallet:
         return (Wallet.verify(ecdsa_pub_hex, payload, ecdsa_sig)
                 and MerkleSigner.verify(pq_root, payload, pq_sig))
 
+    # --- Персистентность (с учётом израсходованных ключей) ---------------
+    def to_dict(self) -> dict:
+        """Состояние кошелька для сохранения. ВАЖНО: включает индекс — иначе
+        при загрузке одноразовые XMSS-ключи начали бы переиспользоваться."""
+        return {
+            "ecdsa_private": self.ecdsa.private_key_hex,
+            "seed": self.signer._seed.hex(),
+            "height": self.signer.height,
+            "alg": self.signer.params["name"],
+            "index": self.signer.index,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "HybridWallet":
+        from .wallet import Wallet
+        w = cls(
+            ecdsa_wallet=Wallet.from_private_hex(data["ecdsa_private"]),
+            height=data["height"],
+            seed=bytes.fromhex(data["seed"]),
+            strong=(data.get("alg") == "sha512"),
+        )
+        w.signer.index = data.get("index", 0)      # восстановить остаток ключей
+        return w
+
 
 if __name__ == "__main__":
     print("Пост-квантовые подписи B-hydra (на нашем SHA «с нуля»)\n")
