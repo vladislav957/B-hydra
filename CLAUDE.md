@@ -12,7 +12,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 pip install pytest                            # единственная dev-зависимость
-python -m pytest -q                           # 165 тестов — держать зелёными
+python -m pytest -q                           # 200 тестов — держать зелёными
 python -m pytest tests/test_node.py -q        # один файл
 python -m pytest tests/test_node.py -k mempool -q   # один тест по имени
 
@@ -37,12 +37,14 @@ python P2P.py --demo                          # демо-сеть из трёх 
 | `blockchain.py` | цепочка, блоки, PoW-валидация, ретаргет, halving, `total_work` |
 | `transaction.py` | UTXO: `TxInput`/`TxOutput`/`Transaction`, `TransactionPool` (мемпул) |
 | `wallet.py` | ECDSA secp256k1 (свой на Python + опц. нативный бэкенд), адреса |
+| `keystore.py` | шифрование приватного ключа паролем (KDF+CTR+HMAC на SHA-512, hashlib) |
 | `pqcrypto.py` | пост-квантовые хеш-подписи: Lamport, WOTS, XMSS-lite, `QuantumWallet` (экспериментально) |
 | `hashing.py`, `sha2.py` | SHA-256/512 с нуля + подключаемый бэкенд |
 | `hashcash.py`, `economics.py` | proof-of-work, награда/эмиссия/halving |
 | `merkle.py`, `qrcode_gen.py` | дерево Меркла (+ SPV-доказательства), QR с нуля |
 | `contract.py` | `ContractManager`: эскроу и смарт-чеки НА ЦЕПОЧКЕ (+ учебные in-memory классы) |
-| `node.py` | узел: блокчейн + мемпул + кэш UTXO, майнинг, переводы |
+| `node.py` | узел: блокчейн + мемпул + инкрементальные кэши UTXO/tx-индекса, майнинг, переводы |
+| `blockdag.py` | blockDAG (GHOSTDAG-lite) + гибрид «DAG→PoW→линейная цепь» (экспериментально) |
 | `p2p.py`, `tcp.py` | gossip-сеть, обмен пирами, фрейминг сообщений |
 | `api.py`, `cli.py`, `gui.py`, `mobile_client.py` | REST/HTTP, CLI, tkinter-GUI, моб. клиент |
 
@@ -139,9 +141,19 @@ python P2P.py --demo                          # демо-сеть из трёх 
 REST-эндпоинты `/api/contract/...`).
 
 Дальше (по приоритету пользователя — «сначала скорость, потом DAG»):
-1. скорость — сделано частично (ECDSA); можно добавить кэш проверок и параллелизм;
-2. **blockDAG** (GHOSTDAG-lite) как ОТДЕЛЬНЫЙ экспериментальный модуль рядом с
-   цепочкой — не заменять работающую цепочку. DAG улучшает число блоков/с в
-   сетевом окружении, но не ускорит саму крипту.
+1. скорость — сделано: ECDSA-ускоритель, инкрементальный кэш UTXO
+   (`utxo_set` применяет только новые блоки, реорг → пересборка; попутно
+   tx-индекс O(1) и PQ-учёт цепочки) и LRU-кэш проверенных подписей
+   (`_verify_ecdsa_cached`: мемпул→блок→прунинг не перепроверяют ECDSA;
+   mine_pending со 100 tx: 1364→8 мс). Параллелизм не делаем: GIL не даёт
+   выигрыша чистому Python, а нативный путь уже покрыт coincurve;
+2. **blockDAG** (GHOSTDAG-lite) — СДЕЛАНО как отдельный модуль `blockdag.py`
+   (не трогает линейную цепочку): блок ссылается на все вершины-tips (много
+   родителей), k-кластерная раскраска синий/красный, blue_score вместо высоты,
+   тотальный порядок. Плюс **гибрид** `HybridDagChain`: блоки накапливаются в
+   DAG, а PoW-нонс (`Checkpoint.mine`) финализирует их в линейную контрольную
+   точку и схлопывает DAG (новый якорь — хеш точки). Цепочка точек = линейный
+   PoW-блокчейн из DAG-пачек. Улучшает блоки/с, крипту не ускоряет. Дальше:
+   привязать реальные UTXO-транзакции и дедуп по синему набору.
 3. настоящая браузерная подпись — требует канонической сериализации транзакции
    (одинаковой в Python и JS) + secp256k1 на JS.
