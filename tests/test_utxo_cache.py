@@ -99,3 +99,44 @@ def test_balances_stable_across_many_calls():
     for _ in range(10):
         assert (node.get_balance(a.address),
                 node.get_balance(b.address)) == first
+
+
+# --- Кэш проверенных ECDSA-подписей ------------------------------------------
+
+def test_signature_cache_hits_on_revalidation():
+    """Повторная проверка той же транзакции (мемпул → майнинг) идёт из кэша."""
+    from b_hydra.node import _verify_ecdsa_cached
+    _verify_ecdsa_cached.cache_clear()
+    node = BHydraNode(difficulty=1)
+    a, b = generate_wallet(), generate_wallet()
+    node.mine_pending(a.address)
+    tx = node.create_transaction(a, b.address, 5, 0.1)
+    assert node.add_transaction(tx)                    # первая проверка (miss)
+    misses_after_add = _verify_ecdsa_cached.cache_info().misses
+    node.mine_pending(b.address)                       # повторная проверка
+    info = _verify_ecdsa_cached.cache_info()
+    assert info.hits > 0                               # кэш реально сработал
+    assert info.misses == misses_after_add             # новых ECDSA не было
+
+
+def test_signature_cache_does_not_accept_forgery():
+    """Тёплый кэш не помогает подделке: другая подпись/данные — другой ключ."""
+    from b_hydra.transaction import Transaction, TxInput, TxOutput
+    node = BHydraNode(difficulty=1)
+    a, b, evil = generate_wallet(), generate_wallet(), generate_wallet()
+    node.mine_pending(a.address)
+    good = node.create_transaction(a, b.address, 5, 0.1)
+    assert node.add_transaction(good)                  # честная — в кэше True
+
+    # Подделка 1: та же структура, но подпись чужим ключом.
+    op = node.find_spendable(a.address)[0][0]
+    forged = Transaction(vin=[TxInput(op[0], op[1])],
+                         vout=[TxOutput(5, evil.address)])
+    forged.sign(evil)                                  # ключ не владельца
+    assert not node.validate_transaction(forged)
+
+    # Подделка 2: валидная подпись, но данные подменены после подписания.
+    tampered = node.create_transaction(a, b.address, 1, 0.1)
+    if tampered is not None:
+        tampered.vout[0].amount = 999.0                # правка после подписи
+        assert not node.validate_transaction(tampered)

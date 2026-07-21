@@ -11,6 +11,7 @@ Node.py — узел сети B-hydra (модель UTXO).
 import json
 
 import time
+from functools import lru_cache
 
 if __name__ == "__main__" and __package__ in (None, ""):
     import os
@@ -35,6 +36,19 @@ def _is_coinbase_dict(tx: dict) -> bool:
     """coinbase-транзакция: единственный вход «ниоткуда» (NULL_TXID)."""
     vin = tx.get("vin", [])
     return len(vin) == 1 and vin[0].get("txid") == NULL_TXID
+
+
+@lru_cache(maxsize=20000)
+def _verify_ecdsa_cached(public_key: str, payload: bytes, signature: str) -> bool:
+    """Кэш проверенных ECDSA-подписей.
+
+    Одна и та же транзакция проверяется несколько раз (вход в мемпул →
+    сборка блока → прунинг мемпула → приём блока), а ECDSA — самая дорогая
+    операция узла. Ключ — ТОЧНАЯ тройка (ключ, данные, подпись), значение —
+    реальный результат проверки именно этих байтов, поэтому «отравить» кэш
+    невозможно: другая подпись или другие данные — другой ключ. LRU
+    ограничивает память (~20k записей)."""
+    return Wallet.verify(public_key, payload, signature)
 
 
 class BHydraNode:
@@ -197,16 +211,18 @@ class BHydraNode:
             key = (pq_public_key, pq_signature.get("index"))
             if key in pq_used:
                 return False  # повторное использование одноразового XMSS-ключа
-            from .pqcrypto import HybridWallet
-            if not HybridWallet.verify(public_key, pq_public_key, payload,
-                                       signature, pq_signature):
+            from .pqcrypto import MerkleSigner
+            # ECDSA-половина — через кэш; XMSS (хеши) проверяется напрямую.
+            if not _verify_ecdsa_cached(public_key, payload, signature):
+                return False
+            if not MerkleSigner.verify(pq_public_key, payload, pq_signature):
                 return False
             pq_used.add(key)
             return True
         # Обычный ECDSA-выход: PQ-поля игнорируются.
         if Wallet.address_from_public_key(public_key) != utxo_address:
             return False
-        return Wallet.verify(public_key, payload, signature)
+        return _verify_ecdsa_cached(public_key, payload, signature)
 
     # --- Проверка транзакции ---------------------------------------------
     def validate_transaction(self, tx: Transaction, utxos=None,

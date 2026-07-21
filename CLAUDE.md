@@ -12,7 +12,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 pip install pytest                            # единственная dev-зависимость
-python -m pytest -q                           # 187 тестов — держать зелёными
+python -m pytest -q                           # 189 тестов — держать зелёными
 python -m pytest tests/test_node.py -q        # один файл
 python -m pytest tests/test_node.py -k mempool -q   # один тест по имени
 
@@ -140,10 +140,12 @@ python P2P.py --demo                          # демо-сеть из трёх 
 REST-эндпоинты `/api/contract/...`).
 
 Дальше (по приоритету пользователя — «сначала скорость, потом DAG»):
-1. скорость — сделано: ECDSA-ускоритель + инкрементальный кэш UTXO
+1. скорость — сделано: ECDSA-ускоритель, инкрементальный кэш UTXO
    (`utxo_set` применяет только новые блоки, реорг → пересборка; попутно
-   tx-индекс O(1) для find_transaction/history/proof и PQ-учёт цепочки);
-   осталось: кэш проверок подписей, параллелизм;
+   tx-индекс O(1) и PQ-учёт цепочки) и LRU-кэш проверенных подписей
+   (`_verify_ecdsa_cached`: мемпул→блок→прунинг не перепроверяют ECDSA;
+   mine_pending со 100 tx: 1364→8 мс). Параллелизм не делаем: GIL не даёт
+   выигрыша чистому Python, а нативный путь уже покрыт coincurve;
 2. **blockDAG** (GHOSTDAG-lite) — СДЕЛАНО как отдельный модуль `blockdag.py`
    (не трогает линейную цепочку): блок ссылается на все вершины-tips (много
    родителей), k-кластерная раскраска синий/красный, blue_score вместо высоты,
