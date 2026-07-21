@@ -12,7 +12,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 pip install pytest                            # единственная dev-зависимость
-python -m pytest -q                           # 189 тестов — держать зелёными
+python -m pytest -q                           # 200 тестов — держать зелёными
 python -m pytest tests/test_node.py -q        # один файл
 python -m pytest tests/test_node.py -k mempool -q   # один тест по имени
 
@@ -37,6 +37,7 @@ python P2P.py --demo                          # демо-сеть из трёх 
 | `blockchain.py` | цепочка, блоки, PoW-валидация, ретаргет, halving, `total_work` |
 | `transaction.py` | UTXO: `TxInput`/`TxOutput`/`Transaction`, `TransactionPool` (мемпул) |
 | `wallet.py` | ECDSA secp256k1 (свой на Python + опц. нативный бэкенд), адреса |
+| `keystore.py` | шифрование приватного ключа паролем (KDF+CTR+HMAC на SHA-512, hashlib) |
 | `pqcrypto.py` | пост-квантовые хеш-подписи: Lamport, WOTS, XMSS-lite, `QuantumWallet` (экспериментально) |
 | `hashing.py`, `sha2.py` | SHA-256/512 с нуля + подключаемый бэкенд |
 | `hashcash.py`, `economics.py` | proof-of-work, награда/эмиссия/halving |

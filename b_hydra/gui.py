@@ -22,7 +22,7 @@ import sys
 import threading
 import time
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 
 
 def _asset(name: str) -> str:
@@ -40,6 +40,7 @@ if __name__ == "__main__" and __package__ in (None, ""):
 from . import __version__, hashing
 from .blockchain import DEFAULT_FEE, TARGET_BLOCK_TIME
 from .contract import ContractManager
+from . import keystore
 from .node import BHydraNode
 from .pqcrypto import HybridWallet
 from .p2p import P2PNode
@@ -47,7 +48,8 @@ from .wallet import Wallet, generate_wallet, is_valid_address
 
 STATE_FILE = "bhydra_chain.json"
 CONTRACTS_FILE = STATE_FILE + ".contracts"   # эскроу/чеки + ключ контракта
-WALLET_FILE = "wallet.key"
+WALLET_FILE = "wallet.key"                   # приватный ключ (открытый hex)
+WALLET_ENC = "wallet.enc"                    # приватный ключ, зашифрованный паролем
 HYBRID_FILE = "bhydra_hybrid.json"           # гибридный кошелёк + индекс ключей
 SEEDS_FILE = "bhydra_seeds.txt"     # список seed-узлов (host:port), как в Bitcoin
 
@@ -88,7 +90,11 @@ class BHydraApp(tk.Tk):
         # чужого потока, поэтому воркер кладёт события сюда, а главный поток
         # забирает их в _poll_queue.
         self._queue: queue.Queue = queue.Queue()
-        if os.path.exists(WALLET_FILE):
+        # Пароль кошелька на время сессии (None = кошелёк не зашифрован).
+        self._wallet_password = None
+        if os.path.exists(WALLET_ENC):
+            self.wallet = self._load_encrypted_wallet()
+        elif os.path.exists(WALLET_FILE):
             try:
                 self.wallet = Wallet.from_private_hex(
                     open(WALLET_FILE).read().strip())
@@ -221,6 +227,8 @@ class BHydraApp(tk.Tk):
                    command=self._save_wallet_as).pack(side="left")
         ttk.Button(btns, text="Загрузить из файла…",
                    command=self._load_wallet_from).pack(side="left", padx=6)
+        ttk.Button(btns, text="🔒 Пароль",
+                   command=self._set_wallet_password).pack(side="left")
 
         # Адрес — с копированием и QR.
         row = ttk.Frame(tab)
@@ -1184,8 +1192,7 @@ class BHydraApp(tk.Tk):
             return
         try:
             self.wallet = Wallet.from_private_hex(open(path).read().strip())
-            with open(WALLET_FILE, "w") as fh:
-                fh.write(self.wallet.private_key_hex)
+            self._persist_wallet()              # сохранить (с учётом пароля сессии)
             self._refresh_status()
             messagebox.showinfo("Кошелёк", f"Загружен: {self.wallet.address}")
         except (ValueError, OSError):
@@ -1260,14 +1267,83 @@ class BHydraApp(tk.Tk):
         ttk.Label(win, text=addr, font=("TkDefaultFont", 9)).pack(pady=(0, 4))
         ttk.Button(win, text="Закрыть", command=win.destroy).pack(pady=(0, 10))
 
-    def _new_wallet(self) -> None:
-        self.wallet = generate_wallet()
+    # --- Хранение приватного ключа (открытый / зашифрованный паролем) -----
+    def _persist_wallet(self) -> None:
+        """Сохраняет ключ: зашифрованно, если задан пароль сессии, иначе — hex.
+
+        При наличии пароля открытый wallet.key удаляется, чтобы ключ не остался
+        лежать в незашифрованном виде."""
+        if self.wallet is None:
+            return
         try:
-            with open(WALLET_FILE, "w") as fh:
-                fh.write(self.wallet.private_key_hex)
+            if self._wallet_password:
+                keystore.save_encrypted(WALLET_ENC, self.wallet.private_key_hex,
+                                        self._wallet_password)
+                if os.path.exists(WALLET_FILE):
+                    os.remove(WALLET_FILE)      # больше не держим открытый ключ
+            else:
+                with open(WALLET_FILE, "w") as fh:
+                    fh.write(self.wallet.private_key_hex)
         except OSError:
             pass
+
+    def _load_encrypted_wallet(self):
+        """Спрашивает пароль и расшифровывает wallet.enc (до 3 попыток)."""
+        for _ in range(3):
+            pw = simpledialog.askstring(
+                "Кошелёк защищён паролем",
+                "Введите пароль для расшифровки кошелька:", show="•")
+            if pw is None:
+                return None                     # отмена — работаем без кошелька
+            try:
+                secret = keystore.load_encrypted(WALLET_ENC, pw)
+                self._wallet_password = pw
+                return Wallet.from_private_hex(secret)
+            except (ValueError, OSError):
+                messagebox.showerror("Пароль", "Неверный пароль или файл повреждён.")
+        return None
+
+    def _set_wallet_password(self) -> None:
+        """Задать/сменить пароль кошелька — шифрует приватный ключ на диске."""
+        if self.wallet is None:
+            return messagebox.showwarning("Пароль", "Сначала создайте кошелёк.")
+        pw = simpledialog.askstring(
+            "Защита паролем",
+            "Новый пароль (пусто — снять защиту, хранить открыто):", show="•")
+        if pw is None:
+            return
+        if pw == "":
+            # Снять защиту: вернуться к открытому хранению.
+            self._wallet_password = None
+            if os.path.exists(WALLET_ENC):
+                os.remove(WALLET_ENC)
+            self._persist_wallet()
+            return messagebox.showinfo("Пароль", "Защита снята — ключ хранится "
+                                                 "открыто (wallet.key).")
+        confirm = simpledialog.askstring("Защита паролем",
+                                         "Повторите пароль:", show="•")
+        if confirm != pw:
+            return messagebox.showerror("Пароль", "Пароли не совпадают.")
+        self._wallet_password = pw
+        self._persist_wallet()
         self._refresh_status()
+        messagebox.showinfo("Пароль", "Кошелёк зашифрован паролем.\n\n"
+                                      "Приватный ключ на диске теперь недоступен "
+                                      "без пароля (wallet.enc).")
+
+    def _new_wallet(self) -> None:
+        self.wallet = generate_wallet()
+        self._wallet_password = None            # новый кошелёк — без пароля
+        if os.path.exists(WALLET_ENC):
+            os.remove(WALLET_ENC)
+        self._persist_wallet()
+        self._refresh_status()
+        if messagebox.askyesno(
+                "Защита паролем",
+                "Кошелёк создан. Защитить приватный ключ паролем?\n\n"
+                "Без пароля ключ хранится открыто (wallet.key) — кто получит "
+                "файл, получит монеты."):
+            self._set_wallet_password()
 
     def _import_wallet(self) -> None:
         raw = self.import_var.get().strip()
@@ -1278,11 +1354,7 @@ class BHydraApp(tk.Tk):
             self.wallet = Wallet.from_private_hex(raw)
         except ValueError as exc:
             return messagebox.showerror("Неверный приватный ключ", str(exc))
-        try:
-            with open(WALLET_FILE, "w") as fh:
-                fh.write(self.wallet.private_key_hex)
-        except OSError:
-            pass
+        self._persist_wallet()
         self.import_var.set("")                 # очистить поле после импорта
         self._refresh_status()
         self.status.set("Кошелёк импортирован.")
