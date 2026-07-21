@@ -141,9 +141,64 @@ class BHydraNode:
             self._rebuild_effective()
         return self._effective
 
+    # --- Авторизация входа (ECDSA или гибрид ECDSA+XMSS) -----------------
+    def pq_used_indices(self, include_mempool: bool = True) -> set:
+        """Множество израсходованных одноразовых XMSS-ключей (root, index).
+
+        Учёт в консенсусе: один WOTS/XMSS-ключ нельзя использовать дважды —
+        повтор ослабляет подпись. Собирается по всей цепочке (и мемпулу),
+        чтобы гибридную трату нельзя было повторить тем же индексом."""
+        used = set()
+        for block in self.blockchain.chain:
+            for tx in self._block_transactions(block):
+                for inp in tx.get("vin", []):
+                    pq, root = inp.get("pq_signature"), inp.get("pq_public_key")
+                    if pq and root is not None:
+                        used.add((root, pq.get("index")))
+        if include_mempool:
+            for tx in self.mempool.transactions:
+                for inp in tx.vin:
+                    if inp.pq_signature and inp.pq_public_key is not None:
+                        used.add((inp.pq_public_key,
+                                  inp.pq_signature.get("index")))
+        return used
+
+    @staticmethod
+    def _verify_input_auth(public_key, signature, pq_public_key, pq_signature,
+                           utxo_address, payload, pq_used) -> bool:
+        """Проверяет, что вход авторизован владельцем расходуемого выхода.
+
+        Обычный (ECDSA) выход — по ключу и ECDSA-подписи. Гибридный выход
+        (0x2f) требует ОБЕ подписи (ECDSA + XMSS), совпадение отпечатка обоих
+        ключей с адресом и неповторное использование одноразового XMSS-ключа.
+        При успешном гибридном входе ключ помечается использованным в pq_used.
+        """
+        from .wallet import Wallet, hybrid_address, is_hybrid_address
+        if not public_key or not signature:
+            return False
+        if is_hybrid_address(utxo_address):
+            if not pq_public_key or not pq_signature:
+                return False  # с гибридного адреса — только гибридная подпись
+            if hybrid_address(bytes.fromhex(public_key),
+                              pq_public_key) != utxo_address:
+                return False  # ключи не соответствуют адресу
+            key = (pq_public_key, pq_signature.get("index"))
+            if key in pq_used:
+                return False  # повторное использование одноразового XMSS-ключа
+            from .pqcrypto import HybridWallet
+            if not HybridWallet.verify(public_key, pq_public_key, payload,
+                                       signature, pq_signature):
+                return False
+            pq_used.add(key)
+            return True
+        # Обычный ECDSA-выход: PQ-поля игнорируются.
+        if Wallet.address_from_public_key(public_key) != utxo_address:
+            return False
+        return Wallet.verify(public_key, payload, signature)
+
     # --- Проверка транзакции ---------------------------------------------
     def validate_transaction(self, tx: Transaction, utxos=None,
-                             reserved=None) -> bool:
+                             reserved=None, pq_used=None) -> bool:
         """
         Проверяет обычную (не coinbase) транзакцию:
           * входы ссылаются на существующие непотраченные выходы;
@@ -161,6 +216,9 @@ class BHydraNode:
 
         utxos = utxos if utxos is not None else self.utxo_set()
         reserved = reserved if reserved is not None else set()
+        # Учёт одноразовых XMSS-ключей: если не передан, собираем из цепочки и
+        # мемпула (гибридную трату нельзя повторить тем же индексом).
+        pq_used = pq_used if pq_used is not None else self.pq_used_indices()
         payload = tx.signing_payload()
 
         total_in = 0.0
@@ -173,12 +231,9 @@ class BHydraNode:
             utxo = utxos.get(outpoint)
             if utxo is None:
                 return False  # вход ссылается на несуществующий/потраченный выход
-            if not inp.public_key or not inp.signature:
-                return False
-            # Публичный ключ должен соответствовать адресу расходуемого выхода.
-            if Wallet.address_from_public_key(inp.public_key) != utxo["address"]:
-                return False
-            if not Wallet.verify(inp.public_key, payload, inp.signature):
+            if not self._verify_input_auth(
+                    inp.public_key, inp.signature, inp.pq_public_key,
+                    inp.pq_signature, utxo["address"], payload, pq_used):
                 return False
             total_in += utxo["amount"]
 
@@ -237,6 +292,40 @@ class BHydraNode:
         tx.sign(wallet)
         return tx
 
+    def create_hybrid_transaction(self, hybrid_wallet, recipient: str,
+                                  amount: float, fee: float = 0.0):
+        """Собирает транзакцию с ГИБРИДНОГО (квантово-защищённого) адреса.
+
+        Подписывает каждый вход и ECDSA, и XMSS (одноразовый ключ на вход).
+        Возвращает Transaction или None — при некорректном адресе/сумме,
+        нехватке средств либо нехватке XMSS-ключей (нужен по одному на вход)."""
+        if not is_valid_address(recipient):
+            return None
+        if amount <= 0 or fee < 0:
+            return None
+        need = amount + fee
+        chosen, gathered = [], 0.0
+        for outpoint, value in self.find_spendable(hybrid_wallet.address,
+                                                   include_mempool=True):
+            chosen.append((outpoint, value))
+            gathered += value
+            if gathered >= need:
+                break
+        if gathered < need:
+            return None  # недостаточно средств
+        if hybrid_wallet.remaining < len(chosen):
+            return None  # не хватает одноразовых XMSS-ключей на все входы
+
+        vin = [TxInput(txid=op[0], index=op[1]) for op, _ in chosen]
+        vout = [TxOutput(amount=amount, address=recipient)]
+        change = gathered - need
+        if change > 0:
+            vout.append(TxOutput(amount=change, address=hybrid_wallet.address))
+
+        tx = Transaction(vin=vin, vout=vout)
+        tx.sign_hybrid(hybrid_wallet)
+        return tx
+
     # --- Майнинг ---------------------------------------------------------
     def mine_pending(self, miner_address: str):
         """Собирает транзакции из мемпула в блок и майнит его.
@@ -248,6 +337,9 @@ class BHydraNode:
         # -1 — место под coinbase, которая тоже считается транзакцией блока.
         limit = MAX_BLOCK_TRANSACTIONS - 1
         utxos = self.utxo_set()
+        # Учёт одноразовых XMSS-ключей нарастает по блоку: два входа в одном
+        # блоке не могут потратить один и тот же гибридный ключ.
+        pq_used = self.pq_used_indices(include_mempool=False)
         valid = []
         fees = 0.0
         snapshot = list(self.mempool.transactions)
@@ -256,7 +348,7 @@ class BHydraNode:
             if len(valid) >= limit:
                 leftover = snapshot[i:]  # не влезло — оставляем в мемпуле
                 break
-            if self.validate_transaction(tx, utxos=utxos):
+            if self.validate_transaction(tx, utxos=utxos, pq_used=pq_used):
                 fees += self._tx_fee(tx, utxos)
                 self._apply_tx_to_utxos(tx, utxos)
                 valid.append(tx)
@@ -311,18 +403,23 @@ class BHydraNode:
         self._rebuild_effective()  # мемпул изменился — обновляем кэш
 
     # --- Полная проверка транзакций (безопасность) ----------------------
-    def _validate_block_transactions(self, block, height, utxos) -> bool:
+    def _validate_block_transactions(self, block, height, utxos,
+                                     pq_used=None) -> bool:
         """
         Проверяет транзакции блока против набора UTXO (НЕ мутирует его):
           * первая транзакция — coinbase, остальные — нет;
           * каждый вход ссылается на непотраченный выход, подпись верна,
-            публичный ключ соответствует адресу выхода;
+            публичный ключ соответствует адресу выхода (для гибридных выходов —
+            ОБЕ подписи ECDSA+XMSS и неповторный одноразовый ключ);
           * сумма входов >= суммы выходов;
           * выпуск coinbase <= награда за блок + собранные комиссии.
 
-        Это закрывает атаки «фальшивый coinbase» (печать монет) и трату
-        чужих средств в блоках, полученных от других узлов.
+        Это закрывает атаки «фальшивый coinbase» (печать монет), трату чужих
+        средств и повторное использование одноразового XMSS-ключа. pq_used —
+        накопитель израсходованных гибридных ключей (общий на всю цепочку).
         """
+        if pq_used is None:
+            pq_used = set()
         txs = self._block_transactions(block)
         if not txs:
             return True  # генезис / блок со строковыми данными
@@ -351,11 +448,9 @@ class BHydraNode:
                     return False  # двойная трата / несуществующий выход
                 spent.add(outpoint)
                 utxo = utxos[outpoint]
-                if not inp.public_key or not inp.signature:
-                    return False
-                if Wallet.address_from_public_key(inp.public_key) != utxo["address"]:
-                    return False
-                if not Wallet.verify(inp.public_key, payload, inp.signature):
+                if not self._verify_input_auth(
+                        inp.public_key, inp.signature, inp.pq_public_key,
+                        inp.pq_signature, utxo["address"], payload, pq_used):
                     return False
                 total_in += utxo["amount"]
             if total_in + _EPS < tx.total_output:
@@ -385,8 +480,10 @@ class BHydraNode:
         if blockchain.last_block.timestamp > time.time() + MAX_FUTURE_DRIFT:
             return False
         utxos: dict = {}
+        pq_used: set = set()   # израсходованные XMSS-ключи на всю цепочку
         for height, block in enumerate(blockchain.chain):
-            if not self._validate_block_transactions(block, height, utxos):
+            if not self._validate_block_transactions(block, height, utxos,
+                                                     pq_used=pq_used):
                 return False
             self._apply_block_to_utxos(block, utxos)
         return True
@@ -415,8 +512,11 @@ class BHydraNode:
             return False
         if int(block.hash, 16) > block.target:
             return False
-        # Проверка транзакций против текущего набора UTXO.
-        if not self._validate_block_transactions(block, block.index, self.utxo_set()):
+        # Проверка транзакций против текущего набора UTXO + учёт уже
+        # израсходованных гибридных ключей во всей цепочке.
+        if not self._validate_block_transactions(
+                block, block.index, self.utxo_set(),
+                pq_used=self.pq_used_indices(include_mempool=False)):
             return False
         self.blockchain.chain.append(block)
         self._prune_mempool()

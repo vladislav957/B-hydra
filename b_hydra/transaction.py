@@ -50,11 +50,15 @@ class TxOutput:
 class TxInput:
     """Вход транзакции: ссылка на конкретный выход (txid, index) + подпись."""
 
-    def __init__(self, txid, index, public_key=None, signature=None):
+    def __init__(self, txid, index, public_key=None, signature=None,
+                 pq_public_key=None, pq_signature=None):
         self.txid = txid            # id транзакции, чей выход расходуется
         self.index = index          # номер выхода в той транзакции (vout)
-        self.public_key = public_key  # hex публичного ключа владельца
-        self.signature = signature    # hex подписи входа
+        self.public_key = public_key  # hex ECDSA-публичного ключа владельца
+        self.signature = signature    # hex ECDSA-подписи входа
+        # Пост-квантовая часть (только для гибридных входов):
+        self.pq_public_key = pq_public_key   # XMSS-корень (hex) владельца
+        self.pq_signature = pq_signature     # XMSS-подпись (dict) или None
 
     @property
     def outpoint(self):
@@ -62,12 +66,18 @@ class TxInput:
         return (self.txid, self.index)
 
     def to_dict(self):
-        return {
+        d = {
             "txid": self.txid,
             "index": self.index,
             "public_key": self.public_key,
             "signature": self.signature,
         }
+        # PQ-поля пишем только у гибридных входов — обычные tx не меняются
+        # (txid и совместимость сериализации сохранены).
+        if self.pq_public_key is not None or self.pq_signature is not None:
+            d["pq_public_key"] = self.pq_public_key
+            d["pq_signature"] = self.pq_signature
+        return d
 
     @classmethod
     def from_dict(cls, data):
@@ -76,6 +86,8 @@ class TxInput:
             index=data["index"],
             public_key=data.get("public_key"),
             signature=data.get("signature"),
+            pq_public_key=data.get("pq_public_key"),
+            pq_signature=data.get("pq_signature"),
         )
 
     def __repr__(self):
@@ -133,12 +145,25 @@ class Transaction:
 
     # --- Подпись ---------------------------------------------------------
     def sign(self, wallet):
-        """Подписывает все входы транзакции кошельком-владельцем."""
+        """Подписывает все входы транзакции кошельком-владельцем (ECDSA)."""
         payload = self.signing_payload()
         sig = wallet.sign(payload)
         for inp in self.vin:
             inp.public_key = wallet.public_key_hex
             inp.signature = sig
+        return self
+
+    def sign_hybrid(self, hybrid_wallet):
+        """Подписывает входы ОБЕИМИ схемами (ECDSA + XMSS) — для трат с
+        гибридного адреса. Каждый вход тратит один одноразовый XMSS-ключ,
+        поэтому на входы уходят РАЗНЫЕ подписи (индексы не переиспользуются)."""
+        payload = self.signing_payload()
+        for inp in self.vin:
+            ecdsa_sig, pq_sig = hybrid_wallet.sign(payload)
+            inp.public_key = hybrid_wallet.ecdsa_public_key_hex
+            inp.signature = ecdsa_sig
+            inp.pq_public_key = hybrid_wallet.pq_public_key
+            inp.pq_signature = pq_sig
         return self
 
     @property

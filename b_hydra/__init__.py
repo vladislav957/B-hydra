@@ -21,7 +21,7 @@ from __future__ import annotations
 from .blockchain import Block, Blockchain
 from .contract import ContractManager, verify_cheque
 from .merkle import MerkleTree, merkle_proof, merkle_root, verify_proof
-from .pqcrypto import MerkleSigner, QuantumWallet
+from .pqcrypto import HybridWallet, MerkleSigner, QuantumWallet
 from .node import BHydraNode
 from .transaction import (
     Transaction,
@@ -51,6 +51,7 @@ __all__ = [
     "verify_proof",
     "QuantumWallet",
     "MerkleSigner",
+    "HybridWallet",
 ]
 
 __version__ = "0.0.2"

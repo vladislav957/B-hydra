@@ -294,6 +294,63 @@ class QuantumWallet:
         return MerkleSigner.verify(self.public_key, message, sig)
 
 
+class HybridWallet:
+    """Гибридный кошелёк: ECDSA secp256k1 + пост-квантовая XMSS-подпись.
+
+    Адрес привязан к ОБОИМ ключам, и трата требует ОБЕ подписи. Квантовый
+    компьютер ломает лишь ECDSA (алгоритмом Шора), а XMSS на хешах устоит —
+    поэтому монеты на гибридном адресе остаются недоступны атакующему. Это
+    рекомендованная отраслью схема перехода: рабочая ECDSA не выбрасывается,
+    квантовая защита добавляется поверх.
+
+    XMSS-ключи одноразовые (2^height подписей), поэтому кошелёк следит за
+    остатком, а узел — за израсходованными индексами (учёт в консенсусе).
+    """
+
+    def __init__(self, ecdsa_wallet=None, height: int = 8,
+                 seed: bytes | None = None, strong: bool = False):
+        from .wallet import generate_wallet
+        self.ecdsa = ecdsa_wallet or generate_wallet()
+        self.signer = MerkleSigner(height=height, seed=seed,
+                                   params=P512 if strong else P256)
+
+    @property
+    def ecdsa_public_key_hex(self) -> str:
+        return self.ecdsa.public_key_hex
+
+    @property
+    def pq_public_key(self) -> str:
+        """Публичный пост-квантовый ключ (корень дерева XMSS)."""
+        return self.signer.public_key
+
+    @property
+    def address(self) -> str:
+        """Гибридный адрес BHY… (версия 0x2f), отпечаток обоих ключей."""
+        from .wallet import hybrid_address
+        return hybrid_address(self.ecdsa.public_key_bytes, self.signer.public_key)
+
+    @property
+    def remaining(self) -> int:
+        """Сколько трат ещё доступно (одноразовость XMSS-ключей)."""
+        return self.signer.remaining
+
+    def sign(self, payload: bytes):
+        """Подписывает байты обеими схемами → (ecdsa_sig_hex, pq_sig_dict)."""
+        if isinstance(payload, str):
+            payload = payload.encode("utf-8")
+        return self.ecdsa.sign(payload), self.signer.sign(payload)
+
+    @staticmethod
+    def verify(ecdsa_pub_hex: str, pq_root: str, payload: bytes,
+               ecdsa_sig: str, pq_sig: dict) -> bool:
+        """Проверяет ОБЕ подписи гибридного входа (ECDSA + XMSS)."""
+        from .wallet import Wallet
+        if isinstance(payload, str):
+            payload = payload.encode("utf-8")
+        return (Wallet.verify(ecdsa_pub_hex, payload, ecdsa_sig)
+                and MerkleSigner.verify(pq_root, payload, pq_sig))
+
+
 if __name__ == "__main__":
     print("Пост-квантовые подписи B-hydra (на нашем SHA «с нуля»)\n")
 

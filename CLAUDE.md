@@ -12,7 +12,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 pip install pytest                            # единственная dev-зависимость
-python -m pytest -q                           # 157 тестов — держать зелёными
+python -m pytest -q                           # 165 тестов — держать зелёными
 python -m pytest tests/test_node.py -q        # один файл
 python -m pytest tests/test_node.py -k mempool -q   # один тест по имени
 
@@ -116,8 +116,16 @@ python P2P.py --demo                          # демо-сеть из трёх 
   устойчивы: Шор ломает ECDSA, но не хеши; Гровер лишь вдвое ослабляет.
   Два режима (оба наших хеша): `P256` (элементы SHA-256, 128 бит, по умолчанию,
   компактно) и `P512`/`strong=True` (SHA-512, 256 бит даже после Гровера).
-  Подписи с СОСТОЯНИЕМ (ключ WOTS одноразовый) — для интеграции в консенсус
-  нужен учёт индексов. Рабочая ECDSA-цепочка не тронута.
+  Подписи с СОСТОЯНИЕМ (ключ WOTS одноразовый).
+- **Гибридные квантово-защищённые кошельки** (`HybridWallet`, В КОНСЕНСУСЕ):
+  адрес версии `0x2f` (тоже `BHY…`) привязан к ДВУМ ключам — ECDSA + XMSS-корню
+  (`hybrid_address`, `is_hybrid_address`). Трата требует ОБЕ подписи
+  (`tx.sign_hybrid`, `node.create_hybrid_transaction`); узел проверяет их в
+  `_verify_input_auth` и ведёт учёт израсходованных одноразовых XMSS-ключей
+  (`node.pq_used_indices`, накопитель `pq_used` в `validate_transaction` /
+  `mine_pending` / `_validate_block_transactions` / `_validate_chain`).
+  Квант ломает лишь ECDSA — монеты на гибридном адресе недоступны. Обычные
+  ECDSA-кошельки (`0x1f`) работают как раньше (обратная совместимость).
 - **Перед push — `python -m pytest -q` должно быть зелёным** (152/152).
 - Коммиты по-русски, осмысленные; заканчиваются трейлерами
   `Co-Authored-By:` и `Claude-Session:`.
