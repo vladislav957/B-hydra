@@ -12,7 +12,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 pip install pytest                            # единственная dev-зависимость
-python -m pytest -q                           # 132 теста — держать зелёными
+python -m pytest -q                           # 165 тестов — держать зелёными
 python -m pytest tests/test_node.py -q        # один файл
 python -m pytest tests/test_node.py -k mempool -q   # один тест по имени
 
@@ -37,6 +37,7 @@ python P2P.py --demo                          # демо-сеть из трёх 
 | `blockchain.py` | цепочка, блоки, PoW-валидация, ретаргет, halving, `total_work` |
 | `transaction.py` | UTXO: `TxInput`/`TxOutput`/`Transaction`, `TransactionPool` (мемпул) |
 | `wallet.py` | ECDSA secp256k1 (свой на Python + опц. нативный бэкенд), адреса |
+| `pqcrypto.py` | пост-квантовые хеш-подписи: Lamport, WOTS, XMSS-lite, `QuantumWallet` (экспериментально) |
 | `hashing.py`, `sha2.py` | SHA-256/512 с нуля + подключаемый бэкенд |
 | `hashcash.py`, `economics.py` | proof-of-work, награда/эмиссия/halving |
 | `merkle.py`, `qrcode_gen.py` | дерево Меркла (+ SPV-доказательства), QR с нуля |
@@ -108,7 +109,24 @@ python P2P.py --demo                          # демо-сеть из трёх 
   включения (SPV): `merkle_proof`/`verify_proof`, `node.merkle_proof(txid)`,
   REST `GET /api/proof/<txid>`. CVE-2012-2459 закрыт запретом дублей txid в
   блоке (`has_duplicate_promotion` помечает дерево с дублированием).
-- **Перед push — `python -m pytest -q` должно быть зелёным** (132/132).
+- **Пост-квантовая крипта** (`pqcrypto.py`, экспериментально, НЕ в консенсусе):
+  хеш-подписи на нашем SHA — Lamport (OTS), WOTS (Winternitz OTS + контрольная
+  сумма), XMSS-lite (дерево Меркла над WOTS-ключами → многоразовая подпись,
+  переиспользует `merkle.py`), `QuantumWallet` (адрес `BHYQ…`). Квантово-
+  устойчивы: Шор ломает ECDSA, но не хеши; Гровер лишь вдвое ослабляет.
+  Два режима (оба наших хеша): `P256` (элементы SHA-256, 128 бит, по умолчанию,
+  компактно) и `P512`/`strong=True` (SHA-512, 256 бит даже после Гровера).
+  Подписи с СОСТОЯНИЕМ (ключ WOTS одноразовый).
+- **Гибридные квантово-защищённые кошельки** (`HybridWallet`, В КОНСЕНСУСЕ):
+  адрес версии `0x2f` (тоже `BHY…`) привязан к ДВУМ ключам — ECDSA + XMSS-корню
+  (`hybrid_address`, `is_hybrid_address`). Трата требует ОБЕ подписи
+  (`tx.sign_hybrid`, `node.create_hybrid_transaction`); узел проверяет их в
+  `_verify_input_auth` и ведёт учёт израсходованных одноразовых XMSS-ключей
+  (`node.pq_used_indices`, накопитель `pq_used` в `validate_transaction` /
+  `mine_pending` / `_validate_block_transactions` / `_validate_chain`).
+  Квант ломает лишь ECDSA — монеты на гибридном адресе недоступны. Обычные
+  ECDSA-кошельки (`0x1f`) работают как раньше (обратная совместимость).
+- **Перед push — `python -m pytest -q` должно быть зелёным** (152/152).
 - Коммиты по-русски, осмысленные; заканчиваются трейлерами
   `Co-Authored-By:` и `Claude-Session:`.
 - Не хардкодить идентификатор модели в коде/коммитах/артефактах.

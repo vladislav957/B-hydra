@@ -104,16 +104,66 @@ def _ripemd160(data: bytes) -> bytes:
         return hashing.sha256_bytes(data)[:20]
 
 
-def address_from_public_key_bytes(pub_bytes: bytes) -> str:
-    """Адрес B-hydra из несжатого публичного ключа (байты)."""
-    payload = b"\x1f" + _ripemd160(hashing.sha512_bytes(pub_bytes))
+# Версии адресов (первый байт payload): обычный ECDSA и гибридный ECDSA+PQ.
+ADDR_VERSION = 0x1f            # обычный кошелёк (ECDSA secp256k1)
+HYBRID_VERSION = 0x2f         # гибридный: ECDSA + пост-квантовая XMSS-подпись
+
+
+def _address_from_payload(version: int, digest: bytes) -> str:
+    """Собирает адрес BHY… из версии и 20-байтного отпечатка ключей."""
+    payload = bytes([version]) + digest
     checksum = hashing.double_sha512(payload)[:4]
     return "BHY" + _b58encode(payload + checksum)
+
+
+def address_from_public_key_bytes(pub_bytes: bytes) -> str:
+    """Обычный адрес B-hydra из несжатого публичного ключа (байты)."""
+    return _address_from_payload(ADDR_VERSION,
+                                 _ripemd160(hashing.sha512_bytes(pub_bytes)))
 
 
 def address_from_public_key(public_key_hex: str) -> str:
     """Адрес B-hydra из публичного ключа (hex)."""
     return address_from_public_key_bytes(bytes.fromhex(public_key_hex))
+
+
+def hybrid_address(pub_bytes: bytes, pq_root_hex: str) -> str:
+    """Гибридный адрес: отпечаток ОТ ОБОИХ ключей — ECDSA-публичного и
+    XMSS-корня. Потратить с него можно только предъявив обе подписи, поэтому
+    квантовому атакующему (ломает лишь ECDSA) адрес недоступен."""
+    material = pub_bytes + bytes.fromhex(pq_root_hex)
+    return _address_from_payload(HYBRID_VERSION,
+                                 _ripemd160(hashing.sha512_bytes(material)))
+
+
+def _decode_address(address):
+    """(version, digest) из адреса или None, если строка не адрес B-hydra."""
+    if not isinstance(address, str) or not address.startswith("BHY"):
+        return None
+    body = address[3:]
+    if not body or any(ch not in _B58_ALPHABET for ch in body):
+        return None
+    try:
+        raw = _b58decode(body)
+    except ValueError:
+        return None
+    if len(raw) != 1 + 20 + 4:
+        return None
+    payload, checksum = raw[:-4], raw[-4:]
+    if hashing.double_sha512(payload)[:4] != checksum:
+        return None
+    return payload[0], payload[1:]
+
+
+def address_version(address):
+    """Версия адреса (0x1f обычный / 0x2f гибридный) или None."""
+    decoded = _decode_address(address)
+    return decoded[0] if decoded else None
+
+
+def is_hybrid_address(address) -> bool:
+    """True, если адрес гибридный (ECDSA + пост-квантовая защита)."""
+    return address_version(address) == HYBRID_VERSION
 
 
 def _b58decode(text: str) -> bytes:
@@ -131,21 +181,8 @@ def is_valid_address(address) -> bool:
     Заодно отсекает любые посторонние символы (включая HTML/JS), поэтому узел
     не принимает «адреса» с инъекциями.
     """
-    if not isinstance(address, str) or not address.startswith("BHY"):
-        return False
-    body = address[3:]
-    if not body or any(ch not in _B58_ALPHABET for ch in body):
-        return False
-    try:
-        raw = _b58decode(body)
-    except ValueError:
-        return False
-    if len(raw) != 1 + 20 + 4:                       # версия + ripemd160 + checksum
-        return False
-    payload, checksum = raw[:-4], raw[-4:]
-    if payload[0] != 0x1f:
-        return False
-    return hashing.double_sha512(payload)[:4] == checksum
+    version = address_version(address)
+    return version in (ADDR_VERSION, HYBRID_VERSION)
 
 
 # --- Подключаемое ядро проверки подписи (скорость) --------------------------
