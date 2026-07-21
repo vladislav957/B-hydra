@@ -198,6 +198,19 @@ class BHydraApp(tk.Tk):
         ttk.Label(bal_box, textvariable=self.bal_var,
                   style="Balance.TLabel").pack(anchor="e")
 
+        # Тумблер защиты от квантового компьютера: ВКЛ → кошелёк работает через
+        # гибридный (ECDSA+XMSS) адрес, ВЫКЛ → обычный ECDSA.
+        qrow = ttk.Frame(tab)
+        qrow.pack(fill="x", pady=(0, 8))
+        self.quantum_on = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            qrow, text="🛡 Защита от квантового компьютера",
+            variable=self.quantum_on, command=self._toggle_quantum,
+        ).pack(side="left")
+        self.quantum_hint = tk.StringVar()
+        ttk.Label(qrow, textvariable=self.quantum_hint,
+                  foreground="gray").pack(side="left", padx=8)
+
         btns = ttk.Frame(tab)
         btns.pack(fill="x")
         ttk.Button(btns, text="Создать кошелёк", style="Accent.TButton",
@@ -1276,7 +1289,7 @@ class BHydraApp(tk.Tk):
         messagebox.showinfo("Импорт", f"Кошелёк загружен:\n{self.wallet.address}")
 
     def _send(self) -> None:
-        if self.wallet is None:
+        if self.wallet is None and not self._quantum_active():
             return messagebox.showwarning("Кошелёк", "Сначала создайте кошелёк.")
         to = self.to_var.get().strip()
         if not to:
@@ -1300,7 +1313,9 @@ class BHydraApp(tk.Tk):
         if fee < 0:
             return messagebox.showerror("Ошибка", "Комиссия не может быть отрицательной.")
 
-        balance = self.node.get_balance(self.wallet.address)
+        quantum = self._quantum_active()
+        sender_address = self.hybrid.address if quantum else self.wallet.address
+        balance = self.node.get_balance(sender_address)
         if amount + fee > balance:
             return messagebox.showwarning(
                 "Недостаточно средств",
@@ -1308,11 +1323,21 @@ class BHydraApp(tk.Tk):
                 f"({amount:.4f} перевод + {fee:g} комиссия).\n\n"
                 "Сначала намайните монеты на свой адрес во вкладке ⛏ Майнинг.")
 
-        tx = self.node.create_transaction(self.wallet, to, amount, fee=fee)
+        if quantum:
+            if self.hybrid.remaining < 1:
+                return messagebox.showerror(
+                    "Квантовая защита",
+                    "Одноразовые XMSS-ключи исчерпаны — создайте новый "
+                    "квантовый кошелёк во вкладке 🛡 Квантовый.")
+            tx = self.node.create_hybrid_transaction(self.hybrid, to, amount, fee)
+        else:
+            tx = self.node.create_transaction(self.wallet, to, amount, fee=fee)
         if tx is None or not self.node.add_transaction(tx):
             return messagebox.showwarning(
                 "Перевод", "Не удалось создать перевод (средства уже зарезервированы "
                 "в мемпуле?). Попробуйте после майнинга.")
+        if quantum:
+            self._save_hybrid()                 # сохранить израсходованный индекс
         if self.p2p and self.p2p._running:
             self.p2p.broadcast({"type": "transaction", "transaction": tx.to_dict(),
                                 "from": [self.p2p.host, self.p2p.port]})
@@ -1321,8 +1346,10 @@ class BHydraApp(tk.Tk):
         self.status.set("Перевод отправлен в мемпул.")
         messagebox.showinfo("Перевод отправлен",
                             f"{amount:.4f} BHY → {to[:20]}…\n"
-                            f"комиссия майнеру: {fee:g} BHY\n\n"
-                            f"Транзакция в мемпуле: {tx.txid[:24]}…\n"
+                            f"комиссия майнеру: {fee:g} BHY\n"
+                            + ("подпись: ECDSA + XMSS (квантовая защита)\n"
+                               if quantum else "")
+                            + f"\nТранзакция в мемпуле: {tx.txid[:24]}…\n"
                             "Будет подтверждена при майнинге следующего блока.")
         self._refresh_status()
 
@@ -1750,7 +1777,14 @@ class BHydraApp(tk.Tk):
             messagebox.showerror("Ошибка", str(exc))
 
     def _refresh_status(self) -> None:
-        if self.wallet is not None:
+        if self._quantum_active():
+            # Кошелёк работает через гибридный (квантово-защищённый) адрес.
+            self.addr_var.set(self.hybrid.address)
+            self.priv_var.set("🔐 гибридный ключ (ECDSA + XMSS) — "
+                              "хранится в bhydra_hybrid.json")
+            self.bal_var.set(
+                f"{self.node.get_balance(self.hybrid.address):.4f} BHY")
+        elif self.wallet is not None:
             self.addr_var.set(self.wallet.address)
             self.priv_var.set(self.wallet.private_key_hex)
             self.bal_var.set(f"{self.node.get_balance(self.wallet.address):.4f} BHY")
@@ -1769,32 +1803,52 @@ class BHydraApp(tk.Tk):
         self._refresh_history()
         self._refresh_mempool()
 
-    def _refresh_protection_badge(self) -> None:
-        """Показывает в карточке кошелька статус защиты от квантового компьютера.
+    def _quantum_active(self) -> bool:
+        """Включена ли защита от кванта (кошелёк работает через гибридный)."""
+        return bool(getattr(self, "quantum_on", None)
+                    and self.quantum_on.get() and self.hybrid is not None)
 
-        Обычный ECDSA-адрес уязвим для алгоритма Шора; гибридный (ECDSA+XMSS) —
-        защищён. Бейдж честно отражает статус текущего кошелька и подсказывает
-        путь к защите."""
+    def _toggle_quantum(self) -> None:
+        """Включает/выключает защиту от квантового компьютера.
+
+        При включении кошелёк переключается на гибридный (ECDSA+XMSS) адрес —
+        при необходимости он создаётся. При выключении — обратно на ECDSA."""
+        if self.quantum_on.get():
+            if self.hybrid is None:
+                if not messagebox.askyesno(
+                        "Защита от квантового компьютера",
+                        "Включить квантовую защиту? Будет создан гибридный "
+                        "кошелёк (ECDSA + пост-квантовая XMSS-подпись).\n\n"
+                        "Это отдельный адрес — переведите на него монеты, чтобы "
+                        "они были защищены от квантового компьютера."):
+                    self.quantum_on.set(False)
+                    return
+                self.hybrid = HybridWallet(height=8)
+                self._save_hybrid()
+                if hasattr(self, "hybrid_addr"):
+                    self._refresh_hybrid()
+            self.status.set("🛡 Защита от квантового компьютера ВКЛючена.")
+        else:
+            self.status.set("Защита от квантового компьютера выключена (ECDSA).")
+        self._refresh_status()
+
+    def _refresh_protection_badge(self) -> None:
+        """Показывает в карточке кошелька статус защиты от квантового компьютера."""
         lbl = getattr(self, "protect_lbl", None)
         if lbl is None:
             return
-        from .wallet import is_hybrid_address
-        if self.wallet is None:
-            self.protect_var.set("")
-            return
-        if is_hybrid_address(self.wallet.address):
-            self.protect_var.set("🛡 квантовая защита: ECDSA + XMSS")
+        if self._quantum_active():
+            self.protect_var.set("🛡 квантовая защита ВКЛючена: ECDSA + XMSS")
             lbl.configure(style="Safe.TLabel")
-        elif getattr(self, "hybrid", None) is not None:
-            self.protect_var.set(
-                "⚠ этот кошелёк — ECDSA (уязвим для кванта) · "
-                "🛡 квантовый кошелёк создан — вкладка «Квантовый»")
-            lbl.configure(style="Warn.TLabel")
+            if hasattr(self, "quantum_hint"):
+                self.quantum_hint.set(
+                    f"активна · ключей осталось: {self.hybrid.remaining}")
         else:
             self.protect_var.set(
-                "⚠ обычная защита (ECDSA) — уязвим для квантового компьютера · "
-                "создайте 🛡 квантовый кошелёк")
+                "⚠ защита от квантового компьютера выключена (ECDSA)")
             lbl.configure(style="Warn.TLabel")
+            if hasattr(self, "quantum_hint"):
+                self.quantum_hint.set("выкл — монеты уязвимы для кванта")
 
     @staticmethod
     def _fmt_time(ts) -> str:
