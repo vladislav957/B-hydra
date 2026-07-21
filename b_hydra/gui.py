@@ -186,6 +186,11 @@ class BHydraApp(tk.Tk):
                   style="CardTitle.TLabel").pack(anchor="w")
         ttk.Label(titles, text="кошелёк · майнинг · сеть",
                   style="CardSub.TLabel").pack(anchor="w")
+        # Индикатор защиты от квантового компьютера.
+        self.protect_var = tk.StringVar()
+        self.protect_lbl = ttk.Label(titles, textvariable=self.protect_var,
+                                     style="Card.TLabel")
+        self.protect_lbl.pack(anchor="w", pady=(4, 0))
         bal_box = ttk.Frame(head, style="Card.TFrame")
         bal_box.pack(side="right")
         ttk.Label(bal_box, text="Баланс",
@@ -1702,6 +1707,11 @@ class BHydraApp(tk.Tk):
         style.configure("CardSub.TLabel", background=card, foreground=sub)
         style.configure("Balance.TLabel", background=card, foreground=balance,
                         font=("TkDefaultFont", 18, "bold"))
+        # Бейдж защиты: зелёный «защищён» / магента «уязвим для кванта».
+        style.configure("Safe.TLabel", background=card, foreground="#2ea043",
+                        font=("TkDefaultFont", 9, "bold"))
+        style.configure("Warn.TLabel", background=card, foreground=magenta,
+                        font=("TkDefaultFont", 9, "bold"))
         style.configure("Accent.TButton", background=accent,
                         foreground="#ffffff")
         style.map("Accent.TButton",
@@ -1744,6 +1754,7 @@ class BHydraApp(tk.Tk):
             self.addr_var.set(self.wallet.address)
             self.priv_var.set(self.wallet.private_key_hex)
             self.bal_var.set(f"{self.node.get_balance(self.wallet.address):.4f} BHY")
+        self._refresh_protection_badge()
         bal = (self.node.get_balance(self.wallet.address)
                if self.wallet else 0.0)
         peers = len(self.p2p.peers) if self.p2p else 0
@@ -1757,6 +1768,33 @@ class BHydraApp(tk.Tk):
             f"пиров: {peers}")
         self._refresh_history()
         self._refresh_mempool()
+
+    def _refresh_protection_badge(self) -> None:
+        """Показывает в карточке кошелька статус защиты от квантового компьютера.
+
+        Обычный ECDSA-адрес уязвим для алгоритма Шора; гибридный (ECDSA+XMSS) —
+        защищён. Бейдж честно отражает статус текущего кошелька и подсказывает
+        путь к защите."""
+        lbl = getattr(self, "protect_lbl", None)
+        if lbl is None:
+            return
+        from .wallet import is_hybrid_address
+        if self.wallet is None:
+            self.protect_var.set("")
+            return
+        if is_hybrid_address(self.wallet.address):
+            self.protect_var.set("🛡 квантовая защита: ECDSA + XMSS")
+            lbl.configure(style="Safe.TLabel")
+        elif getattr(self, "hybrid", None) is not None:
+            self.protect_var.set(
+                "⚠ этот кошелёк — ECDSA (уязвим для кванта) · "
+                "🛡 квантовый кошелёк создан — вкладка «Квантовый»")
+            lbl.configure(style="Warn.TLabel")
+        else:
+            self.protect_var.set(
+                "⚠ обычная защита (ECDSA) — уязвим для квантового компьютера · "
+                "создайте 🛡 квантовый кошелёк")
+            lbl.configure(style="Warn.TLabel")
 
     @staticmethod
     def _fmt_time(ts) -> str:
