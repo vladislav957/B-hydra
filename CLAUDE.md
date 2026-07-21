@@ -12,7 +12,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 pip install pytest                            # единственная dev-зависимость
-python -m pytest -q                           # 181 тест — держать зелёными
+python -m pytest -q                           # 187 тестов — держать зелёными
 python -m pytest tests/test_node.py -q        # один файл
 python -m pytest tests/test_node.py -k mempool -q   # один тест по имени
 
@@ -42,7 +42,7 @@ python P2P.py --demo                          # демо-сеть из трёх 
 | `hashcash.py`, `economics.py` | proof-of-work, награда/эмиссия/halving |
 | `merkle.py`, `qrcode_gen.py` | дерево Меркла (+ SPV-доказательства), QR с нуля |
 | `contract.py` | `ContractManager`: эскроу и смарт-чеки НА ЦЕПОЧКЕ (+ учебные in-memory классы) |
-| `node.py` | узел: блокчейн + мемпул + кэш UTXO, майнинг, переводы |
+| `node.py` | узел: блокчейн + мемпул + инкрементальные кэши UTXO/tx-индекса, майнинг, переводы |
 | `blockdag.py` | blockDAG (GHOSTDAG-lite) + гибрид «DAG→PoW→линейная цепь» (экспериментально) |
 | `p2p.py`, `tcp.py` | gossip-сеть, обмен пирами, фрейминг сообщений |
 | `api.py`, `cli.py`, `gui.py`, `mobile_client.py` | REST/HTTP, CLI, tkinter-GUI, моб. клиент |
@@ -140,7 +140,10 @@ python P2P.py --demo                          # демо-сеть из трёх 
 REST-эндпоинты `/api/contract/...`).
 
 Дальше (по приоритету пользователя — «сначала скорость, потом DAG»):
-1. скорость — сделано частично (ECDSA); можно добавить кэш проверок и параллелизм;
+1. скорость — сделано: ECDSA-ускоритель + инкрементальный кэш UTXO
+   (`utxo_set` применяет только новые блоки, реорг → пересборка; попутно
+   tx-индекс O(1) для find_transaction/history/proof и PQ-учёт цепочки);
+   осталось: кэш проверок подписей, параллелизм;
 2. **blockDAG** (GHOSTDAG-lite) — СДЕЛАНО как отдельный модуль `blockdag.py`
    (не трогает линейную цепочку): блок ссылается на все вершины-tips (много
    родителей), k-кластерная раскраска синий/красный, blue_score вместо высоты,

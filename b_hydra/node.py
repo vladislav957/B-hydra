@@ -46,26 +46,43 @@ class BHydraNode:
         self.mempool = TransactionPool(max_size=mempool_size)
         self._rebuild_effective()
 
-    # --- Набор UTXO ------------------------------------------------------
+    # --- Набор UTXO (инкрементальный кэш) --------------------------------
     def utxo_set(self):
         """
-        Строит набор непотраченных выходов по всей цепочке.
+        Набор непотраченных выходов по всей цепочке:
+        dict (txid, index) -> {"amount", "address"}.
 
-        Возвращает dict: (txid, index) -> {"amount", "address"}.
+        КЭШИРУЕТСЯ инкрементально: при росте цепочки применяются только новые
+        блоки; полная пересборка — лишь при реорганизации (цепочка заменена).
+        Заодно ведёт индекс транзакций txid → (блок, tx) — им пользуются
+        find_transaction / address_history / merkle_proof — и учёт
+        израсходованных PQ-ключей цепочки. Возвращает КОПИЮ (вызывающие,
+        например майнинг, мутируют её как рабочий набор).
         """
-        utxos = {}
-        for block in self.blockchain.chain:
+        chain = self.blockchain.chain
+        done = getattr(self, "_confirmed_height", None)
+        if (done is None or done > len(chain)
+                or (done > 0 and chain[done - 1].hash != self._confirmed_tip)):
+            # Первая инициализация или реорганизация — пересборка с нуля.
+            self._confirmed = {}
+            self._tx_index = {}
+            self._pq_chain_used = set()
+            done = 0
+        for block in chain[done:]:            # только НОВЫЕ блоки
             for tx in self._block_transactions(block):
-                txid = tx["txid"]
-                # Сначала удаляем потраченные входами выходы.
+                self._tx_index[tx["txid"]] = (block.index, tx)
                 for inp in tx.get("vin", []):
-                    utxos.pop((inp["txid"], inp["index"]), None)
-                # Затем добавляем новые выходы.
+                    self._confirmed.pop((inp["txid"], inp["index"]), None)
+                    pq = inp.get("pq_signature")
+                    root = inp.get("pq_public_key")
+                    if pq and root is not None:
+                        self._pq_chain_used.add((root, pq.get("index")))
                 for index, out in enumerate(tx.get("vout", [])):
-                    utxos[(txid, index)] = {
-                        "amount": out["amount"], "address": out["address"]
-                    }
-        return utxos
+                    self._confirmed[(tx["txid"], index)] = {
+                        "amount": out["amount"], "address": out["address"]}
+        self._confirmed_height = len(chain)
+        self._confirmed_tip = chain[-1].hash if chain else None
+        return dict(self._confirmed)
 
     def get_balance(self, address: str) -> float:
         """Баланс адреса = сумма его непотраченных выходов (UTXO)."""
@@ -146,15 +163,10 @@ class BHydraNode:
         """Множество израсходованных одноразовых XMSS-ключей (root, index).
 
         Учёт в консенсусе: один WOTS/XMSS-ключ нельзя использовать дважды —
-        повтор ослабляет подпись. Собирается по всей цепочке (и мемпулу),
-        чтобы гибридную трату нельзя было повторить тем же индексом."""
-        used = set()
-        for block in self.blockchain.chain:
-            for tx in self._block_transactions(block):
-                for inp in tx.get("vin", []):
-                    pq, root = inp.get("pq_signature"), inp.get("pq_public_key")
-                    if pq and root is not None:
-                        used.add((root, pq.get("index")))
+        повтор ослабляет подпись. Часть по цепочке берётся из инкрементального
+        кэша (utxo_set ведёт её попутно), мемпул добавляется вживую."""
+        self.utxo_set()                       # актуализировать кэш цепочки
+        used = set(self._pq_chain_used)
         if include_mempool:
             for tx in self.mempool.transactions:
                 for inp in tx.vin:
@@ -549,21 +561,21 @@ class BHydraNode:
         return None
 
     def _resolve_output(self, txid, index):
-        """Находит выход (txid, index) в цепочке — для подписи входов."""
-        for block in self.blockchain.chain:
-            for tx in self._block_transactions(block):
-                if tx["txid"] == txid:
-                    vout = tx.get("vout", [])
-                    if 0 <= index < len(vout):
-                        return vout[index]
+        """Находит выход (txid, index) в цепочке — по индексу транзакций O(1)."""
+        self.utxo_set()                       # актуализировать индекс
+        found = self._tx_index.get(txid)
+        if found:
+            vout = found[1].get("vout", [])
+            if 0 <= index < len(vout):
+                return vout[index]
         return None
 
     def find_transaction(self, txid: str):
-        """Транзакция по txid вместе с номером блока, или None."""
-        for block in self.blockchain.chain:
-            for tx in self._block_transactions(block):
-                if tx["txid"] == txid:
-                    return {"transaction": tx, "block_index": block.index}
+        """Транзакция по txid вместе с номером блока, или None (индекс O(1))."""
+        self.utxo_set()                       # актуализировать индекс
+        found = self._tx_index.get(txid)
+        if found:
+            return {"transaction": found[1], "block_index": found[0]}
         return None
 
     def merkle_proof(self, txid: str):
@@ -573,20 +585,24 @@ class BHydraNode:
         по нему verify_proof() подтверждает включение без всего блока — или
         None, если транзакция не найдена в цепочке.
         """
-        for block in self.blockchain.chain:
-            txs = self._block_transactions(block)
-            for index, tx in enumerate(txs):
-                if tx.get("txid") == txid:
-                    leaf = sha512d(str(tx).encode("utf-8")).hex()
-                    return {
-                        "txid": txid,
-                        "block_index": block.index,
-                        "merkle_root": block.merkle_root,
-                        "leaf": leaf,
-                        "index": index,
-                        "tx_count": len(txs),
-                        "proof": block.merkle_proof(index),
-                    }
+        self.utxo_set()                       # актуализировать индекс
+        found = self._tx_index.get(txid)
+        if found is None:
+            return None
+        block = self.blockchain.chain[found[0]]
+        txs = self._block_transactions(block)
+        for index, tx in enumerate(txs):      # скан только ОДНОГО блока
+            if tx.get("txid") == txid:
+                leaf = sha512d(str(tx).encode("utf-8")).hex()
+                return {
+                    "txid": txid,
+                    "block_index": block.index,
+                    "merkle_root": block.merkle_root,
+                    "leaf": leaf,
+                    "index": index,
+                    "tx_count": len(txs),
+                    "proof": block.merkle_proof(index),
+                }
         return None
 
     def address_history(self, address: str):
