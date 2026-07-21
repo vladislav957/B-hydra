@@ -146,3 +146,55 @@ def test_signatures_identical_on_pure_and_fast_sha():
         assert results[0][2] is True
     finally:
         hashing.use_pure_sha(original)
+
+
+# --- Параметризация: режим SHA-512 (P512) -----------------------------------
+
+def test_wots_p512_sign_verify():
+    from b_hydra.pqcrypto import P512
+    sk, pk = wots_keygen(seed=b"w512", params=P512)
+    msg = b"paranoid transfer"
+    sig = wots_sign(sk, msg, params=P512)
+    assert wots_verify(pk, msg, sig, params=P512)
+    assert len(sig) == P512["len1"] + P512["len2"]          # 131 цепочка
+    assert all(len(s) == 64 for s in sig)                   # элементы по 64 байта
+    # чужое сообщение не проходит (контрольная сумма)
+    assert not wots_verify(pk, b"other", sig, params=P512)
+
+
+def test_lamport_p512_has_512_pairs():
+    from b_hydra.pqcrypto import P512
+    sk, pk = lamport_keygen(seed=b"l512", params=P512)
+    sig = lamport_sign(sk, b"data", params=P512)
+    assert len(sig) == 512                                  # бит на каждый бит SHA-512
+    assert lamport_verify(pk, b"data", sig, params=P512)
+
+
+def test_xmss_p512_roundtrip():
+    from b_hydra.pqcrypto import P512
+    signer = MerkleSigner(height=2, seed=b"x512", params=P512)
+    root = signer.public_key
+    for i in range(4):
+        msg = f"tx-{i}".encode()
+        sig = signer.sign(msg)
+        assert sig["alg"] == "sha512"
+        assert MerkleSigner.verify(root, msg, sig)
+        assert not MerkleSigner.verify(root, b"nope", sig)
+
+
+def test_quantum_wallet_strong_mode():
+    strong = QuantumWallet(height=2, seed=b"qs", strong=True)
+    weak = QuantumWallet(height=2, seed=b"qs", strong=False)
+    assert strong.address.startswith("BHYQ")
+    assert strong.address != weak.address                  # разный хеш → разный ключ
+    sig = strong.sign("оплата")
+    assert sig["alg"] == "sha512"
+    assert strong.verify("оплата", sig)
+
+
+def test_p256_and_p512_produce_different_signatures():
+    from b_hydra.pqcrypto import P256, P512
+    a, _ = wots_keygen(seed=b"same-seed", params=P256)
+    b, _ = wots_keygen(seed=b"same-seed", params=P512)
+    # один seed, но разный хеш → разные ключи и разная длина
+    assert len(a) != len(b)
