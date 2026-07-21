@@ -12,7 +12,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 pip install pytest                            # единственная dev-зависимость
-python -m pytest -q                           # 175 тестов — держать зелёными
+python -m pytest -q                           # 181 тест — держать зелёными
 python -m pytest tests/test_node.py -q        # один файл
 python -m pytest tests/test_node.py -k mempool -q   # один тест по имени
 
@@ -43,7 +43,7 @@ python P2P.py --demo                          # демо-сеть из трёх 
 | `merkle.py`, `qrcode_gen.py` | дерево Меркла (+ SPV-доказательства), QR с нуля |
 | `contract.py` | `ContractManager`: эскроу и смарт-чеки НА ЦЕПОЧКЕ (+ учебные in-memory классы) |
 | `node.py` | узел: блокчейн + мемпул + кэш UTXO, майнинг, переводы |
-| `blockdag.py` | blockDAG (GHOSTDAG-lite): много родителей, раскраска, порядок (экспериментально) |
+| `blockdag.py` | blockDAG (GHOSTDAG-lite) + гибрид «DAG→PoW→линейная цепь» (экспериментально) |
 | `p2p.py`, `tcp.py` | gossip-сеть, обмен пирами, фрейминг сообщений |
 | `api.py`, `cli.py`, `gui.py`, `mobile_client.py` | REST/HTTP, CLI, tkinter-GUI, моб. клиент |
 
@@ -144,7 +144,10 @@ REST-эндпоинты `/api/contract/...`).
 2. **blockDAG** (GHOSTDAG-lite) — СДЕЛАНО как отдельный модуль `blockdag.py`
    (не трогает линейную цепочку): блок ссылается на все вершины-tips (много
    родителей), k-кластерная раскраска синий/красный, blue_score вместо высоты,
-   тотальный порядок. Улучшает число блоков/с в сети, но не ускоряет саму
-   крипту. Дальше: привязать реальные транзакции и дедуп по синему набору.
+   тотальный порядок. Плюс **гибрид** `HybridDagChain`: блоки накапливаются в
+   DAG, а PoW-нонс (`Checkpoint.mine`) финализирует их в линейную контрольную
+   точку и схлопывает DAG (новый якорь — хеш точки). Цепочка точек = линейный
+   PoW-блокчейн из DAG-пачек. Улучшает блоки/с, крипту не ускоряет. Дальше:
+   привязать реальные UTXO-транзакции и дедуп по синему набору.
 3. настоящая браузерная подпись — требует канонической сериализации транзакции
    (одинаковой в Python и JS) + secp256k1 на JS.

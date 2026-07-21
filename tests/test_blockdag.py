@@ -130,3 +130,82 @@ def test_stats_throughput_gain():
     s = dag.stats()
     assert s["blocks"] == 1 + rounds * width        # генезис + все блоки
     assert s["blue"] + s["red"] == s["blocks"]
+
+
+# --- Гибрид: DAG накапливает, PoW финализирует в линейную цепь ---------------
+
+from b_hydra.blockdag import HybridDagChain, Checkpoint, CHECKPOINT_GENESIS
+
+
+def test_finalize_seals_dag_into_checkpoint():
+    """«Майнер нашёл нонс» → текущий DAG запечатывается контрольной точкой PoW."""
+    chain = HybridDagChain(k=3, difficulty=1)
+    base = chain.dag.tips()
+    for w in range(3):
+        chain.add_block(payload=f"b{w}", parents=base)   # параллельные в DAG
+    assert chain.pending == 3
+    cp = chain.finalize(miner="BHYminer")
+    assert cp.is_sealed()                                # PoW корректен
+    assert int(cp.hash, 16) <= cp.target
+    assert len(cp.blocks) == 3                           # все блоки DAG в точке
+    assert chain.pending == 0                            # DAG схлопнут
+
+
+def test_checkpoints_form_linear_chain():
+    """Цепочка контрольных точек линейна: prev_hash каждой = hash предыдущей."""
+    chain = HybridDagChain(k=3, difficulty=1)
+    for r in range(4):
+        base = chain.dag.tips()
+        for w in range(2):
+            chain.add_block(payload=f"r{r}b{w}", parents=base)
+        chain.finalize()
+    assert chain.height == 4
+    assert chain.is_valid()
+    assert chain.checkpoints[0].prev_hash == CHECKPOINT_GENESIS
+    for prev, cur in zip(chain.checkpoints, chain.checkpoints[1:]):
+        assert cur.prev_hash == prev.hash                # связность цепи
+        assert cur.index == prev.index + 1
+
+
+def test_dag_reanchors_on_checkpoint_hash():
+    """После финализации новый DAG строится от хеша контрольной точки."""
+    chain = HybridDagChain(k=3, difficulty=1)
+    chain.add_block(payload="x")
+    cp = chain.finalize()
+    assert chain.dag.genesis_id == cp.hash               # новый якорь = хеш точки
+    b = chain.add_block(payload="y")                     # продолжаем строить DAG
+    assert cp.hash in chain.dag.blocks[b.id].parents or chain.dag.genesis_id == cp.hash
+
+
+def test_linear_order_accumulates_all_finalized():
+    chain = HybridDagChain(k=3, difficulty=1)
+    total = 0
+    for r in range(3):
+        base = chain.dag.tips()
+        for w in range(3):
+            chain.add_block(payload=f"r{r}b{w}", parents=base)
+            total += 1
+        chain.finalize()
+    order = chain.linear_order()
+    assert len(order) == total                           # все блоки в порядке
+    assert len(set(order)) == total                      # без дублей
+
+
+def test_tampered_checkpoint_detected():
+    """Подмена запечатанной точки ломает проверку (PoW/связность)."""
+    chain = HybridDagChain(k=3, difficulty=1)
+    chain.add_block(payload="a")
+    chain.finalize()
+    chain.add_block(payload="b")
+    chain.finalize()
+    assert chain.is_valid()
+    chain.checkpoints[1].prev_hash = "0" * 128           # разрыв связи
+    assert not chain.is_valid()
+
+
+def test_finalize_empty_dag_still_seals():
+    """Финализация без накопленных блоков даёт валидную (пустую) точку."""
+    chain = HybridDagChain(k=3, difficulty=1)
+    cp = chain.finalize()
+    assert cp.is_sealed() and cp.blocks == []
+    assert chain.is_valid()

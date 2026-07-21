@@ -33,8 +33,11 @@ if __name__ == "__main__" and __package__ in (None, ""):
     __package__ = "b_hydra"
 
 from . import hashing
+from .blockchain import genesis_target_for
+from .merkle import merkle_root
 
 GENESIS_ID = "genesis"
+CHECKPOINT_GENESIS = "0" * 128       # prev_hash первой контрольной точки
 
 
 class DagBlock:
@@ -61,17 +64,18 @@ class BlockDAG:
     Чем больше k, тем шире «честная» одновременность считается нормальной.
     """
 
-    def __init__(self, k: int = 3):
+    def __init__(self, k: int = 3, genesis_id: str = GENESIS_ID):
         self.k = k
+        self.genesis_id = genesis_id       # якорь: обычный генезис или хеш чекпойнта
         self.blocks: dict[str, DagBlock] = {}
         self._past: dict[str, frozenset] = {}
         self._referenced: set = set()      # id, на которые кто-то ссылается
         self._counter = 0
-        genesis = DagBlock(GENESIS_ID, [], payload="genesis")
+        genesis = DagBlock(genesis_id, [], payload="genesis")
         genesis.blue_score = 0
-        genesis.mergeset_blues = [GENESIS_ID]
-        self.blocks[GENESIS_ID] = genesis
-        self._past[GENESIS_ID] = frozenset()
+        genesis.mergeset_blues = [genesis_id]
+        self.blocks[genesis_id] = genesis
+        self._past[genesis_id] = frozenset()
 
     # --- Построение ------------------------------------------------------
     def tips(self):
@@ -256,6 +260,120 @@ class BlockDAG:
         }
 
 
+class Checkpoint:
+    """Контрольная точка: линейный сегмент цепочки, запечатанный PoW.
+
+    Когда майнер находит нонс, текущий DAG упорядочивается GHOSTDAG'ом и
+    «схлопывается» в эту точку. Цепочка контрольных точек (prev_hash → hash,
+    подтверждённая PoW) — линейный блокчейн из DAG-пачек.
+    """
+
+    def __init__(self, index, prev_hash, blocks, difficulty, miner):
+        self.index = index
+        self.prev_hash = prev_hash
+        self.blocks = blocks               # [(block_id, payload)] в порядке GHOSTDAG
+        self.difficulty = difficulty
+        self.target = genesis_target_for(difficulty)
+        self.miner = miner
+        # Меркл-корень порядка — фиксирует ровно эту линеаризацию DAG.
+        self.order_root = merkle_root([bid for bid, _ in blocks] or ["empty"])
+        self.nonce = 0
+        self.attempts = 0
+        self.hash = None
+
+    def _header(self, nonce):
+        return (f"{self.index}{self.prev_hash}{self.order_root}"
+                f"{self.miner}{nonce}")
+
+    def mine(self):
+        """Perebor nonce, пока хеш заголовка (как число) не станет ≤ target.
+
+        Это и есть тот самый «майнер нашёл нонс» — момент финализации DAG."""
+        nonce = 0
+        while True:
+            h = hashing.sha512(self._header(nonce))
+            self.attempts = nonce + 1
+            if int(h, 16) <= self.target:
+                self.nonce = nonce
+                self.hash = h
+                return self
+            nonce += 1
+
+    def is_sealed(self) -> bool:
+        """PoW корректен и заголовок соответствует хешу."""
+        return (self.hash is not None
+                and self.hash == hashing.sha512(self._header(self.nonce))
+                and int(self.hash, 16) <= self.target)
+
+
+class HybridDagChain:
+    """Гибрид: блоки живут в DAG, а PoW-нонс финализирует их в линейную цепь.
+
+    Между контрольными точками блоки накапливаются в DAG (параллельно, без
+    сирот). `finalize()` = «майнер нашёл нонс»: текущий DAG упорядочивается,
+    запечатывается контрольной точкой и схлопывается — новый DAG продолжает
+    строиться от хеша этой точки. Так пропускная способность DAG сочетается с
+    линейным, PoW-подтверждённым порядком.
+    """
+
+    def __init__(self, k: int = 3, difficulty: int = 2):
+        self.k = k
+        self.difficulty = difficulty
+        self.checkpoints: list[Checkpoint] = []
+        self.dag = BlockDAG(k=k)           # текущий накопительный DAG
+
+    @property
+    def height(self) -> int:
+        return len(self.checkpoints)
+
+    @property
+    def pending(self) -> int:
+        """Блоков в DAG сверх якоря (ждут финализации)."""
+        return len(self.dag.blocks) - 1
+
+    def add_block(self, payload=None, parents=None) -> DagBlock:
+        """Добавляет блок в текущий (накопительный) DAG."""
+        return self.dag.add_block(parents, payload)
+
+    def finalize(self, miner: str = "miner") -> Checkpoint:
+        """«Майнер нашёл нонс»: упорядочивает DAG и запечатывает контрольную
+        точку PoW, затем схлопывает DAG (новый якорь — хеш точки)."""
+        anchor = self.dag.genesis_id
+        ordered = [(bid, self.dag.blocks[bid].payload)
+                   for bid in self.dag.order() if bid != anchor]
+        prev = self.checkpoints[-1].hash if self.checkpoints else CHECKPOINT_GENESIS
+        cp = Checkpoint(self.height, prev, ordered, self.difficulty, miner)
+        cp.mine()
+        self.checkpoints.append(cp)
+        # Схлопываем DAG: новый якорь — хеш контрольной точки.
+        self.dag = BlockDAG(k=self.k, genesis_id=cp.hash)
+        return cp
+
+    def linear_order(self):
+        """Полный линейный порядок блоков по всем финализированным точкам."""
+        order = []
+        for cp in self.checkpoints:
+            order.extend(bid for bid, _ in cp.blocks)
+        return order
+
+    def is_valid(self) -> bool:
+        """Цепочка контрольных точек связна (prev_hash) и запечатана PoW."""
+        prev = CHECKPOINT_GENESIS
+        for i, cp in enumerate(self.checkpoints):
+            if cp.index != i or cp.prev_hash != prev or not cp.is_sealed():
+                return False
+            prev = cp.hash
+        return True
+
+    def stats(self) -> dict:
+        return {
+            "checkpoints": self.height,
+            "pending_dag": self.pending,
+            "finalized_blocks": sum(len(cp.blocks) for cp in self.checkpoints),
+            "difficulty": self.difficulty,
+        }
+
+
 if __name__ == "__main__":
     # Демонстрация: параллельные блоки, которые линейная цепь осиротила бы.
     dag = BlockDAG(k=3)
@@ -277,3 +395,18 @@ if __name__ == "__main__":
     print(f"  ускорение по блокам/раунд: ×{width}")
     print(f"  голова (blue_score): {s['selected_tip_blue_score']}")
     print(f"  длина порядка: {len(dag.order())} (тотальный порядок построен)")
+
+    # Гибрид: DAG накапливает блоки, PoW-нонс финализирует их в линейную цепь.
+    print("\nГибрид «DAG → PoW → линейная цепь»")
+    chain = HybridDagChain(k=3, difficulty=2)
+    for cp_round in range(3):
+        base = chain.dag.tips()
+        for w in range(width):                 # параллельные блоки в DAG
+            chain.add_block(payload=f"cp{cp_round}-b{w}", parents=base)
+        cp = chain.finalize(miner="BHYminer")  # «майнер нашёл нонс» → чекпойнт
+        print(f"  чекпойнт #{cp.index}: {cp.pending if False else len(cp.blocks)} "
+              f"блоков DAG запечатаны | nonce={cp.nonce} "
+              f"(перебор {cp.attempts}) | hash {cp.hash[:12]}…")
+    st = chain.stats()
+    print(f"  линейная цепь: {st['checkpoints']} чекпойнтов, "
+          f"{st['finalized_blocks']} блоков всего | валидна: {chain.is_valid()}")
