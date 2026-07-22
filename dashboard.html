@@ -1,0 +1,357 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>B-Hydra Client · Dashboard</title>
+<style>
+  :root{
+    --bg:#070b14; --panel:#0c1322; --panel2:#0a1120; --line:#16233b;
+    --cyan:#22d3ee; --cyan2:#38bdf8; --magenta:#e050f0; --violet:#8b5cf6;
+    --green:#34d399; --red:#fb7185; --gold:#fbbf24;
+    --txt:#dbe6f5; --sub:#6b7d99; --mono:'Consolas','SF Mono',ui-monospace,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:radial-gradient(1200px 700px at 70% -10%,#0e1a33 0%,var(--bg) 60%);
+    color:var(--txt);font-family:'Segoe UI',system-ui,sans-serif;font-size:14px;
+    -webkit-font-smoothing:antialiased}
+  a{color:inherit;text-decoration:none}
+  .app{display:grid;grid-template-columns:250px 1fr;min-height:100vh}
+
+  /* Sidebar */
+  .side{background:linear-gradient(180deg,#0a1120,#070b14);border-right:1px solid var(--line);
+    padding:18px 14px;display:flex;flex-direction:column;gap:6px;position:relative}
+  .brand{display:flex;align-items:center;gap:10px;padding:6px 8px 16px;font-weight:700;
+    letter-spacing:.14em;color:#9fb2cc;font-size:12px}
+  .logo-box{border:1px solid var(--line);border-radius:14px;padding:22px 10px;margin:4px 4px 18px;
+    text-align:center;background:radial-gradient(120px 80px at 50% 20%,#16264a,transparent)}
+  .wordmark{font-family:var(--mono);font-weight:800;font-size:30px;letter-spacing:.04em;
+    background:linear-gradient(90deg,var(--magenta),var(--cyan));-webkit-background-clip:text;
+    background-clip:text;color:transparent;text-shadow:0 0 24px rgba(120,80,255,.35)}
+  .wordmark small{display:block;font-size:8px;letter-spacing:.28em;color:var(--sub);
+    -webkit-text-fill-color:var(--sub);margin-top:6px}
+  .nav a{display:flex;align-items:center;gap:12px;padding:11px 14px;border-radius:10px;
+    color:#9aabc4;font-weight:600;font-size:13px;transition:.15s}
+  .nav a .ic{width:18px;text-align:center;opacity:.8}
+  .nav a:hover{background:#101c33;color:#cfe0f5}
+  .nav a.active{background:linear-gradient(90deg,#12233f,#0e1830);color:#fff;
+    box-shadow:inset 2px 0 0 var(--cyan)}
+  .side-foot{margin-top:auto;border-top:1px solid var(--line);padding-top:14px;
+    display:flex;align-items:center;gap:10px;color:var(--green);font-weight:700;font-size:12px}
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--green);
+    box-shadow:0 0 10px var(--green);animation:pulse 1.8s infinite}
+  @keyframes pulse{50%{opacity:.35}}
+
+  /* Main */
+  .main{padding:22px 26px 34px;min-width:0}
+  .top{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:18px}
+  .top h1{margin:0;font-size:26px;letter-spacing:.02em}
+  .top .welcome{color:var(--sub);font-size:13px;margin-top:2px}
+  .pills{display:flex;gap:10px;align-items:center}
+  .pill{border:1px solid var(--line);border-radius:10px;padding:8px 14px;font-size:12px;
+    font-weight:700;color:#9fb2cc;background:var(--panel);display:flex;gap:8px;align-items:center}
+  .pill.ok{color:var(--green)}
+
+  .cards{display:grid;grid-template-columns:repeat(5,1fr);gap:14px;margin-bottom:16px}
+  .card{background:linear-gradient(180deg,var(--panel),var(--panel2));border:1px solid var(--line);
+    border-radius:14px;padding:16px 18px;position:relative;overflow:hidden}
+  .card::after{content:'';position:absolute;inset:0 0 auto auto;width:60px;height:60px;
+    background:radial-gradient(circle at 80% 0,rgba(34,211,238,.14),transparent 70%)}
+  .card .k{color:var(--sub);font-size:11px;letter-spacing:.12em;font-weight:700}
+  .card .v{font-size:24px;font-weight:800;margin-top:8px;font-family:var(--mono)}
+  .card .v .u{font-size:12px;color:var(--sub);font-weight:600}
+  .card .s{color:var(--sub);font-size:11px;margin-top:6px}
+  .cyan{color:var(--cyan)} .mag{color:var(--magenta)} .grn{color:var(--green)}
+  .gold{color:var(--gold)} .red{color:var(--red)}
+
+  .grid{display:grid;grid-template-columns:1.15fr 1.35fr 1fr;gap:16px;margin-bottom:16px}
+  .panel{background:linear-gradient(180deg,var(--panel),var(--panel2));border:1px solid var(--line);
+    border-radius:14px;padding:18px}
+  .panel h3{margin:0 0 14px;font-size:13px;letter-spacing:.1em;color:#9fb2cc;
+    display:flex;justify-content:space-between;align-items:center}
+  .panel h3 .live{color:var(--green);font-size:10px;display:flex;gap:6px;align-items:center}
+  .hero{background:radial-gradient(400px 200px at 30% 20%,#182a52,transparent),
+    linear-gradient(180deg,var(--panel),var(--panel2))}
+  .hero .big{font-family:var(--mono);font-weight:800;font-size:40px;letter-spacing:.03em;
+    background:linear-gradient(90deg,var(--magenta),var(--cyan));-webkit-background-clip:text;
+    background-clip:text;color:transparent;text-shadow:0 0 30px rgba(120,80,255,.4);margin:10px 0 4px}
+  .hero .tagline{font-size:9px;letter-spacing:.26em;color:var(--sub);margin-bottom:16px}
+  .hero p{color:#93a6c2;font-size:13px;line-height:1.6}
+  .hero .links{display:flex;gap:18px;margin-top:14px;font-size:12px;font-weight:700;color:var(--cyan)}
+
+  table{width:100%;border-collapse:collapse;font-size:12px}
+  td,th{text-align:left;padding:8px 4px;border-bottom:1px solid #0f1a2e}
+  th{color:var(--sub);font-weight:700;font-size:10px;letter-spacing:.1em}
+  .mono{font-family:var(--mono)}
+  .rowlink:hover td{background:#0e1a30}
+  .tag{display:inline-flex;gap:6px;align-items:center}
+
+  .metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-top:14px;
+    border-top:1px solid var(--line);padding-top:14px}
+  .metrics .k{color:var(--sub);font-size:10px;letter-spacing:.1em}
+  .metrics .v{font-family:var(--mono);font-weight:800;font-size:16px;margin-top:4px}
+
+  .kv{display:flex;justify-content:space-between;padding:9px 0;border-bottom:1px solid #0f1a2e;font-size:12px}
+  .kv .k{color:var(--sub)} .kv .v{font-family:var(--mono);font-weight:700}
+  .conn{display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid #0f1a2e;font-size:12px}
+  .conn .ip{font-family:var(--mono);flex:1}
+  .qa{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+  .qa a{border:1px solid var(--line);border-radius:12px;padding:16px 6px;text-align:center;
+    background:var(--panel2);transition:.15s}
+  .qa a:hover{border-color:var(--cyan);box-shadow:0 0 16px rgba(34,211,238,.15);color:#fff}
+  .qa .qi{font-size:20px;color:var(--cyan)}
+  .qa .ql{font-size:10px;letter-spacing:.08em;color:var(--sub);margin-top:8px;font-weight:700}
+
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px}
+  .logs{font-family:var(--mono);font-size:11px;line-height:1.9;max-height:180px;overflow:auto}
+  .logs .t{color:var(--sub)} .logs .i{color:var(--cyan)} .logs .g{color:var(--green)}
+  .viewall{font-size:10px;color:var(--cyan);font-weight:700;letter-spacing:.08em}
+  .foot{color:var(--sub);font-size:11px;text-align:center;padding:16px 0 4px}
+  .demo{color:var(--gold)}
+  @media(max-width:1200px){.cards{grid-template-columns:repeat(2,1fr)}.grid,.grid2{grid-template-columns:1fr}}
+  @media(max-width:760px){.app{grid-template-columns:1fr}.side{display:none}}
+  canvas{width:100%;height:150px;display:block}
+</style>
+</head>
+<body>
+<div class="app">
+  <!-- Sidebar -->
+  <aside class="side">
+    <div class="brand"><span>⬡</span> B-HYDRA CLIENT</div>
+    <div class="logo-box"><div class="wordmark">B·HYDRA<small>DECENTRALIZED · ENCRYPTED · UNSTOPPABLE</small></div></div>
+    <nav class="nav">
+      <a class="active"><span class="ic">▦</span> DASHBOARD</a>
+      <a href="/wallet"><span class="ic">▤</span> WALLET</a>
+      <a href="/" ><span class="ic">↹</span> TRANSACTIONS</a>
+      <a href="/"><span class="ic">▧</span> BLOCKS</a>
+      <a href="/"><span class="ic">◈</span> PEERS</a>
+      <a><span class="ic">◆</span> SMART CONTRACTS</a>
+      <a><span class="ic">⚙</span> SETTINGS</a>
+      <a><span class="ic">≡</span> LOGS</a>
+      <a><span class="ic">ⓘ</span> ABOUT</a>
+    </nav>
+    <div class="side-foot"><span class="dot"></span><span id="nodeState">NODE ACTIVE</span></div>
+  </aside>
+
+  <!-- Main -->
+  <main class="main">
+    <div class="top">
+      <div><h1>DASHBOARD</h1><div class="welcome">Welcome to B-Hydra Network</div></div>
+      <div class="pills">
+        <div class="pill ok" id="connPill"><span class="dot"></span> <span id="connText">CONNECTED</span></div>
+        <div class="pill" id="verPill">v0.0.2</div>
+      </div>
+    </div>
+
+    <div class="cards">
+      <div class="card"><div class="k">ЭМИССИЯ / SUPPLY</div>
+        <div class="v cyan" id="supply">—</div><div class="s" id="supplySub">выпущено BHY</div></div>
+      <div class="card"><div class="k">LATEST BLOCK</div>
+        <div class="v" id="height">—</div><div class="s" id="heightSub">высота цепочки</div></div>
+      <div class="card"><div class="k">МЕМПУЛ</div>
+        <div class="v mag" id="mempool">—</div><div class="s">неподтверждённых tx</div></div>
+      <div class="card"><div class="k">NETWORK</div>
+        <div class="v cyan" id="network">MAINNET</div><div class="s" id="model">UTXO · PoW</div></div>
+      <div class="card"><div class="k">DIFFICULTY</div>
+        <div class="v gold" id="difficulty">—</div><div class="s" id="algo">PoW (SHA-512)</div></div>
+    </div>
+
+    <div class="grid">
+      <div class="panel hero">
+        <div class="big">B·HYDRA</div>
+        <div class="tagline">DECENTRALIZED · ENCRYPTED · UNSTOPPABLE</div>
+        <p>Безопасная одноранговая сеть на UTXO и Proof-of-Work. Криптография —
+           собственный SHA-512 «с нуля», ECDSA secp256k1 и гибридная пост-квантовая
+           защита (ECDSA + XMSS). Кошелёк, майнинг и сеть в одном клиенте.</p>
+        <div class="links"><a href="/">◆ ОБОЗРЕВАТЕЛЬ</a><a href="/wallet">▤ КОШЕЛЁК</a>
+          <a href="/api/info">↹ REST API</a></div>
+      </div>
+
+      <div class="panel">
+        <h3>NETWORK ACTIVITY <span class="live"><span class="dot"></span>LIVE</span></h3>
+        <canvas id="chart"></canvas>
+        <div class="metrics">
+          <div><div class="k">БЛОКОВ</div><div class="v cyan" id="mBlocks">—</div></div>
+          <div><div class="k">BLOCK TIME</div><div class="v" id="mTime">—</div></div>
+          <div><div class="k">НАГРАДА</div><div class="v grn" id="mReward">—</div></div>
+          <div><div class="k">ЭМИССИЯ %</div><div class="v gold" id="mSupply">—</div></div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h3>NODE</h3>
+        <div class="kv"><span class="k">STATUS</span><span class="v grn" id="nStatus">Connected</span></div>
+        <div class="kv"><span class="k">HASH</span><span class="v" id="nHash">SHA-512</span></div>
+        <div class="kv"><span class="k">MODEL</span><span class="v" id="nModel">UTXO</span></div>
+        <div class="kv"><span class="k">RETARGET</span><span class="v" id="nRetarget">—</span></div>
+        <div class="kv"><span class="k">BLOCK TIME</span><span class="v" id="nBlockTime">—</span></div>
+        <div class="kv"><span class="k">MINING END</span><span class="v" id="nEnd">~3000</span></div>
+        <div class="kv"><span class="k">MAX SUPPLY</span><span class="v" id="nMax">31 000 000</span></div>
+      </div>
+    </div>
+
+    <div class="grid2">
+      <div class="panel">
+        <h3>LATEST BLOCKS <a class="viewall" href="/">VIEW ALL →</a></h3>
+        <table><thead><tr><th>#</th><th>MINER</th><th>HASH</th><th style="text-align:right">TX</th></tr></thead>
+        <tbody id="blocks"></tbody></table>
+      </div>
+      <div class="panel">
+        <h3>LATEST TRANSACTIONS <a class="viewall" href="/">VIEW ALL →</a></h3>
+        <table><thead><tr><th>TXID</th><th style="text-align:right">AMOUNT</th><th style="text-align:right">BLOCK</th></tr></thead>
+        <tbody id="txs"></tbody></table>
+      </div>
+    </div>
+
+    <div class="grid2">
+      <div class="panel">
+        <h3>QUICK ACTIONS</h3>
+        <div class="qa">
+          <a href="/wallet"><div class="qi">➤</div><div class="ql">SEND</div></a>
+          <a href="/wallet"><div class="qi">↓</div><div class="ql">RECEIVE</div></a>
+          <a href="/"><div class="qi">▧</div><div class="ql">EXPLORER</div></a>
+          <a href="/api/addresses?limit=10"><div class="qi">◈</div><div class="ql">RICH LIST</div></a>
+          <a href="/api/mempool"><div class="qi">≋</div><div class="ql">MEMPOOL</div></a>
+          <a href="/api/info"><div class="qi">ⓘ</div><div class="ql">NODE INFO</div></a>
+        </div>
+      </div>
+      <div class="panel">
+        <h3>LOGS <a class="viewall" href="/api/info">EXPORT →</a></h3>
+        <div class="logs" id="logs"></div>
+      </div>
+    </div>
+
+    <div class="foot" id="foot">B-Hydra Client · dashboard</div>
+  </main>
+</div>
+
+<script>
+"use strict";
+const $=id=>document.getElementById(id);
+const fmt=n=>Number(n).toLocaleString('ru-RU');
+const short=(s,n=8)=>{s=String(s);return s.length>2*n?s.slice(0,n)+'…'+s.slice(-n):s;};
+let DEMO=false;
+
+async function getJSON(p){const r=await fetch(p,{cache:'no-store'});if(!r.ok)throw 0;return r.json();}
+
+/* ---- Демо-цепочка (когда узел не запущен) ---- */
+const B58="123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+const rnd=(a,b)=>a+Math.random()*(b-a), pick=a=>a[Math.floor(Math.random()*a.length)];
+const rs=(n,al)=>Array.from({length:n},()=>pick(al)).join('');
+const dAddr=()=>"BHY"+rs(34,B58), dHash=()=>rs(64,"0123456789abcdef");
+let dChain=[], dMiners=[], dMempool=7;
+function dInit(){dMiners=Array.from({length:5},dAddr);
+  dChain=[{index:0,hash:dHash(),data:[{txid:dHash()}]}];
+  for(let i=0;i<40;i++)dMine();}
+function dMine(){const m=pick(dMiners),nt=1+Math.floor(rnd(0,6));
+  const data=[{txid:dHash(),vin:[{txid:"0".repeat(128)}],vout:[{amount:50,address:m}]}];
+  for(let i=1;i<nt;i++)data.push({txid:dHash(),vin:[{txid:dHash(),index:0}],
+    vout:[{amount:+rnd(.5,40).toFixed(2),address:pick(dMiners)}]});
+  dChain.push({index:dChain.length,hash:dHash(),miner:m,data});
+  if(dChain.length>80)dChain.shift();}
+function dInfo(){return{network:"B-hydra",height:dChain.length,difficulty:8,
+  next_block_reward:50,max_supply:31000000,hash_algorithm:"SHA-512",model:"UTXO",
+  retarget_interval:100,target_block_time_min:48.6,mining_end_year:3000};}
+
+async function fInfo(){try{return await getJSON('/api/info');}catch(e){DEMO=true;return dInfo();}}
+async function fChain(){try{return(await getJSON('/api/chain')).chain;}catch(e){DEMO=true;return dChain;}}
+async function fMempool(){try{return(await getJSON('/api/mempool')).pending;}catch(e){DEMO=true;return dMempool;}}
+async function fSupply(){try{const c=await getJSON('/api/addresses?limit=1');return c.total_supply;}
+  catch(e){return dChain.reduce((s,b)=>s+50,0);}}
+
+const minerOf=b=>{if(b.miner)return b.miner;const d=b.data;
+  if(Array.isArray(d)&&d[0]&&d[0].vout&&d[0].vout[0])return d[0].vout[0].address;return null;};
+
+async function refresh(){
+  const [info,chain,mp,supply]=await Promise.all([fInfo(),fChain(),fMempool(),fSupply()]);
+  $('supply').textContent=fmt(Math.round(supply||0));
+  $('height').textContent='#'+fmt(info.height);
+  $('heightSub').textContent=DEMO?'демо-режим':'высота цепочки';
+  $('mempool').textContent=fmt(mp);
+  $('network').textContent=(info.network||'B-hydra').toUpperCase();
+  $('model').textContent=(info.model||'UTXO')+' · PoW';
+  $('difficulty').textContent=info.difficulty;
+  $('algo').textContent='PoW ('+(info.hash_algorithm||'SHA-512')+')';
+  $('nHash').textContent=info.hash_algorithm||'SHA-512';
+  $('nModel').textContent=info.model||'UTXO';
+  $('nRetarget').textContent=(info.retarget_interval||100)+' блоков';
+  $('nBlockTime').textContent=(info.target_block_time_min||48.6)+' мин';
+  $('nEnd').textContent='~'+(info.mining_end_year||3000);
+  $('nMax').textContent=fmt(info.max_supply||31000000);
+  $('mReward').textContent=(info.next_block_reward||50)+' BHY';
+  $('mBlocks').textContent=fmt(info.height);
+  $('mTime').textContent=(info.target_block_time_min||48.6)+'м';
+  $('mSupply').textContent=((supply/(info.max_supply||31000000))*100).toFixed(3)+'%';
+  $('connText').textContent=DEMO?'DEMO MODE':'CONNECTED';
+  $('connPill').className='pill '+(DEMO?'':'ok');
+  $('nStatus').textContent=DEMO?'demo':'Connected';
+  $('nodeState').textContent=DEMO?'DEMO MODE':'NODE ACTIVE';
+  $('foot').innerHTML=DEMO
+    ? 'B-Hydra Client · <span class="demo">демо-режим (узел не запущен)</span> · часть панелей иллюстративна'
+    : 'B-Hydra Client · сеть '+(info.network||'B-hydra')+' · высота '+fmt(info.height);
+
+  // Latest blocks
+  const blocks=chain.slice().reverse().slice(0,6);
+  $('blocks').innerHTML=blocks.map(b=>{const n=Array.isArray(b.data)?b.data.length:1;
+    const m=minerOf(b);return `<tr class="rowlink"><td class="mono cyan">#${fmt(b.index)}</td>
+      <td class="mono">${m?short(m,7):'—'}</td><td class="mono" style="color:var(--sub)">${short(b.hash,8)}</td>
+      <td style="text-align:right"><span class="grn">${n}</span> TX</td></tr>`;}).join('');
+
+  // Latest transactions (из последних блоков)
+  const txs=[];
+  for(const b of blocks){const d=Array.isArray(b.data)?b.data:[];
+    for(let i=d.length-1;i>=0&&txs.length<6;i--){const t=d[i];
+      const isCb=t.vin&&t.vin[0]&&t.vin[0].txid==="0".repeat(128);
+      const amt=(t.vout||[]).reduce((s,o)=>s+(o.amount||0),0);
+      txs.push({txid:t.txid,amt,block:b.index,cb:isCb});}}
+  $('txs').innerHTML=txs.slice(0,6).map(t=>`<tr class="rowlink">
+    <td class="mono">${short(t.txid,9)}</td>
+    <td style="text-align:right" class="${t.cb?'grn':'cyan'}">${t.cb?'+':''}${t.amt.toFixed(2)} BHY</td>
+    <td style="text-align:right;color:var(--sub)">#${fmt(t.block)}</td></tr>`).join('')
+    ||'<tr><td colspan="3" style="color:var(--sub)">нет транзакций</td></tr>';
+
+  drawChart(chain);
+  pushLog(info);
+}
+
+/* Network activity: число tx в последних блоках (два «слоя» как в макете) */
+function drawChart(chain){
+  const c=$('chart'),dpr=window.devicePixelRatio||1;
+  const w=c.clientWidth,h=150;c.width=w*dpr;c.height=h*dpr;
+  const g=c.getContext('2d');g.scale(dpr,dpr);g.clearRect(0,0,w,h);
+  const last=chain.slice(-40);
+  const tx=last.map(b=>Array.isArray(b.data)?b.data.length:1);
+  const bl=last.map((_,i)=>1+Math.round(2+2*Math.sin(i/3)+Math.random()));
+  const max=Math.max(6,...tx,...bl);
+  // сетка
+  g.strokeStyle='#10203a';g.lineWidth=1;
+  for(let i=0;i<=4;i++){const y=10+i*(h-30)/4;g.beginPath();g.moveTo(0,y);g.lineTo(w,y);g.stroke();}
+  const line=(arr,col)=>{g.beginPath();arr.forEach((v,i)=>{
+    const x=arr.length<2?0:i/(arr.length-1)*w, y=h-20-(v/max)*(h-34);
+    i?g.lineTo(x,y):g.moveTo(x,y);});
+    g.strokeStyle=col;g.lineWidth=2;g.shadowColor=col;g.shadowBlur=8;g.stroke();g.shadowBlur=0;};
+  line(tx,'#e050f0');line(bl,'#22d3ee');
+}
+
+let logSeed=false;
+function pushLog(info){
+  if(logSeed)return;logSeed=true;const t=new Date().toTimeString().slice(0,8);
+  const L=[
+    ['INFO','Node started successfully','i'],
+    ['INFO','Connecting to peers...','i'],
+    ['INFO','Blockchain synchronized','g'],
+    ['INFO','Latest block: #'+fmt(info.height),'g'],
+    ['INFO','Hash: '+(info.hash_algorithm||'SHA-512')+' (from scratch)','i'],
+    ['INFO','Post-quantum: ECDSA + XMSS hybrid ready','g'],
+    ['INFO','Protocol: B-Hydra Core','i'],
+  ];
+  $('logs').innerHTML=L.map(([lv,m,c])=>
+    `<div><span class="t">[${t}]</span> <span class="i">[${lv}]</span> <span class="${c}">${m}</span></div>`).join('');
+}
+
+dInit();
+refresh();
+setInterval(()=>{if(DEMO)dMine();refresh();},DEMO?5000:8000);
+</script>
+</body>
+</html>

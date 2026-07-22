@@ -233,3 +233,10 @@ def test_merkle_proof_endpoint(server):
     with pytest.raises(urllib.error.HTTPError) as exc:
         _get(server, "/api/proof/" + "00" * 64)
     assert exc.value.code == 404
+
+
+def test_dashboard_html_served(server):
+    html = _get(server, "/dashboard")
+    assert "B-HYDRA" in html or "B·HYDRA" in html
+    assert "NETWORK ACTIVITY" in html
+    assert "<html" in html.lower()

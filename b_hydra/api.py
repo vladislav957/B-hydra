@@ -66,6 +66,7 @@ MAX_BODY_SIZE = 16 * 1024 * 1024   # анти-DoS: предел размера �
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _EXPLORER_HTML = os.path.join(_ROOT, "explorer.html")
 _WALLET_HTML = os.path.join(_ROOT, "wallet.html")
+_DASHBOARD_HTML = os.path.join(_ROOT, "dashboard.html")
 
 
 class BHydraAPI(BaseHTTPRequestHandler):
@@ -208,6 +209,13 @@ class BHydraAPI(BaseHTTPRequestHandler):
                         self._send_html(200, fh.read())
                 except OSError:
                     self._send_html(404, "<h1>wallet.html not found</h1>")
+                return
+            if parts in (["dashboard"], ["dashboard.html"]):
+                try:
+                    with open(_DASHBOARD_HTML, encoding="utf-8") as fh:
+                        self._send_html(200, fh.read())
+                except OSError:
+                    self._send_html(404, "<h1>dashboard.html not found</h1>")
                 return
             if parts == ["api", "block"] or (len(parts) == 3 and parts[:2] == ["api", "block"]):
                 index = int(parts[2]) if len(parts) == 3 else -1
