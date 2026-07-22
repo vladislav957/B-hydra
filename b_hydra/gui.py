@@ -63,7 +63,8 @@ class BHydraApp(tk.Tk):
         self.geometry("760x640")
         self._set_icon()
         self._text_widgets: list[tk.Text] = []
-        self._dark = tk.BooleanVar(value=False)
+        self._dark = tk.BooleanVar(value=False)          # совместимость
+        self._theme = tk.StringVar(value="light")        # light / dark / classic
 
         # --- Состояние ---
         import os
@@ -128,8 +129,11 @@ class BHydraApp(tk.Tk):
         # Меню «Вид» (тёмная тема) и «Справка».
         menubar = tk.Menu(self)
         viewm = tk.Menu(menubar, tearoff=0)
-        viewm.add_checkbutton(label="Тёмная тема", variable=self._dark,
-                              command=self._toggle_theme)
+        for label, value in (("☀ Светлая", "light"), ("🌙 Тёмная", "dark"),
+                             ("🖥 Классик (Bitcoin 2009)", "classic")):
+            viewm.add_radiobutton(label=label, value=value,
+                                  variable=self._theme,
+                                  command=self._toggle_theme)
         menubar.add_cascade(label="Вид", menu=viewm)
         helpm = tk.Menu(menubar, tearoff=0)
         helpm.add_command(label="О программе", command=self._about)
@@ -154,7 +158,7 @@ class BHydraApp(tk.Tk):
         self._build_contracts_tab(nb)
         self._build_quantum_tab(nb)
         self._text_widgets = [self.mine_log, self.net_log, self.block_details]
-        self._apply_theme(self._dark.get())      # фирменные стили с самого старта
+        self._apply_theme(self._theme.get())     # фирменные стили с самого старта
         nb.bind("<<NotebookTabChanged>>", self._on_tab_changed)
 
     def _on_tab_changed(self, _event=None) -> None:
@@ -324,6 +328,10 @@ class BHydraApp(tk.Tk):
     def _build_mining_tab(self, nb: ttk.Notebook) -> None:
         tab = ttk.Frame(nb, padding=12)
         nb.add(tab, text="⛏ Майнинг")
+
+        # Ретро-баннер клиента Bitcoin 2009 — виден только в теме «Классик».
+        self.generate_banner = ttk.Label(tab, text="", style="Generate.TLabel")
+        self.generate_banner.pack(anchor="center", pady=(0, 6))
 
         # Никаких ручных настроек: майнер либо работает, либо нет. Темп задаёт
         # СЕТЬ (TARGET_BLOCK_TIME ≈ 48.6 мин на блок, как ретаргет сложности),
@@ -1763,61 +1771,88 @@ class BHydraApp(tk.Tk):
             pass
 
     def _toggle_theme(self) -> None:
-        self._apply_theme(self._dark.get())
+        self._dark.set(self._theme.get() == "dark")   # совместимость
+        self._apply_theme(self._theme.get())
 
     def _toggle_priv(self) -> None:
         """Показать/скрыть приватный ключ (по умолчанию скрыт точками)."""
         shown = self._priv_entry.cget("show") == ""
         self._priv_entry.configure(show="•" if shown else "")
 
-    def _apply_theme(self, dark: bool) -> None:
-        # Палитра — под официальный логотип (неон: циан + магента на тёмном).
+    def _apply_theme(self, theme=None) -> None:
+        """Три темы: светлая, тёмная (неон под логотип) и «Классик» —
+        ретро-стиль оригинального клиента Bitcoin 2009 (серый Win95)."""
+        if isinstance(theme, bool):                    # совместимость со старым API
+            theme = "dark" if theme else "light"
+        theme = theme or self._theme.get()
+        classic = theme == "classic"
         style = ttk.Style(self)
-        if dark:
+        if theme == "dark":
             bg, fg, field = "#0d1117", "#e6edf3", "#161b22"
             card, sub = "#161b22", "#8b949e"
             balance, magenta = "#22d3ee", "#f472b6"    # яркие на тёмном
-        else:
+            accent, accent_hi = "#0891b2", "#06b6d4"
+        elif classic:
+            # Палитра клиента Сатоши: серый Win95, чёрный текст, зелёные монеты.
+            bg, fg, field = "#d4d0c8", "#000000", "#ffffff"
+            card, sub = "#d4d0c8", "#000080"           # navy для подписей
+            balance, magenta = "#008000", "#c00000"    # green «Mined», red «GENERATE»
+            accent, accent_hi = "#c00000", "#e00000"   # красная кнопка-акцент
+        else:                                          # light
             bg, fg, field = "#f0f0f0", "#000000", "#ffffff"
             card, sub = "#ffffff", "#57606a"
             balance, magenta = "#0e7490", "#be185d"    # тёмные на светлом
-        accent, accent_hi = "#0891b2", "#06b6d4"       # циан кнопок (как «B»)
+            accent, accent_hi = "#0891b2", "#06b6d4"
+        relief = "raised" if classic else "flat"       # 3D-кнопки в ретро
+        bw = 2 if classic else 0
         self.configure(bg=bg)
         for elem in (".", "TFrame", "TLabel", "TNotebook",
                      "TLabelframe", "TLabelframe.Label"):
             style.configure(elem, background=bg, foreground=fg)
-        style.configure("TButton", background=field, foreground=fg)
+        style.configure("TButton", background=field, foreground=fg,
+                        relief=relief, borderwidth=bw)
         style.configure("TNotebook.Tab", background=field, foreground=fg,
-                        padding=(12, 6))
+                        padding=(12, 6), relief=relief, borderwidth=bw)
         style.map("TNotebook.Tab",
                   background=[("selected", bg)],
                   foreground=[("selected", magenta)])
         style.configure("TEntry", fieldbackground=field, foreground=fg)
         style.configure("Treeview", background=field, foreground=fg,
                         fieldbackground=field)
-        style.configure("Treeview.Heading", background=bg, foreground=fg)
+        style.configure("Treeview.Heading", background=bg, foreground=fg,
+                        relief=relief)
         style.configure("Horizontal.TProgressbar", background=accent_hi,
                         troughcolor=field)
-        # Фирменные стили: карточка кошелька, крупный баланс, неон-кнопки.
-        style.configure("Card.TFrame", background=card)
+        # Фирменные стили: карточка кошелька, крупный баланс, акцент-кнопки.
+        style.configure("Card.TFrame", background=card,
+                        relief="groove" if classic else "flat",
+                        borderwidth=bw)
         style.configure("Card.TLabel", background=card)
+        title_font = ("Courier New", 14, "bold") if classic else ("TkDefaultFont", 14, "bold")
         style.configure("CardTitle.TLabel", background=card, foreground=fg,
-                        font=("TkDefaultFont", 14, "bold"))
+                        font=title_font)
         style.configure("CardSub.TLabel", background=card, foreground=sub)
         style.configure("Balance.TLabel", background=card, foreground=balance,
-                        font=("TkDefaultFont", 18, "bold"))
-        # Бейдж защиты: зелёный «защищён» / магента «уязвим для кванта».
-        style.configure("Safe.TLabel", background=card, foreground="#2ea043",
+                        font=("Courier New", 18, "bold") if classic
+                        else ("TkDefaultFont", 18, "bold"))
+        # Бейдж защиты: зелёный «защищён» / красный-магента «уязвим».
+        style.configure("Safe.TLabel", background=card, foreground="#008000" if classic else "#2ea043",
                         font=("TkDefaultFont", 9, "bold"))
         style.configure("Warn.TLabel", background=card, foreground=magenta,
                         font=("TkDefaultFont", 9, "bold"))
         style.configure("Accent.TButton", background=accent,
-                        foreground="#ffffff")
+                        foreground="#ffffff", relief=relief, borderwidth=bw)
         style.map("Accent.TButton",
                   background=[("active", accent_hi), ("disabled", field)],
                   foreground=[("disabled", sub)])
         for widget in self._text_widgets:
             widget.configure(bg=field, fg=fg, insertbackground=fg)
+        # Ретро-баннер «GENERATE COINS» на вкладке майнинга.
+        if hasattr(self, "generate_banner"):
+            self.generate_banner.configure(
+                text="⛏  G E N E R A T E   C O I N S" if classic else "")
+            style.configure("Generate.TLabel", background=bg, foreground="#c00000",
+                            font=("Courier New", 15, "bold"))
 
     def _about(self) -> None:
         messagebox.showinfo(
