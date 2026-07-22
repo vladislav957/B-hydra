@@ -44,3 +44,47 @@ def test_matches_hashlib_on_block_boundaries():
 def test_accepts_str_and_bytes():
     assert sha2.sha256("B-hydra") == sha2.sha256(b"B-hydra")
     assert sha2.sha512("B-hydra") == sha2.sha512(b"B-hydra")
+
+
+def test_streaming_api_matches_oneshot():
+    """Потоковый update() любыми кусками == разовому хешу (и hashlib)."""
+    import random
+    random.seed(11)
+    for _ in range(200):
+        data = os.urandom(random.randint(0, 300))
+        h256, h512 = sha2.Sha256(), sha2.Sha512()
+        i = 0
+        while i < len(data):
+            step = random.randint(1, 50)
+            h256.update(data[i:i + step])
+            h512.update(data[i:i + step])
+            i += step
+        assert h256.hexdigest() == hashlib.sha256(data).hexdigest()
+        assert h512.hexdigest() == hashlib.sha512(data).hexdigest()
+
+
+def test_digest_does_not_mutate_state():
+    """digest() можно звать многократно и продолжать update()."""
+    h = sha2.Sha512()
+    h.update(b"abc")
+    assert h.digest() == hashlib.sha512(b"abc").digest()
+    assert h.digest() == hashlib.sha512(b"abc").digest()   # повтор — тот же
+    h.update(b"def")
+    assert h.hexdigest() == hashlib.sha512(b"abcdef").hexdigest()
+
+
+def test_copy_forks_state_independently():
+    h = sha2.Sha256()
+    h.update(b"hello")
+    branch = h.copy()
+    branch.update(b" world")
+    h.update(b"!!!")
+    assert branch.hexdigest() == hashlib.sha256(b"hello world").hexdigest()
+    assert h.hexdigest() == hashlib.sha256(b"hello!!!").hexdigest()
+
+
+def test_sizes_match_hashlib():
+    assert sha2.Sha256().digest_size == 32
+    assert sha2.Sha256().block_size == 64
+    assert sha2.Sha512().digest_size == 64
+    assert sha2.Sha512().block_size == 128
