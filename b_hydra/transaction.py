@@ -100,7 +100,11 @@ class Transaction:
     def __init__(self, vin=None, vout=None, timestamp=None):
         self.vin = vin or []        # список TxInput
         self.vout = vout or []      # список TxOutput
-        self.timestamp = timestamp if timestamp is not None else time.time()
+        # float() обязателен, как и для суммы в TxOutput: подпись берётся от
+        # json.dumps, а он пишет int 10 и float 10.0 по-разному. Клиент,
+        # приславший целую метку времени (JS сериализует 1785009903.0 как
+        # «1785009903»), иначе получал бы неверный payload и отказ подписи.
+        self.timestamp = float(timestamp) if timestamp is not None else time.time()
 
     # --- Идентификация и сериализация ------------------------------------
     def signing_payload(self) -> bytes:

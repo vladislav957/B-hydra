@@ -66,6 +66,9 @@ MAX_BODY_SIZE = 16 * 1024 * 1024   # анти-DoS: предел размера �
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _EXPLORER_HTML = os.path.join(_ROOT, "explorer.html")
 _WALLET_HTML = os.path.join(_ROOT, "wallet.html")
+# Подпись транзакций в браузере: кошелёк грузит этот файл и подписывает сам,
+# поэтому приватный ключ не уходит на узел.
+_SIGN_JS = os.path.join(_ROOT, "bhydra-sign.js")
 
 
 class BHydraAPI(BaseHTTPRequestHandler):
@@ -99,6 +102,14 @@ class BHydraAPI(BaseHTTPRequestHandler):
         body = html.encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _send_script(self, code, script):
+        body = script.encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "application/javascript; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -208,6 +219,13 @@ class BHydraAPI(BaseHTTPRequestHandler):
                         self._send_html(200, fh.read())
                 except OSError:
                     self._send_html(404, "<h1>wallet.html not found</h1>")
+                return
+            if parts == ["bhydra-sign.js"]:
+                try:
+                    with open(_SIGN_JS, encoding="utf-8") as fh:
+                        self._send_script(200, fh.read())
+                except OSError:
+                    self._send_script(404, "// bhydra-sign.js not found")
                 return
             if parts == ["api", "block"] or (len(parts) == 3 and parts[:2] == ["api", "block"]):
                 index = int(parts[2]) if len(parts) == 3 else -1

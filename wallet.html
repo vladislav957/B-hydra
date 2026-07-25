@@ -140,6 +140,10 @@
   .toast.show{opacity:1; transform:translateX(-50%) translateY(0);}
   @media (prefers-reduced-motion: reduce){*{animation-duration:.001s!important;}}
 </style>
+<!-- Подпись транзакций прямо в браузере: приватный ключ не уходит на узел.
+     Путь относительный — работает и на /wallet, и при открытии файла с диска.
+     Если скрипт не загрузился, кошелёк откатывается на подпись через узел. -->
+<script src="bhydra-sign.js"></script>
 </head>
 <body>
 <div class="wrap">
@@ -249,7 +253,17 @@ async function importWallet(){
   wallet.balance=0; wallet.utxos=0; wallet.history=[];
   if(/^[0-9a-fA-F]{64}$/.test(v)){
     wallet.key=v.toLowerCase();
-    // Реальный адрес выводит узел из ключа (иначе — демо-адрес офлайн).
+    // Адрес выводим ЗДЕСЬ ЖЕ, из ключа — узлу его знать незачем.
+    if(window.BHydra){
+      try{
+        wallet.address=BHydra.walletFromPrivateKey(wallet.key).address;
+        try{ LIVE=(await fetch('/api/info',{cache:'no-store'})).ok; }catch(e){ LIVE=false; }
+        setBadge(LIVE);
+        render(); drawQR(); if(LIVE) refresh();
+        toast('Ключ импортирован (адрес получен локально)'); return;
+      }catch(e){ toast(e.message); return; }
+    }
+    // Скрипт подписи не загрузился — как раньше, адрес выводит узел.
     try{
       const r=await fetch('/api/wallet',{method:'POST',headers:{'Content-Type':'application/json'},
         body:JSON.stringify({private_key:wallet.key})});
@@ -309,7 +323,34 @@ async function send(){
   if(a<=0){ m.innerHTML='<span class="bad">Введите сумму больше нуля</span>'; return; }
   const hasKey=/^[0-9a-fA-F]{64}$/.test(wallet.key||'');
 
-  // Настоящая отправка: узел подписывает ключом и кладёт в мемпул.
+  // Лучший путь: подписываем ЗДЕСЬ и отправляем узлу готовую транзакцию —
+  // приватный ключ не покидает браузер.
+  if(hasKey && window.BHydra){
+    m.innerHTML='<span class="go">Подпись на устройстве…</span>';
+    try{
+      const u=await (await fetch('/api/utxos/'+encodeURIComponent(wallet.address),
+        {cache:'no-store'})).json();
+      const utxos=(u.utxos||[]).map(x=>({txid:x.txid,index:x.index,amount:x.amount}));
+      const signed=BHydra.buildSignedTransaction(
+        {privateKey:wallet.key,to,amount:a,fee:f,utxos});
+      const r=await fetch('/api/transaction',{method:'POST',
+        headers:{'Content-Type':'application/json'},body:JSON.stringify(signed)});
+      const j=await r.json();
+      if(!r.ok||j.error||j.accepted===false){
+        m.innerHTML=`<span class="bad">${esc(j.error||'Узел отклонил транзакцию')}</span>`; return;
+      }
+      m.innerHTML=`<span class="ok">✔ Отправлено ${fmt(a)} BHY</span> · txid ${short(j.txid,8)} · `+
+        `<span style="color:var(--muted)">подписано на устройстве, ключ не отправлялся</span>`;
+      $('amt').value=''; updTotal(); toast('Транзакция подписана и отправлена'); refresh(); return;
+    }catch(e){
+      // Не хватило средств или узел недоступен — покажем причину и попробуем ниже.
+      if(/средств/i.test(e.message||'')){
+        m.innerHTML=`<span class="bad">${esc(e.message)}</span>`; return;
+      }
+    }
+  }
+
+  // Запасной путь: узел подписывает ключом сам (скрипт не загрузился).
   if(hasKey){
     m.innerHTML='<span class="go">Отправка через узел…</span>';
     try{

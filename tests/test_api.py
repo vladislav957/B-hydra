@@ -233,3 +233,14 @@ def test_merkle_proof_endpoint(server):
     with pytest.raises(urllib.error.HTTPError) as exc:
         _get(server, "/api/proof/" + "00" * 64)
     assert exc.value.code == 404
+
+
+def test_serves_browser_signing_script(server):
+    """API отдаёт bhydra-sign.js — иначе кошелёк не сможет подписывать сам."""
+    with urllib.request.urlopen(server + "/bhydra-sign.js", timeout=5) as resp:
+        assert resp.status == 200
+        assert "javascript" in resp.headers.get("Content-Type", "")
+        body = resp.read().decode("utf-8")
+    # Ровно тот файл, что лежит в репозитории, и в нём есть точка входа.
+    assert "buildSignedTransaction" in body
+    assert "pythonFloatRepr" in body
