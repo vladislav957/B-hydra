@@ -2,14 +2,13 @@
 wallet.py — кошелёк B-hydra с ECDSA-подписями на кривой secp256k1.
 
 Реализация ECDSA выполнена на чистом Python и использует только стандартную
-библиотеку (hashlib, secrets) — внешние зависимости не требуются, поэтому
-кошелёк работает в любом окружении.
+библиотеку (secrets) — внешние зависимости не требуются, поэтому кошелёк
+работает в любом окружении. Хеши идут через :mod:`b_hydra.hashing`.
 
 Кошелёк хранит приватный ключ, выводит публичный ключ и адрес, подписывает
 транзакции и проверяет чужие подписи.
 """
 
-import hashlib
 import secrets
 
 if __name__ == "__main__" and __package__ in (None, ""):
@@ -151,12 +150,12 @@ def _b58encode(data: bytes) -> str:
 
 
 def _ripemd160(data: bytes) -> bytes:
-    try:
-        h = hashlib.new("ripemd160")
-        h.update(data)
-        return h.digest()
-    except (ValueError, TypeError):
-        return hashing.sha256_bytes(data)[:20]
+    """RIPEMD-160 через общий хеш-слой (своя реализация + опц. ускоритель).
+
+    Отдельного отката здесь быть не должно: подмена алгоритма меняла бы адрес,
+    а адрес обязан выводиться одинаково на любой сборке Python.
+    """
+    return hashing.ripemd160(data)
 
 
 # Версии адресов (первый байт payload): обычный ECDSA и гибридный ECDSA+PQ.

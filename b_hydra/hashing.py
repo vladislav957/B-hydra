@@ -25,6 +25,7 @@ if __name__ == "__main__" and __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     __package__ = "b_hydra"
 
+from . import ripemd
 from . import sha2
 
 # Движок по умолчанию: SHA «с нуля» (pure). Вернуть быстрый hashlib можно
@@ -80,15 +81,37 @@ def double_sha512(data: "str | bytes") -> bytes:
     return sha512_bytes(sha512_bytes(data))
 
 
-# --- RIPEMD-160 (не SHA; всегда из hashlib, с откатом) -----------------------
+# --- RIPEMD-160 --------------------------------------------------------------
+# Раньше при отсутствии RIPEMD-160 в сборке OpenSSL сюда молча подставлялся
+# sha256(...)[:20] — и узлы с разными сборками Python выводили бы РАЗНЫЕ адреса
+# из одного ключа. Теперь есть своя реализация (:mod:`b_hydra.ripemd`), поэтому
+# подменять алгоритм не нужно: hashlib берётся только как ускоритель и только
+# после проверки, что он даёт те же байты.
+def _native_ripemd160_available() -> bool:
+    """True, если hashlib умеет RIPEMD-160 и совпадает с нашей реализацией."""
+    try:
+        hashlib.new("ripemd160")
+    except (ValueError, TypeError):
+        return False
+    samples = (b"", b"abc", b"B-hydra", bytes(range(64)), b"a" * 200)
+    return all(hashlib.new("ripemd160", s).digest() == ripemd.ripemd160_bytes(s)
+               for s in samples)
+
+
+_NATIVE_RIPEMD = _native_ripemd160_available()
+
+
 def ripemd160(data: "str | bytes") -> bytes:
     raw = _to_bytes(data)
-    try:
-        digest = hashlib.new("ripemd160")
-        digest.update(raw)
-        return digest.digest()
-    except (ValueError, TypeError):
-        return sha256_bytes(raw)[:20]
+    # Тот же переключатель, что и у SHA: по умолчанию считаем сами.
+    if _PURE or not _NATIVE_RIPEMD:
+        return ripemd.ripemd160_bytes(raw)
+    return hashlib.new("ripemd160", raw).digest()
+
+
+def ripemd_backend() -> str:
+    """Имя движка RIPEMD-160: 'pure' или 'hashlib'."""
+    return "hashlib" if (not _PURE and _NATIVE_RIPEMD) else "pure"
 
 
 if __name__ == "__main__":

@@ -12,7 +12,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 pip install pytest                            # единственная dev-зависимость
-python -m pytest -q                           # 234 теста — держать зелёными
+python -m pytest -q                           # 245 тестов — держать зелёными
 python -m pytest tests/test_node.py -q        # один файл
 python -m pytest tests/test_node.py -k mempool -q   # один тест по имени
 
@@ -42,7 +42,7 @@ python P2P.py --demo                          # демо-сеть из трёх 
 | `wallet.py` | ECDSA secp256k1 (свой на Python + опц. нативный бэкенд), детерминированный нонс RFC 6979, адреса |
 | `keystore.py` | шифрование приватного ключа паролем (KDF+CTR+HMAC на SHA-512, hashlib) |
 | `pqcrypto.py` | пост-квантовые хеш-подписи: Lamport, WOTS, XMSS-lite, `QuantumWallet` (экспериментально) |
-| `hashing.py`, `sha2.py` | SHA-256/512 с нуля + подключаемый бэкенд |
+| `hashing.py`, `sha2.py`, `ripemd.py` | SHA-256/512 и RIPEMD-160 с нуля + подключаемый бэкенд |
 | `hashcash.py`, `economics.py` | proof-of-work, награда/эмиссия/halving |
 | `merkle.py`, `qrcode_gen.py` | дерево Меркла (+ SPV-доказательства), QR с нуля |
 | `contract.py` | `ContractManager`: эскроу и смарт-чеки НА ЦЕПОЧКЕ (+ учебные in-memory классы) |
@@ -58,7 +58,7 @@ python P2P.py --demo                          # демо-сеть из трёх 
 
 Корневые `*.py` (`cli.py`, `api.py`, `P2P.py`, `cache.py`, `IP.py`, …) — тонкие
 запускалки/шимы поверх пакета; править логику нужно в `b_hydra/`. Тесты —
-`tests/` (21 файл, 234 теста, `pytest`). Полная карта слоёв — `ARCHITECTURE.md`,
+`tests/` (22 файла, 245 тестов, `pytest`). Полная карта слоёв — `ARCHITECTURE.md`,
 схема REST-подписи — `API.md`.
 
 ## REST API (`b_hydra/api.py`)
@@ -81,7 +81,11 @@ python P2P.py --demo                          # демо-сеть из трёх 
 ## Ключевые факты и подводные камни
 
 - **Адрес**: `"BHY" + base58(0x1f || ripemd160(sha512(pub)) || double_sha512(payload)[:4])`,
-  публичный ключ несжатый `0x04||X||Y`.
+  публичный ключ несжатый `0x04||X||Y`. RIPEMD-160 — СВОЙ (`ripemd.py`): в
+  сборках OpenSSL 3 его часто нет, а прежний молчаливый откат на
+  `sha256(...)[:20]` давал бы РАЗНЫЕ адреса из одного ключа на разных машинах.
+  `hashlib` теперь только ускоритель и только после сверки байтов
+  (`hashing.ripemd_backend()`).
 - **Подпись/txid** считаются от `signing_payload()` =
   `json.dumps({chain_id, vin:[{txid,index}], vout, timestamp}, sort_keys=True, ensure_ascii=False)`.
   `z = int(sha512(payload)[:32])`, подпись `r||s` (low-s). Нонс `k`
@@ -150,7 +154,7 @@ python P2P.py --demo                          # демо-сеть из трёх 
   `mine_pending` / `_validate_block_transactions` / `_validate_chain`).
   Квант ломает лишь ECDSA — монеты на гибридном адресе недоступны. Обычные
   ECDSA-кошельки (`0x1f`) работают как раньше (обратная совместимость).
-- **Перед push — `python -m pytest -q` должно быть зелёным** (234/234).
+- **Перед push — `python -m pytest -q` должно быть зелёным** (245/245).
 - Коммиты по-русски, осмысленные; заканчиваются трейлерами
   `Co-Authored-By:` и `Claude-Session:`.
 - Не хардкодить идентификатор модели в коде/коммитах/артефактах.
