@@ -35,6 +35,11 @@ INBOUND_TIMEOUT = 10.0           # таймаут чтения входящег�
 MAX_INBOUND_CONNECTIONS = 64     # одновременно обслуживаемых входящих соединений
 FANOUT_WORKERS = 32              # параллелизм рассылки по пирам
 
+# Повтор чужого блока — повод попробовать догнать цепочку, но не чаще, чем
+# раз в SYNC_RETRY_INTERVAL: иначе пир гонял бы нас за полной цепочкой
+# сколько угодно часто.
+SYNC_RETRY_INTERVAL = 2.0        # секунд между докачками цепочки по чужому блоку
+
 
 class _BoundedSet:
     """Множество с пределом размера и FIFO-вытеснением (только stdlib).
@@ -76,6 +81,7 @@ if __name__ == "__main__" and __package__ in (None, ""):
     __package__ = "b_hydra"
 
 from .tcp import recv_message, send_message
+from .blockchain import CHAIN_ID
 from .node import BHydraNode
 
 
@@ -93,6 +99,9 @@ class P2PNode:
         # и подкручивать под медленную сеть.
         self.peer_timeout = PEER_TIMEOUT
         self.inbound_timeout = INBOUND_TIMEOUT
+        self.sync_retry_interval = SYNC_RETRY_INTERVAL
+        self._sync_lock = threading.Lock()
+        self._last_block_sync = 0.0     # когда последний раз тянули цепочку
         # peers читают потоки gossip/sync, а пишут — discovery и обработчики
         # входящих сообщений. Без блокировки обход падал бы с RuntimeError
         # «Set changed size during iteration», убивая поток рассылки.
@@ -131,6 +140,12 @@ class P2PNode:
             return self._json({"type": "pong"})
 
         if mtype == "hello":
+            # Знакомимся только со СВОЕЙ сетью: чужой узел иначе занимал бы
+            # место в таблице пиров и слал блоки, которые всё равно нечем
+            # применить (другой генезис — другая цепочка).
+            if not self.same_network(message):
+                return self._json({"type": "error", "error": "другая сеть",
+                                   **self.network_id()})
             host, port = message.get("host"), message.get("port")
             if host and port:
                 self.add_peer(host, port)
@@ -171,21 +186,40 @@ class P2PNode:
         if mtype == "block":
             block_dict = message["block"]
             bhash = block_dict.get("hash")
-            with self._seen_lock:
-                if bhash in self.seen_blocks:
-                    return self._json({"type": "ack", "accepted": False,
-                                       "height": self.node.height})
-                self.seen_blocks.add(bhash)
-            accepted = self.node.receive_block(block_dict)
             origin = tuple(message["from"]) if message.get("from") else None
+
+            with self._seen_lock:
+                already_seen = bhash in self.seen_blocks
+            if already_seen:
+                # Повтор уже обработанного блока. Раньше здесь был молчаливый
+                # выход — и если блок отвергли из-за отставания, повторные
+                # рассылки того же блока узел игнорировал, оставаясь позади до
+                # ближайшего периодического sync (а его может и не быть).
+                # Теперь повтор — ещё один повод догнать.
+                if origin and self._block_is_ahead(block_dict):
+                    self._sync_from_throttled(origin)
+                return self._json({"type": "ack", "accepted": False,
+                                   "height": self.node.height})
+
+            accepted = self.node.receive_block(block_dict)
             if accepted:
+                with self._seen_lock:
+                    self.seen_blocks.add(bhash)
                 # Gossip: пересылаем блок дальше по сети (кроме отправителя).
                 self._gossip({"type": "block", "block": block_dict,
                               "from": [self.host, self.port]},
                              exclude=origin, background=True)
-            elif origin:
-                # Возможно, мы отстали — подтянуть цепочку у отправителя.
-                self._sync_from(origin)
+            else:
+                # Виденным помечаем только то, что нам и правда не подходит:
+                # бракованный блок или чужую развилку — их дорогая проверка
+                # выполнится один раз. Блок «из будущего» (мы просто отстали)
+                # НЕ помечаем: он ещё пригодится, а повторно отбрасывается за
+                # O(1) — receive_block сверяет previous_hash до всех проверок.
+                if not self._block_is_ahead(block_dict):
+                    with self._seen_lock:
+                        self.seen_blocks.add(bhash)
+                if origin:
+                    self._sync_from_throttled(origin)
             return self._json({"type": "ack", "accepted": accepted,
                                "height": self.node.height})
 
@@ -195,15 +229,44 @@ class P2PNode:
     def _json(obj):
         return json.dumps(obj).encode("utf-8")
 
+    def network_id(self) -> dict:
+        """Отпечаток сети: идентификатор цепи и хеш генезиса.
+
+        Одного `chain_id` мало — он общий для всей «сети», но узлы с разной
+        базовой сложностью имеют РАЗНЫЙ генезис, а значит и несовместимые
+        цепочки (`replace_chain` такую отвергнет). Проверяем оба.
+
+        Это опознание сети, а НЕ аутентификация: злонамеренный узел может
+        назвать чужие значения. Смысл в другом — не пускать в таблицу пиров
+        соседей из другой сети и заставить атакующего хотя бы знать наш
+        генезис. Настоящая аутентификация потребовала бы ключей пиров.
+        """
+        return {"chain_id": CHAIN_ID,
+                "genesis": self.node.blockchain.chain[0].hash}
+
+    def same_network(self, message) -> bool:
+        """True, если собеседник назвал ту же сеть, что и наша.
+
+        Отсутствие полей — тоже несовпадение: иначе проверку обходили бы,
+        просто не присылая их.
+        """
+        if not isinstance(message, dict):
+            return False
+        ours = self.network_id()
+        return (message.get("chain_id") == ours["chain_id"]
+                and message.get("genesis") == ours["genesis"])
+
     def _peers_payload(self) -> dict:
         """Ответ со списком пиров — не длиннее MAX_PEERS_PER_MESSAGE.
 
         Отдавать всю таблицу целиком нельзя: тогда отравленный узел раздаёт
         сотни мусорных адресов каждому, кто спросит, и порча расползается по
-        сети сама.
+        сети сама. Отпечаток сети в ответе позволяет спросившему убедиться,
+        что список пришёл от своего узла.
         """
         return {"type": "peers",
-                "peers": [list(p) for p in self.peer_list()[:MAX_PEERS_PER_MESSAGE]]}
+                "peers": [list(p) for p in self.peer_list()[:MAX_PEERS_PER_MESSAGE]],
+                **self.network_id()}
 
     # --- Сервер ----------------------------------------------------------
     def _serve(self):
@@ -288,9 +351,15 @@ class P2PNode:
             self.peers.add((host, port))
             return True
 
+    def remove_peer(self, host, port) -> None:
+        with self._peers_lock:
+            self.peers.discard((host, port))
+
     def _accept_peers(self, resp: dict):
         """Берёт адреса из ответа пира: не больше MAX_PEERS_PER_MESSAGE и с
         учётом потолка таблицы. Возвращает только по-настоящему новых пиров."""
+        if not self.same_network(resp):
+            return []                     # список от чужой сети не берём
         fresh = []
         entries = resp.get("peers") or []
         for entry in list(entries)[:MAX_PEERS_PER_MESSAGE]:
@@ -324,22 +393,36 @@ class P2PNode:
                     continue          # недоступен или прислал мусор — пропускаем
         return results
 
-    def _say_hello(self, peers):
-        """Представляется каждому пиру (параллельно), чтобы сеть стала мешем."""
-        self._fanout(peers, lambda host, port: self.send(
-            host, port, {"type": "hello", "host": self.host, "port": self.port}))
+    def _hello_message(self) -> dict:
+        return {"type": "hello", "host": self.host, "port": self.port,
+                **self.network_id()}
 
-    def connect(self, host, port):
+    def _say_hello(self, peers):
+        """Представляется каждому пиру (параллельно), чтобы сеть стала мешем.
+
+        Кто ответил из чужой сети — из таблицы убирается.
+        """
+        for peer, resp in self._fanout(
+                peers, lambda host, port: self.send(host, port,
+                                                    self._hello_message())):
+            if not self.same_network(resp):
+                self.remove_peer(*peer)
+
+    def connect(self, host, port) -> bool:
         """Подключается к узлу, обменивается пирами и синхронизируется.
 
         Узел не только узнаёт пиров соседа, но и представляется им (hello),
-        чтобы сеть превращалась в связный меш, а не звезду.
+        чтобы сеть превращалась в связный меш, а не звезду. Возвращает False,
+        если на том конце другая сеть — такого соседа в пиры не берём.
         """
-        resp = self.send(host, port, {"type": "hello",
-                                      "host": self.host, "port": self.port})
+        resp = self.send(host, port, self._hello_message())
+        if not self.same_network(resp):
+            self.remove_peer(host, port)
+            return False
         self.add_peer(host, port)
         self._say_hello(self._accept_peers(resp))
         self.sync()
+        return True
 
     def discover_peers(self):
         """Сплетни об адресах: спросить у известных пиров их списки пиров и
@@ -370,8 +453,11 @@ class P2PNode:
         """Периодически кричим в сеть «я — узел B-hydra на порту N»."""
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        # Отпечаток сети прямо в маяке: сосед из чужой сети отсеивается ещё
+        # до TCP-подключения.
         beacon = json.dumps({"magic": DISCOVERY_MAGIC, "port": self.port,
-                             "id": self._node_id}).encode("utf-8")
+                             "id": self._node_id,
+                             **self.network_id()}).encode("utf-8")
         while self._discovery_running and self._running:
             try:
                 sock.sendto(beacon, ("255.255.255.255", DISCOVERY_PORT))
@@ -406,14 +492,19 @@ class P2PNode:
                 continue
             if msg.get("magic") != DISCOVERY_MAGIC or msg.get("id") == self._node_id:
                 continue                        # чужой протокол или наш же маяк
+            if not self.same_network(msg):
+                continue                        # узел другой сети — не наш сосед
             peer = (addr[0], int(msg.get("port", 0)))
             if not peer[1] or peer == (self.host, self.port):
                 continue
             if not self.add_peer(*peer):
                 continue            # уже знаем его или таблица пиров полна
             try:
-                self.connect(*peer)             # обмен пирами + синхронизация
+                if not self.connect(*peer):     # обмен пирами + синхронизация
+                    self.remove_peer(*peer)     # оказался из другой сети
+                    continue
             except OSError:
+                self.remove_peer(*peer)
                 continue
             if self.on_discover:
                 try:
@@ -491,6 +582,30 @@ class P2PNode:
                   if resp.get("work") is None
                   and resp.get("height", 0) > self.node.height]
         return self._sync_from(max(taller)[1]) if taller else False
+
+    def _block_is_ahead(self, block_dict) -> bool:
+        """True, если блок выше нашей вершины — значит мы просто отстали.
+
+        Блок, продолжающий нашу цепочку, имеет index == height; всё, что
+        больше, — признак отставания, а не брака.
+        """
+        index = block_dict.get("index")
+        return isinstance(index, int) and not isinstance(index, bool) \
+            and index > self.node.height
+
+    def _sync_from_throttled(self, peer) -> bool:
+        """Тянет цепочку у пира, но не чаще sync_retry_interval.
+
+        Ограничение обязательно: повтор чужого блока запускает докачку целой
+        цепочки, и без него сосед мог бы гонять нас за ней сколько угодно
+        часто.
+        """
+        now = time.monotonic()
+        with self._sync_lock:
+            if now - self._last_block_sync < self.sync_retry_interval:
+                return False
+            self._last_block_sync = now
+        return self._sync_from(peer)
 
     def _sync_from(self, peer) -> bool:
         try:

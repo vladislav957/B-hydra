@@ -208,7 +208,7 @@ def test_one_response_cannot_flood_peer_table():
     """Один ответ пира даёт не больше MAX_PEERS_PER_MESSAGE адресов."""
     node = _lone_node()
     fake = [["10.9.%d.%d" % (i // 250, i % 250), 7000 + i] for i in range(500)]
-    accepted = node._accept_peers({"peers": fake})
+    accepted = node._accept_peers({"peers": fake, **node.network_id()})
     assert len(accepted) == MAX_PEERS_PER_MESSAGE
     assert len(node.peers) == MAX_PEERS_PER_MESSAGE
 
@@ -224,7 +224,8 @@ def test_node_does_not_amplify_peer_list():
 def test_accept_peers_ignores_garbage():
     """Мусор в списке пиров не роняет разбор и не попадает в таблицу."""
     node = _lone_node()
-    junk = {"peers": [None, 42, ["хост"], ["хост", "порт"], ["1.2.3.4", 5]]}
+    junk = {"peers": [None, 42, ["хост"], ["хост", "порт"], ["1.2.3.4", 5]],
+            **node.network_id()}
     assert node._accept_peers(junk) == [("1.2.3.4", 5)]
 
 
@@ -344,3 +345,176 @@ def test_sync_falls_back_to_height_for_legacy_peers():
     node.add_peer(*peer)
     assert _sync_with_canned_replies(
         node, {peer: {"height": node.node.height + 5}}) == [peer]
+
+
+# --- Опознание сети: не пускаем соседей из чужой цепочки --------------------
+# chain_id общий для сети, но узлы с разной базовой сложностью имеют РАЗНЫЙ
+# генезис и несовместимые цепочки. Такой сосед занимал бы место в таблице
+# пиров и слал блоки, которые всё равно нечем применить.
+def _alien_node():
+    """Узел другой сети: другая базовая сложность → другой генезис.
+
+    difficulty=2, а не больше: генезис реально майнится, и на чистом
+    Python-SHA каждая лишняя единица сложности стоит секунд.
+    """
+    return P2PNode("127.0.0.1", _free_port(), BHydraNode(difficulty=2))
+
+
+def _alien_identity():
+    """Отпечаток чужой сети без поднятия узла — там, где узел не нужен."""
+    return {"chain_id": "b-hydra-mainnet", "genesis": "ff" * 64}
+
+
+def test_network_id_covers_chain_and_genesis():
+    node = _lone_node()
+    ident = node.network_id()
+    assert ident["genesis"] == node.node.blockchain.chain[0].hash
+    assert ident["chain_id"]
+
+
+def test_missing_network_fields_count_as_mismatch():
+    """Проверку нельзя обойти, просто не прислав поля."""
+    node = _lone_node()
+    ident = node.network_id()
+    assert node.same_network(ident) is True
+    assert node.same_network({}) is False
+    assert node.same_network({"chain_id": ident["chain_id"]}) is False
+    assert node.same_network({"genesis": ident["genesis"]}) is False
+    assert node.same_network(None) is False
+
+
+def test_foreign_genesis_is_not_our_network():
+    ours, alien = _lone_node(), _alien_node()
+    assert ours.node.blockchain.chain[0].hash != alien.node.blockchain.chain[0].hash
+    assert ours.same_network(alien.network_id()) is False
+    assert ours.same_network(_alien_identity()) is False
+
+
+def test_foreign_node_cannot_join_peer_table():
+    """Узел чужой сети не попадает в пиры — ни к нам, ни мы к нему."""
+    ours, alien = _lone_node(), _alien_node()
+    ours.start()
+    alien.start()
+    time.sleep(0.2)
+    try:
+        assert alien.connect(ours.host, ours.port) is False
+        assert (alien.host, alien.port) not in ours.peers
+        assert (ours.host, ours.port) not in alien.peers
+        assert ours.connect(alien.host, alien.port) is False
+    finally:
+        ours.stop()
+        alien.stop()
+
+
+def test_hello_from_foreign_network_is_refused():
+    ours, alien = _lone_node(), _alien_node()
+    ours.start()
+    time.sleep(0.2)
+    try:
+        resp = alien.send(ours.host, ours.port, alien._hello_message())
+        assert resp["type"] == "error"
+        assert (alien.host, alien.port) not in ours.peers
+    finally:
+        ours.stop()
+
+
+def test_same_network_node_still_connects():
+    """Свои соединяются как раньше — проверка не мешает нормальной работе."""
+    first, second = _lone_node(), _lone_node()
+    first.start()
+    second.start()
+    time.sleep(0.2)
+    try:
+        assert second.connect(first.host, first.port) is True
+        assert (first.host, first.port) in second.peers
+        assert (second.host, second.port) in first.peers
+    finally:
+        first.stop()
+        second.stop()
+
+
+def test_peer_list_from_foreign_network_is_ignored():
+    """Список адресов из чужой сети не берём целиком."""
+    node = _lone_node()
+    offered = {"peers": [["10.5.0.1", 7100], ["10.5.0.2", 7101]],
+               **_alien_identity()}
+    assert node._accept_peers(offered) == []
+    assert node.peers == set()
+
+
+# --- Повторная рассылка блока не должна оставлять узел позади ---------------
+def _lagging_pair():
+    """Майнер с цепочкой и отставший узел, оба в одной сети."""
+    miner_node = P2PNode("127.0.0.1", _free_port(), BHydraNode(difficulty=1))
+    lagging = P2PNode("127.0.0.1", _free_port(), BHydraNode(difficulty=1))
+    miner_node.start()
+    lagging.start()
+    time.sleep(0.2)
+    lagging.sync_retry_interval = 0        # в тесте ждать между попытками незачем
+    for _ in range(4):
+        miner_node.node.mine_pending(generate_wallet().address)
+    return miner_node, lagging
+
+
+def test_block_from_the_future_is_not_marked_seen():
+    """Блок, до которого мы не доросли, — не брак, и «виденным» не считается.
+
+    Иначе повторная рассылка того же блока игнорировалась бы молча, и узел
+    оставался бы позади до ближайшего периодического sync.
+    """
+    miner_node, lagging = _lagging_pair()
+    try:
+        block = miner_node.node.blockchain.last_block.to_dict()
+        assert lagging._block_is_ahead(block)
+        # Отправитель недоступен → догнать не выйдет, но и запоминать нечего.
+        lagging.send(lagging.host, lagging.port,
+                     {"type": "block", "block": block,
+                      "from": ["127.0.0.1", _free_port()]})
+        assert block["hash"] not in lagging.seen_blocks
+    finally:
+        miner_node.stop()
+        lagging.stop()
+
+
+def test_repeated_block_retries_sync_after_a_failed_attempt():
+    """Вторая доставка того же блока даёт узлу ещё один шанс догнать."""
+    miner_node, lagging = _lagging_pair()
+    try:
+        block = miner_node.node.blockchain.last_block.to_dict()
+        # Первая попытка: origin — мёртвый порт, синхронизация не удаётся.
+        lagging.send(lagging.host, lagging.port,
+                     {"type": "block", "block": block,
+                      "from": ["127.0.0.1", _free_port()]})
+        assert lagging.node.height < miner_node.node.height
+
+        # Тот же блок, но теперь отправитель жив — узел обязан догнать.
+        lagging.send(lagging.host, lagging.port,
+                     {"type": "block", "block": block,
+                      "from": [miner_node.host, miner_node.port]})
+        assert _wait_until(
+            lambda: lagging.node.height == miner_node.node.height)
+    finally:
+        miner_node.stop()
+        lagging.stop()
+
+
+def test_unusable_block_is_remembered_to_avoid_revalidation():
+    """Брак на нашей же высоте запоминается — дорогую проверку делаем один раз."""
+    node = _lone_node()
+    bogus = {"index": node.node.height, "previous_hash": "00" * 64,
+             "data": [], "timestamp": 1.0, "nonce": 0,
+             "target": "%x" % node.node.blockchain.genesis_target,
+             "hash": "ab" * 64, "merkle_root": "cd" * 64}
+    assert node._block_is_ahead(bogus) is False
+    # Узел не поднят — дёргаем обработчик напрямую.
+    node._dispatch(node._json({"type": "block", "block": bogus}))
+    assert bogus["hash"] in node.seen_blocks
+
+
+def test_sync_retry_is_throttled():
+    """Повторы блока не дают гонять нас за цепочкой без ограничений."""
+    node = _lone_node()
+    node.sync_retry_interval = 60
+    peer = ("127.0.0.1", _free_port())      # недостижим — важен сам факт попытки
+    node._sync_from_throttled(peer)         # первая попытка проходит
+    assert node._sync_from_throttled(peer) is False   # вторая — отсечена
