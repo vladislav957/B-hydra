@@ -84,6 +84,61 @@ def _hash_to_int(payload: bytes) -> int:
     return z
 
 
+# --- Детерминированный нонс (RFC 6979) ---------------------------------------
+_HMAC_BLOCK = 128            # внутренний размер блока SHA-512 (RFC 2104)
+
+
+def _hmac_sha512(key: bytes, message: bytes) -> bytes:
+    """HMAC на нашем SHA-512 (RFC 2104) — строительный блок RFC 6979."""
+    if len(key) > _HMAC_BLOCK:
+        key = hashing.sha512_bytes(key)
+    key = key.ljust(_HMAC_BLOCK, b"\x00")
+    inner = hashing.sha512_bytes(bytes(b ^ 0x36 for b in key) + message)
+    return hashing.sha512_bytes(bytes(b ^ 0x5c for b in key) + inner)
+
+
+def _rfc6979_nonces(priv: int, z: int, order: int = _N,
+                    hmac_fn=_hmac_sha512, hlen: int = 64):
+    """Генератор кандидатов в нонс k по RFC 6979 (детерминированно).
+
+    k выводится из приватного ключа и хеша сообщения через HMAC-DRBG, а не
+    берётся из генератора случайных чисел. Это принципиально для ECDSA: два
+    разных сообщения, подписанных ОДНИМ k, раскрывают приватный ключ
+    элементарной алгеброй (так уводили ключи из PS3 и ряда кошельков). При
+    детерминированном выводе один и тот же k у разных сообщений невозможен,
+    а качество ГСЧ перестаёт влиять на безопасность подписи.
+
+    Генератор, а не одно значение: если кандидат не подошёл (k вне диапазона
+    либо получились r == 0 / s == 0), RFC предписывает продолжить ту же
+    HMAC-цепочку, а не начинать заново.
+
+    Параметры order/hmac_fn/hlen вынесены, чтобы алгоритм можно было
+    проверить на эталонных векторах RFC 6979 (там другая кривая и SHA-256).
+    """
+    qlen = order.bit_length()
+    rlen = (qlen + 7) // 8
+    # int2octets(x) и bits2octets(H(m)) из RFC 6979.
+    material = priv.to_bytes(rlen, "big") + (z % order).to_bytes(rlen, "big")
+
+    v = b"\x01" * hlen
+    k = b"\x00" * hlen
+    k = hmac_fn(k, v + b"\x00" + material)
+    v = hmac_fn(k, v)
+    k = hmac_fn(k, v + b"\x01" + material)
+    v = hmac_fn(k, v)
+
+    while True:
+        temp = b""
+        while len(temp) * 8 < qlen:
+            v = hmac_fn(k, v)
+            temp += v
+        candidate = int.from_bytes(temp, "big") >> max(0, len(temp) * 8 - qlen)
+        if 1 <= candidate < order:
+            yield candidate
+        k = hmac_fn(k, v + b"\x00")     # кандидат отвергнут — тянем цепочку дальше
+        v = hmac_fn(k, v)
+
+
 # --- Кодирование адреса ------------------------------------------------------
 def _b58encode(data: bytes) -> str:
     num = int.from_bytes(data, "big")
@@ -240,12 +295,17 @@ class Wallet:
 
     # --- Подпись / проверка ----------------------------------------------
     def sign(self, payload: bytes) -> str:
-        """Подписывает байты ECDSA, возвращает hex (r||s, по 32 байта)."""
+        """Подписывает байты ECDSA, возвращает hex (r||s, по 32 байта).
+
+        Нонс k детерминированный (RFC 6979) — выводится из приватного ключа и
+        хеша сообщения, а не из ГСЧ. Подпись перестаёт зависеть от качества
+        генератора случайных чисел: сбой или повтор k раскрыл бы ключ. Побочный
+        плюс — подпись воспроизводима и её можно сверять байт-в-байт.
+        """
         if isinstance(payload, str):
             payload = payload.encode("utf-8")
         z = _hash_to_int(payload)
-        while True:
-            k = secrets.randbelow(_N - 1) + 1
+        for k in _rfc6979_nonces(self._priv, z):
             point = _scalar_mult(k, _G)
             r = point[0] % _N
             if r == 0:

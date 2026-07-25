@@ -98,3 +98,100 @@ def test_from_private_hex_is_lenient_and_clear():
     for bad in ("", "0x", "BHYDabc", k[:-1], "zz" * 32):
         with pytest.raises(ValueError):
             Wallet.from_private_hex(bad)
+
+
+# --- Детерминированный нонс RFC 6979 ----------------------------------------
+# ECDSA раскрывает приватный ключ, если один и тот же k использован для двух
+# сообщений. Пока k брался из ГСЧ, безопасность подписи зависела от качества
+# генератора; RFC 6979 выводит k из ключа и хеша сообщения через HMAC.
+import hashlib
+import hmac as _ref_hmac
+import os
+
+from b_hydra.wallet import _hmac_sha512, _rfc6979_nonces
+
+
+def test_our_hmac_matches_reference():
+    """Наш HMAC-SHA512 байт-в-байт совпадает с hmac/hashlib."""
+    for _ in range(50):
+        key, message = os.urandom(20), os.urandom(64)
+        assert _hmac_sha512(key, message) == _ref_hmac.new(
+            key, message, hashlib.sha512).digest()
+
+
+def test_our_hmac_handles_oversized_key():
+    """Ключ длиннее блока SHA-512 сжимается хешем (RFC 2104)."""
+    key, message = os.urandom(200), b"payload"
+    assert _hmac_sha512(key, message) == _ref_hmac.new(
+        key, message, hashlib.sha512).digest()
+
+
+def test_matches_official_rfc6979_vectors():
+    """Эталонные векторы RFC 6979 (приложение A.2.5: P-256 + SHA-256).
+
+    Нонс зависит только от порядка кривой, ключа и хеша сообщения, поэтому
+    вектор проверяется без арифметики на кривой. Совпадение доказывает, что
+    HMAC-DRBG собран ровно по спецификации.
+    """
+    order = 0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551
+    priv = 0xC9AFA9D845BA75166B5C215767B1D6934E50C3DB36E89B127B8A622B120F6721
+    expected = {
+        b"sample": 0xA6E3C57DD01ABE90086538398355DD4C3B17AA873382B0F24D6129493D8AAD60,
+        b"test": 0xD16B6AE827F17175E040871A1C7EC3500192C4C92677336EC2537ACAEE0008E0,
+    }
+    for message, want in expected.items():
+        digest = hashlib.sha256(message).digest()
+        z = int.from_bytes(digest, "big")      # len(digest)*8 == qlen, сдвиг не нужен
+        nonce = next(_rfc6979_nonces(
+            priv, z, order=order,
+            hmac_fn=lambda k, m: _ref_hmac.new(k, m, hashlib.sha256).digest(),
+            hlen=32))
+        assert nonce == want
+
+
+def test_nonce_stays_in_range():
+    from b_hydra.wallet import _N
+    w = generate_wallet()
+    priv = int(w.private_key_hex, 16)
+    nonces = _rfc6979_nonces(priv, 12345)
+    for _, nonce in zip(range(5), nonces):
+        assert 1 <= nonce < _N
+
+
+def test_signature_is_reproducible():
+    """Одно сообщение и один ключ дают ровно ту же подпись."""
+    w = generate_wallet()
+    assert w.sign("перевод 10") == w.sign("перевод 10")
+
+
+def test_different_messages_give_different_nonces():
+    """Разные сообщения не должны переиспользовать нонс (иначе утечка ключа).
+
+    Разные r в подписях означают разные k: r — это x-координата точки k·G.
+    """
+    w = generate_wallet()
+    first = w.sign("перевод 10")[:64]     # r
+    second = w.sign("перевод 20")[:64]
+    assert first != second
+
+
+def test_different_keys_give_different_nonces():
+    """Нонс завязан на приватный ключ, а не только на сообщение."""
+    a, b = generate_wallet(), generate_wallet()
+    assert a.sign("одно и то же")[:64] != b.sign("одно и то же")[:64]
+
+
+def test_deterministic_signature_still_verifies():
+    w = generate_wallet()
+    signature = w.sign("оплата")
+    assert Wallet.verify(w.public_key_hex, "оплата", signature)
+    assert not Wallet.verify(w.public_key_hex, "другая оплата", signature)
+
+
+def test_signature_keeps_low_s():
+    """Low-s сохранён — защита от ковкости подписи."""
+    from b_hydra.wallet import _N
+    w = generate_wallet()
+    for i in range(10):
+        s = int(w.sign(f"сообщение {i}")[64:], 16)
+        assert 0 < s <= _N // 2
