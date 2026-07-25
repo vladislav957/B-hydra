@@ -3,8 +3,8 @@ P2P.py — одноранговая синхронизация узлов B-hydr
 
 Каждый узел поднимает TCP-сервер и общается с другими узлами JSON-сообщениями:
 обменивается списком пиров, рассылает новые блоки и транзакции и подтягивает
-у соседей самую длинную валидную цепочку (правило консенсуса «longest valid
-chain»). Логика блокчейна — в Node.py (BHydraNode); здесь транспорт и протокол.
+у соседей самую ТРУДНУЮ валидную цепочку (консенсус по суммарной работе, а не
+по длине). Логика блокчейна — в Node.py (BHydraNode); здесь транспорт и протокол.
 
 Демонстрация (три узла локально):
     python P2P.py
@@ -16,12 +16,24 @@ import socket
 import threading
 import time
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Предел числа запомненных txid/хешей блоков для анти-петли gossip. Без него
 # множества seen_* росли бы без границ (утечка памяти и мягкий DoS: атакующий
 # шлёт много уникальных txid). 10 000 последних — с запасом хватает, чтобы не
 # пересылать недавно виденное повторно.
 SEEN_LIMIT = 10_000
+
+# --- Защита сетевого слоя от недружелюбного пира ---------------------------
+# Таблица пиров и обход её — главная точка приложения сил атакующего: раздуть
+# её ничего не стоит (адреса не проверяются и ничего не стоят), а обход с
+# таймаутом на каждого превращает это в паралич узла.
+MAX_PEERS = 256                  # потолок таблицы пиров
+MAX_PEERS_PER_MESSAGE = 32       # сколько адресов принимаем/отдаём за один раз
+PEER_TIMEOUT = 2.0               # таймаут исходящего запроса к пиру, с
+INBOUND_TIMEOUT = 10.0           # таймаут чтения входящего сообщения, с
+MAX_INBOUND_CONNECTIONS = 64     # одновременно обслуживаемых входящих соединений
+FANOUT_WORKERS = 32              # параллелизм рассылки по пирам
 
 
 class _BoundedSet:
@@ -71,15 +83,26 @@ class P2PNode:
     """Сетевой узел B-hydra: TCP-сервер + клиент + синхронизация."""
 
     def __init__(self, host="127.0.0.1", port=5000, node=None,
-                 seen_limit=SEEN_LIMIT):
+                 seen_limit=SEEN_LIMIT, max_peers=MAX_PEERS):
         self.host = host
         self.port = port
         self.node = node if node is not None else BHydraNode()
         self.peers = set()          # известные пиры: множество (host, port)
+        self.max_peers = max(1, int(max_peers))
+        # Таймауты — атрибуты узла, а не константы: их удобно ужимать в тестах
+        # и подкручивать под медленную сеть.
+        self.peer_timeout = PEER_TIMEOUT
+        self.inbound_timeout = INBOUND_TIMEOUT
+        # peers читают потоки gossip/sync, а пишут — discovery и обработчики
+        # входящих сообщений. Без блокировки обход падал бы с RuntimeError
+        # «Set changed size during iteration», убивая поток рассылки.
+        self._peers_lock = threading.Lock()
         # Анти-петля gossip с пределом размера (FIFO) — без утечки памяти:
         self.seen_tx = _BoundedSet(seen_limit)      # txid уже виденных транзакций
         self.seen_blocks = _BoundedSet(seen_limit)  # хеши уже виденных блоков
         self._seen_lock = threading.Lock()
+        # Потолок одновременно обслуживаемых входящих соединений.
+        self._inbound = threading.Semaphore(MAX_INBOUND_CONNECTIONS)
         self._server = None
         self._running = False
         self._node_id = secrets.token_hex(8)   # чтобы не отвечать на свой же маяк
@@ -111,15 +134,16 @@ class P2PNode:
             host, port = message.get("host"), message.get("port")
             if host and port:
                 self.add_peer(host, port)
-            return self._json({"type": "peers",
-                               "peers": [list(p) for p in self.peers]})
+            return self._json(self._peers_payload())
 
         if mtype == "get_peers":
-            return self._json({"type": "peers",
-                               "peers": [list(p) for p in self.peers]})
+            return self._json(self._peers_payload())
 
         if mtype == "get_height":
-            return self._json({"type": "height", "height": self.node.height})
+            # Работа цепочки, а не только высота: по ней пир решает, у кого
+            # синхронизироваться (то же правило, что и в replace_chain).
+            return self._json({"type": "height", "height": self.node.height,
+                               "work": self.node.blockchain.total_work})
 
         if mtype == "get_chain":
             return self._json({
@@ -171,6 +195,16 @@ class P2PNode:
     def _json(obj):
         return json.dumps(obj).encode("utf-8")
 
+    def _peers_payload(self) -> dict:
+        """Ответ со списком пиров — не длиннее MAX_PEERS_PER_MESSAGE.
+
+        Отдавать всю таблицу целиком нельзя: тогда отравленный узел раздаёт
+        сотни мусорных адресов каждому, кто спросит, и порча расползается по
+        сети сама.
+        """
+        return {"type": "peers",
+                "peers": [list(p) for p in self.peer_list()[:MAX_PEERS_PER_MESSAGE]]}
+
     # --- Сервер ----------------------------------------------------------
     def _serve(self):
         self._server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -188,15 +222,32 @@ class P2PNode:
             except OSError:
                 break
             # Каждое соединение обслуживаем в отдельном потоке, чтобы узел мог
-            # синхронизироваться, пока обрабатывает входящее сообщение.
+            # синхронизироваться, пока обрабатывает входящее сообщение. Число
+            # таких потоков ограничено: иначе поток соединений от одного пира
+            # исчерпает память узла.
+            if not self._inbound.acquire(blocking=False):
+                conn.close()
+                continue
             threading.Thread(target=self._handle_conn, args=(conn,),
                              daemon=True).start()
 
     def _handle_conn(self, conn):
-        with conn:
-            raw = recv_message(conn)
-            if raw:
-                send_message(conn, self._handle_message(raw))
+        """Обслуживает одно входящее сообщение и закрывает соединение.
+
+        Таймаут обязателен: без него пир, который открыл соединение и замолчал
+        (или прислал половину заголовка длины), держал бы поток бесконечно —
+        полсотни таких «молчунов» навсегда занимают полсотни потоков.
+        """
+        try:
+            with conn:
+                conn.settimeout(self.inbound_timeout)
+                raw = recv_message(conn)
+                if raw:
+                    send_message(conn, self._handle_message(raw))
+        except OSError:
+            pass                    # таймаут или разрыв — просто закрываем
+        finally:
+            self._inbound.release()
 
     def start(self):
         thread = threading.Thread(target=self._serve, daemon=True)
@@ -212,15 +263,71 @@ class P2PNode:
     # --- Клиент ----------------------------------------------------------
     def send(self, host, port, message: dict) -> dict:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client:
-            client.settimeout(5)
+            client.settimeout(self.peer_timeout)
             client.connect((host, port))
             send_message(client, self._json(message))
             raw = recv_message(client)
         return json.loads(raw.decode("utf-8")) if raw else {}
 
-    def add_peer(self, host, port):
-        if (host, port) != (self.host, self.port):
+    def peer_list(self):
+        """Снимок таблицы пиров — безопасен при параллельных add_peer."""
+        with self._peers_lock:
+            return list(self.peers)
+
+    def add_peer(self, host, port) -> bool:
+        """Добавляет пира. Возвращает True, только если он ДЕЙСТВИТЕЛЬНО новый.
+
+        Потолок обязателен: адреса ничего не стоят и никак не проверяются, так
+        что без него один ответ на hello раздувает таблицу до любого размера.
+        """
+        if (host, port) == (self.host, self.port):
+            return False
+        with self._peers_lock:
+            if (host, port) in self.peers or len(self.peers) >= self.max_peers:
+                return False
             self.peers.add((host, port))
+            return True
+
+    def _accept_peers(self, resp: dict):
+        """Берёт адреса из ответа пира: не больше MAX_PEERS_PER_MESSAGE и с
+        учётом потолка таблицы. Возвращает только по-настоящему новых пиров."""
+        fresh = []
+        entries = resp.get("peers") or []
+        for entry in list(entries)[:MAX_PEERS_PER_MESSAGE]:
+            try:
+                host, port = entry[0], int(entry[1])
+            except (TypeError, ValueError, IndexError, KeyError):
+                continue                      # мусор в ответе — пропускаем
+            if self.add_peer(host, port):
+                fresh.append((host, port))
+        return fresh
+
+    def _fanout(self, peers, action):
+        """Параллельно выполняет action(host, port) по всем пирам.
+
+        Последовательный обход — главная уязвимость сетевого слоя: каждый
+        недостижимый адрес держит поток до таймаута, поэтому десяток
+        «чёрных дыр» в таблице останавливал узел на минуты. Возвращает пары
+        (пир, результат) только для тех, кто ответил.
+        """
+        peers = list(peers)
+        if not peers:
+            return []
+        results = []
+        with ThreadPoolExecutor(max_workers=min(len(peers), FANOUT_WORKERS)) as pool:
+            futures = {pool.submit(action, host, port): (host, port)
+                       for host, port in peers}
+            for future in as_completed(futures):
+                try:
+                    results.append((futures[future], future.result()))
+                except (OSError, ValueError):
+                    continue          # недоступен или прислал мусор — пропускаем
+        return results
+
+    def _say_hello(self, peers):
+        """Представляется каждому пиру (параллельно), чтобы сеть стала мешем."""
+        self._fanout(peers, lambda host, port: self.send(
+            host, port, {"type": "hello", "host": self.host, "port": self.port}))
 
     def connect(self, host, port):
         """Подключается к узлу, обменивается пирами и синхронизируется.
@@ -231,35 +338,20 @@ class P2PNode:
         resp = self.send(host, port, {"type": "hello",
                                       "host": self.host, "port": self.port})
         self.add_peer(host, port)
-        for h, p in resp.get("peers", []):
-            if (h, p) == (self.host, self.port) or (h, p) in self.peers:
-                continue
-            self.add_peer(h, p)
-            try:                       # представиться новому пиру
-                self.send(h, p, {"type": "hello",
-                                 "host": self.host, "port": self.port})
-            except OSError:
-                continue
+        self._say_hello(self._accept_peers(resp))
         self.sync()
 
     def discover_peers(self):
         """Сплетни об адресах: спросить у известных пиров их списки пиров и
         подключиться к новым (как `addr`-обмен в Bitcoin — сеть расползается
         сама, без ручного ввода адресов каждого узла)."""
-        for host, port in list(self.peers):
-            try:
-                resp = self.send(host, port, {"type": "get_peers"})
-            except OSError:
-                continue
-            for h, p in resp.get("peers", []):
-                if (h, p) == (self.host, self.port) or (h, p) in self.peers:
-                    continue
-                self.add_peer(h, p)
-                try:                       # представиться новому пиру
-                    self.send(h, p, {"type": "hello",
-                                     "host": self.host, "port": self.port})
-                except OSError:
-                    continue
+        replies = self._fanout(
+            self.peer_list(),
+            lambda host, port: self.send(host, port, {"type": "get_peers"}))
+        fresh = []
+        for _peer, resp in replies:
+            fresh.extend(self._accept_peers(resp))
+        self._say_hello(fresh)
 
     # --- Авто-поиск в локальной сети (UDP-маяки, WiFi/LAN без интернета) ---
     def start_discovery(self, interval: int = 5):
@@ -315,9 +407,10 @@ class P2PNode:
             if msg.get("magic") != DISCOVERY_MAGIC or msg.get("id") == self._node_id:
                 continue                        # чужой протокол или наш же маяк
             peer = (addr[0], int(msg.get("port", 0)))
-            if not peer[1] or peer == (self.host, self.port) or peer in self.peers:
+            if not peer[1] or peer == (self.host, self.port):
                 continue
-            self.add_peer(*peer)
+            if not self.add_peer(*peer):
+                continue            # уже знаем его или таблица пиров полна
             try:
                 self.connect(*peer)             # обмен пирами + синхронизация
             except OSError:
@@ -330,13 +423,9 @@ class P2PNode:
         sock.close()
 
     def broadcast(self, message: dict):
-        results = []
-        for host, port in list(self.peers):
-            try:
-                results.append(self.send(host, port, message))
-            except OSError:
-                continue
-        return results
+        results = self._fanout(self.peer_list(),
+                               lambda host, port: self.send(host, port, message))
+        return [resp for _peer, resp in results]
 
     def _gossip(self, message: dict, exclude=None, background: bool = False):
         """Пересылает сообщение всем пирам, кроме `exclude`.
@@ -346,13 +435,9 @@ class P2PNode:
         приводила к взаимоблокировке в кольцевых топологиях).
         """
         def _run():
-            for host, port in list(self.peers):
-                if (host, port) == exclude:
-                    continue
-                try:
-                    self.send(host, port, message)
-                except OSError:
-                    continue
+            targets = [peer for peer in self.peer_list() if peer != exclude]
+            self._fanout(targets,
+                         lambda host, port: self.send(host, port, message))
 
         if background:
             threading.Thread(target=_run, daemon=True).start()
@@ -380,16 +465,32 @@ class P2PNode:
         return block
 
     def sync(self) -> bool:
-        """Находит пира с самой длинной цепочкой и подтягивает её."""
-        best_peer, best_height = None, self.node.height
-        for peer in list(self.peers):
-            try:
-                resp = self.send(peer[0], peer[1], {"type": "get_height"})
-            except OSError:
-                continue
-            if resp.get("height", 0) > best_height:
-                best_height, best_peer = resp["height"], peer
-        return self._sync_from(best_peer) if best_peer else False
+        """Находит пира с самой ТЯЖЁЛОЙ цепочкой и подтягивает её.
+
+        Ранжируем по суммарной работе — тому же правилу, по которому
+        replace_chain принимает решение. Выбор по высоте расходился с
+        консенсусом: более короткая, но более трудная цепочка не выигрывала
+        и узел на неё не переходил. Пиры старых версий работу не сообщают —
+        для них остаётся сравнение по высоте.
+
+        Ошибиться выбором безопасно: окончательное решение всё равно за
+        replace_chain, который сверяет работу сам.
+        """
+        replies = self._fanout(
+            self.peer_list(),
+            lambda host, port: self.send(host, port, {"type": "get_height"}))
+
+        heavier = [(resp["work"], peer) for peer, resp in replies
+                   if isinstance(resp.get("work"), int)
+                   and resp["work"] > self.node.blockchain.total_work]
+        if heavier:
+            return self._sync_from(max(heavier)[1])
+
+        # Запасной путь: пир не сообщил работу (старая версия) — судим по высоте.
+        taller = [(resp.get("height", 0), peer) for peer, resp in replies
+                  if resp.get("work") is None
+                  and resp.get("height", 0) > self.node.height]
+        return self._sync_from(max(taller)[1]) if taller else False
 
     def _sync_from(self, peer) -> bool:
         try:
