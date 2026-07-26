@@ -847,3 +847,163 @@ def test_sync_tries_the_next_peer_when_the_best_one_fails():
     finally:
         server.close()
         honest.stop()
+
+
+# --- Репутация пиров ---------------------------------------------------------
+# Прежние лимиты ограничивали УЩЕРБ от плохого соседа, но не отсекали источник:
+# пир, шлющий мусор, оставался в таблице и продолжал получать gossip.
+from b_hydra.p2p import (BAN_SCORE, PENALTY_BAD_MESSAGE, PENALTY_INVALID_BLOCK,
+                         PENALTY_FOREIGN_NETWORK, PENALTY_GARBAGE_PEERS)
+from b_hydra.tcp import recv_message as _recv, send_message as _send
+
+EXTERNAL = "203.0.113.7"          # адрес из документационного диапазона
+
+
+def _strict_node(**kwargs):
+    """Узел, который банит и локальные адреса — иначе тесты на loopback немы."""
+    node = _lone_node(**kwargs)
+    node.ban_loopback = True
+    return node
+
+
+def _send_garbage(node):
+    with socket.socket() as client:
+        client.settimeout(3)
+        client.connect((node.host, node.port))
+        _send(client, b"\xff\xfe not json \x00")
+        return _recv(client)
+
+
+def test_penalties_accumulate_and_lead_to_a_ban():
+    node = _strict_node()
+    hits = BAN_SCORE // PENALTY_BAD_MESSAGE
+    for _ in range(hits - 1):
+        node._penalise(EXTERNAL, PENALTY_BAD_MESSAGE)
+    assert node.is_banned(EXTERNAL) is False
+    assert node.ban_score(EXTERNAL) == PENALTY_BAD_MESSAGE * (hits - 1)
+    node._penalise(EXTERNAL, PENALTY_BAD_MESSAGE)
+    assert node.is_banned(EXTERNAL) is True
+
+
+def test_garbage_messages_get_the_sender_banned():
+    """Поток неразбираемых сообщений отсекает отправителя."""
+    node = _strict_node()
+    node.start()
+    time.sleep(0.2)
+    try:
+        for _ in range(BAN_SCORE // PENALTY_BAD_MESSAGE):
+            try:
+                _send_garbage(node)
+            except OSError:
+                pass                     # последнее соединение уже могут закрыть
+        assert node.is_banned("127.0.0.1") is True
+    finally:
+        node.stop()
+
+
+def test_banned_peer_is_not_served():
+    """Забаненному отказывают сразу, не тратя поток на разбор сообщения."""
+    node = _strict_node()
+    node.start()
+    time.sleep(0.2)
+    try:
+        assert node.send(node.host, node.port, {"type": "ping"})["type"] == "pong"
+        node.ban_peer("127.0.0.1")
+        # Соединение закрывают сразу: send() возвращает пустой ответ (или
+        # получает разрыв) — обслуживания нет ни в том, ни в другом случае.
+        try:
+            answer = node.send(node.host, node.port, {"type": "ping"})
+        except OSError:
+            answer = {}
+        assert not answer
+    finally:
+        node.stop()
+
+
+def test_banned_host_cannot_be_added_back():
+    node = _strict_node()
+    node.ban_peer(EXTERNAL)
+    assert node.add_peer(EXTERNAL, 7001) is False
+    assert node.peers == set()
+
+
+def test_ban_drops_every_port_of_that_host():
+    node = _strict_node()
+    node.add_peer(EXTERNAL, 7001)
+    node.add_peer(EXTERNAL, 7002)
+    node.add_peer("198.51.100.9", 7003)          # другой хост — не трогаем
+    node.ban_peer(EXTERNAL)
+    assert node.peers == {("198.51.100.9", 7003)}
+
+
+def test_ban_expires():
+    node = _strict_node()
+    node.ban_peer(EXTERNAL, duration=0.3)
+    assert node.is_banned(EXTERNAL) is True
+    time.sleep(0.5)
+    assert node.is_banned(EXTERNAL) is False
+
+
+def test_isolated_mistake_is_forgiven():
+    """Редкий сбой у честного соседа не должен копиться годами."""
+    node = _strict_node()
+    node.score_reset_after = 0.2
+    node._penalise(EXTERNAL, PENALTY_BAD_MESSAGE)
+    assert node.ban_score(EXTERNAL) == PENALTY_BAD_MESSAGE
+    time.sleep(0.4)                              # давнее нарушение прощается
+    node._penalise(EXTERNAL, PENALTY_BAD_MESSAGE)
+    assert node.ban_score(EXTERNAL) == PENALTY_BAD_MESSAGE
+
+
+def test_loopback_is_not_banned_by_default():
+    """Иначе одно битое сообщение положило бы все узлы на машине."""
+    node = _lone_node()                          # ban_loopback выключен
+    for _ in range(BAN_SCORE * 2 // PENALTY_BAD_MESSAGE):
+        node._penalise("127.0.0.1", PENALTY_BAD_MESSAGE)
+    assert node.is_banned("127.0.0.1") is False
+    for _ in range(BAN_SCORE // PENALTY_BAD_MESSAGE):
+        node._penalise(EXTERNAL, PENALTY_BAD_MESSAGE)
+    assert node.is_banned(EXTERNAL) is True      # внешний — банится как обычно
+
+
+def test_foreign_network_hello_is_penalised():
+    ours = _strict_node()
+    alien = _alien_node()
+    ours._dispatch(ours._json({"type": "hello", "host": "1.2.3.4", "port": 5,
+                               **alien.network_id()}), EXTERNAL)
+    assert ours.ban_score(EXTERNAL) == PENALTY_FOREIGN_NETWORK
+
+
+def test_garbage_peer_list_is_penalised():
+    node = _strict_node()
+    node._accept_peers({"peers": [None, 42, ["1.2.3.4", 5]], **node.network_id()},
+                       source=EXTERNAL)
+    assert node.ban_score(EXTERNAL) == PENALTY_GARBAGE_PEERS
+
+
+def test_unusable_block_is_penalised():
+    node = _strict_node()
+    bogus = {"index": node.node.height, "previous_hash": "00" * 64,
+             "data": [], "timestamp": 1.0, "nonce": 0,
+             "target": "%x" % node.node.blockchain.genesis_target,
+             "hash": "ab" * 64, "merkle_root": "cd" * 64}
+    node._dispatch(node._json({"type": "block", "block": bogus}), EXTERNAL)
+    assert node.ban_score(EXTERNAL) == PENALTY_INVALID_BLOCK
+
+
+def test_lagging_behind_does_not_punish_an_honest_peer():
+    """Блок «из будущего» — не вина соседа, а наше отставание.
+
+    Честный майнер, ушедший вперёд, не должен зарабатывать штрафы только за
+    то, что мы за ним не поспеваем.
+    """
+    source = _chain_of(5, batch=10)
+    node = _strict_node()
+    try:
+        ahead = source.node.blockchain.last_block.to_dict()
+        assert node._block_is_ahead(ahead)
+        node._dispatch(node._json({"type": "block", "block": ahead}), EXTERNAL)
+        assert node.ban_score(EXTERNAL) == 0
+        assert node.is_banned(EXTERNAL) is False
+    finally:
+        source.stop()

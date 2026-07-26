@@ -58,6 +58,21 @@ SYNC_PEER_ATTEMPTS = 4           # сколько кандидатов проб�
 DEFAULT_PEERS_FILE = "bhydra_peers.json"
 DEFAULT_SEEDS = ()               # адреса вида ("host", port); задаются сетью
 
+# --- Репутация пиров --------------------------------------------------------
+# Лимиты выше ограничивают УЩЕРБ от плохого соседа, но не отсекают источник:
+# пир, который шлёт мусор или заведомо негодные блоки, оставался в таблице, и
+# мы продолжали слать ему gossip и спрашивать у него цепочку. Теперь за
+# нарушения начисляются штрафные очки, а при переполнении адрес временно
+# банится. Бан идёт по ХОСТУ: у входящего соединения виден только его IP, а
+# порт там эфемерный и ни о чём не говорит.
+BAN_SCORE = 100                  # порог, после которого адрес банится
+BAN_DURATION = 3600.0            # на сколько секунд
+SCORE_RESET_AFTER = 600.0        # одиночная оплошность прощается через 10 мин
+PENALTY_BAD_MESSAGE = 25         # неразбираемое или битое сообщение
+PENALTY_INVALID_BLOCK = 50       # заведомо негодный блок (не «мы отстали»)
+PENALTY_FOREIGN_NETWORK = 20     # представился из чужой сети
+PENALTY_GARBAGE_PEERS = 10       # мусор вместо адресов в списке пиров
+
 
 class _BoundedSet:
     """Множество с пределом размера и FIFO-вытеснением (только stdlib).
@@ -127,6 +142,17 @@ class P2PNode:
         self.max_sync_blocks = MAX_SYNC_BLOCKS
         self._sync_lock = threading.Lock()
         self._last_block_sync = 0.0     # когда последний раз тянули цепочку
+        # Репутация: штрафные очки и сроки банов по хостам.
+        self._ban_threshold = BAN_SCORE
+        self.ban_duration = BAN_DURATION
+        self.score_reset_after = SCORE_RESET_AFTER
+        # Локальные адреса по умолчанию НЕ банятся: в реальной сети их не
+        # бывает, а демо, тесты и локальная разработка живут на loopback, где
+        # один банный список положил бы сразу все узлы машины.
+        self.ban_loopback = False
+        self._scores = {}               # хост → (очки, когда начислены)
+        self._banned = {}               # хост → до какого момента забанен
+        self._ban_lock = threading.Lock()
         # peers читают потоки gossip/sync, а пишут — discovery и обработчики
         # входящих сообщений. Без блокировки обход падал бы с RuntimeError
         # «Set changed size during iteration», убивая поток рассылки.
@@ -144,19 +170,22 @@ class P2PNode:
         self.on_discover = None                # колбэк (host, port) при находке
 
     # --- Протокол --------------------------------------------------------
-    def _handle_message(self, raw: bytes) -> bytes:
+    def _handle_message(self, raw: bytes, host=None) -> bytes:
         # Верхний предохранитель: любое некорректное сообщение от пира
         # (нет обязательного поля, битая структура блока/транзакции) не должно
         # ронять поток-обработчик — иначе удалённый пир может вырубить узел.
+        # Но и молча терпеть поток мусора не будем — начисляем штраф.
         try:
-            return self._dispatch(raw)
+            return self._dispatch(raw, host)
         except Exception:
+            self._penalise(host, PENALTY_BAD_MESSAGE)
             return self._json({"type": "error", "error": "bad message"})
 
-    def _dispatch(self, raw: bytes) -> bytes:
+    def _dispatch(self, raw: bytes, host=None) -> bytes:
         try:
             message = json.loads(raw.decode("utf-8"))
         except (ValueError, UnicodeDecodeError):
+            self._penalise(host, PENALTY_BAD_MESSAGE)
             return self._json({"type": "error", "error": "bad json"})
 
         mtype = message.get("type")
@@ -169,6 +198,7 @@ class P2PNode:
             # место в таблице пиров и слал блоки, которые всё равно нечем
             # применить (другой генезис — другая цепочка).
             if not self.same_network(message):
+                self._penalise(host, PENALTY_FOREIGN_NETWORK)
                 return self._json({"type": "error", "error": "другая сеть",
                                    **self.network_id()})
             host, port = message.get("host"), message.get("port")
@@ -267,6 +297,10 @@ class P2PNode:
                 if not self._block_is_ahead(block_dict):
                     with self._seen_lock:
                         self.seen_blocks.add(bhash)
+                    # Блок не подошёл, и дело НЕ в нашем отставании: либо брак,
+                    # либо чужая развилка. Проверка его дорога — за поток
+                    # такого добра пир должен отвечать.
+                    self._penalise(host, PENALTY_INVALID_BLOCK)
                 if origin:
                     self._sync_from_throttled(origin)
             return self._json({"type": "ack", "accepted": accepted,
@@ -330,9 +364,14 @@ class P2PNode:
         self._running = True
         while self._running:
             try:
-                conn, _addr = self._server.accept()
+                conn, addr = self._server.accept()
             except OSError:
                 break
+            # Забаненного не обслуживаем вовсе — дешевле всего отказать сразу,
+            # не тратя ни потока, ни разбора сообщения.
+            if self.is_banned(addr[0]):
+                conn.close()
+                continue
             # Каждое соединение обслуживаем в отдельном потоке, чтобы узел мог
             # синхронизироваться, пока обрабатывает входящее сообщение. Число
             # таких потоков ограничено: иначе поток соединений от одного пира
@@ -340,10 +379,10 @@ class P2PNode:
             if not self._inbound.acquire(blocking=False):
                 conn.close()
                 continue
-            threading.Thread(target=self._handle_conn, args=(conn,),
+            threading.Thread(target=self._handle_conn, args=(conn, addr[0]),
                              daemon=True).start()
 
-    def _handle_conn(self, conn):
+    def _handle_conn(self, conn, host=None):
         """Обслуживает одно входящее сообщение и закрывает соединение.
 
         Таймаут обязателен: без него пир, который открыл соединение и замолчал
@@ -355,7 +394,7 @@ class P2PNode:
                 conn.settimeout(self.inbound_timeout)
                 raw = recv_message(conn)
                 if raw:
-                    send_message(conn, self._handle_message(raw))
+                    send_message(conn, self._handle_message(raw, host))
         except OSError:
             pass                    # таймаут или разрыв — просто закрываем
         finally:
@@ -405,6 +444,8 @@ class P2PNode:
         """
         if (host, port) == (self.host, self.port):
             return False
+        if self.is_banned(host):
+            return False                  # забаненный сосед нам не нужен
         with self._peers_lock:
             if (host, port) in self.peers or len(self.peers) >= self.max_peers:
                 return False
@@ -414,6 +455,62 @@ class P2PNode:
     def remove_peer(self, host, port) -> None:
         with self._peers_lock:
             self.peers.discard((host, port))
+
+    # --- Репутация пиров --------------------------------------------------
+    @staticmethod
+    def _is_loopback(host) -> bool:
+        return str(host) in ("localhost", "::1") or str(host).startswith("127.")
+
+    def is_banned(self, host) -> bool:
+        """Забанен ли адрес прямо сейчас (истёкшие баны снимаются сами)."""
+        with self._ban_lock:
+            until = self._banned.get(host)
+            if until is None:
+                return False
+            if time.monotonic() >= until:
+                del self._banned[host]          # срок вышел — прощаем
+                return False
+            return True
+
+    def ban_score(self, host) -> int:
+        """Текущие штрафные очки адреса (для диагностики и тестов)."""
+        with self._ban_lock:
+            score, _when = self._scores.get(host, (0, 0.0))
+            return score
+
+    def ban_peer(self, host, duration=None) -> None:
+        """Банит адрес и выкидывает все его порты из таблицы пиров."""
+        with self._ban_lock:
+            self._banned[host] = time.monotonic() + (duration or self.ban_duration)
+            self._scores.pop(host, None)
+        for peer in self.peer_list():
+            if peer[0] == host:
+                self.remove_peer(*peer)
+
+    def _penalise(self, host, points) -> bool:
+        """Начисляет штраф и банит при переполнении. True, если забанили.
+
+        Одиночная оплошность не должна копиться годами: если прошлое нарушение
+        было давно (score_reset_after), счёт обнуляется. Наказываем всплеск,
+        а не редкие сбои у честного соседа.
+        """
+        if not host or (self._is_loopback(host) and not self.ban_loopback):
+            return False
+        now = time.monotonic()
+        with self._ban_lock:
+            score, when = self._scores.get(host, (0, now))
+            if now - when > self.score_reset_after:
+                score = 0
+            score += points
+            if score < self._ban_threshold:
+                self._scores[host] = (score, now)
+                return False
+            self._scores.pop(host, None)
+            self._banned[host] = now + self.ban_duration
+        for peer in self.peer_list():
+            if peer[0] == host:
+                self.remove_peer(*peer)
+        return True
 
     # --- Соседи между запусками ------------------------------------------
     def save_peers(self, path=None) -> bool:
@@ -478,7 +575,7 @@ class P2PNode:
                 candidates,
                 lambda host, port: self.send(host, port, self._hello_message())):
             if self.same_network(resp):
-                self._accept_peers(resp)   # заодно узнаём их соседей
+                self._accept_peers(resp, source=peer[0])  # узнаём их соседей
                 alive += 1
             elif resp:
                 self.remove_peer(*peer)    # ответил, но из другой сети
@@ -487,20 +584,23 @@ class P2PNode:
             self.save_peers()
         return alive
 
-    def _accept_peers(self, resp: dict):
+    def _accept_peers(self, resp: dict, source=None):
         """Берёт адреса из ответа пира: не больше MAX_PEERS_PER_MESSAGE и с
         учётом потолка таблицы. Возвращает только по-настоящему новых пиров."""
         if not self.same_network(resp):
             return []                     # список от чужой сети не берём
-        fresh = []
+        fresh, garbage = [], 0
         entries = resp.get("peers") or []
         for entry in list(entries)[:MAX_PEERS_PER_MESSAGE]:
             try:
                 host, port = entry[0], int(entry[1])
             except (TypeError, ValueError, IndexError, KeyError):
-                continue                      # мусор в ответе — пропускаем
+                garbage += 1                  # мусор в ответе — пропускаем
+                continue
             if self.add_peer(host, port):
                 fresh.append((host, port))
+        if garbage:
+            self._penalise(source, PENALTY_GARBAGE_PEERS)
         return fresh
 
     def _fanout(self, peers, action):
@@ -552,7 +652,7 @@ class P2PNode:
             self.remove_peer(host, port)
             return False
         self.add_peer(host, port)
-        self._say_hello(self._accept_peers(resp))
+        self._say_hello(self._accept_peers(resp, source=host))
         self.sync()
         return True
 
@@ -565,7 +665,7 @@ class P2PNode:
             lambda host, port: self.send(host, port, {"type": "get_peers"}))
         fresh = []
         for _peer, resp in replies:
-            fresh.extend(self._accept_peers(resp))
+            fresh.extend(self._accept_peers(resp, source=_peer[0]))
         self._say_hello(fresh)
 
     # --- Авто-поиск в локальной сети (UDP-маяки, WiFi/LAN без интернета) ---
