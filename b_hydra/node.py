@@ -462,6 +462,13 @@ class BHydraNode:
 
         fees = 0.0
         spent: set = set()
+        # Выходы, созданные транзакциями ЭТОГО же блока. Мемпул разрешает
+        # тратить неподтверждённую сдачу, поэтому в блок попадают цепочки
+        # связанных транзакций: вторая тратит выход первой. Без этого набора
+        # такой блок принимал бы только сам майнер (у него выход уже лежал в
+        # «эффективном» UTXO), а все остальные узлы его отвергали — сеть не
+        # смогла бы распространить собственный штатный блок.
+        created: dict = {}
         for raw in txs[1:]:
             if _is_coinbase_dict(raw):
                 return False  # только одна coinbase на блок
@@ -472,18 +479,27 @@ class BHydraNode:
             total_in = 0.0
             for inp in tx.vin:
                 outpoint = inp.outpoint
-                if outpoint in spent or outpoint not in utxos:
+                # Источником может быть подтверждённый выход или выход
+                # предыдущей транзакции этого блока — но только ПРЕДЫДУЩЕЙ:
+                # created пополняется после разбора каждой, поэтому порядок
+                # внутри блока обязан быть топологическим (как в Bitcoin).
+                source = utxos.get(outpoint) or created.get(outpoint)
+                if outpoint in spent or source is None:
                     return False  # двойная трата / несуществующий выход
                 spent.add(outpoint)
-                utxo = utxos[outpoint]
                 if not self._verify_input_auth(
                         inp.public_key, inp.signature, inp.pq_public_key,
-                        inp.pq_signature, utxo["address"], payload, pq_used):
+                        inp.pq_signature, source["address"], payload, pq_used):
                     return False
-                total_in += utxo["amount"]
+                total_in += source["amount"]
             if total_in + _EPS < tx.total_output:
                 return False
             fees += total_in - tx.total_output
+            # Выходы coinbase намеренно НЕ добавляем: награду нельзя потратить
+            # в том же блоке, где она создана.
+            for position, out in enumerate(tx.vout):
+                created[(tx.txid, position)] = {"amount": out.amount,
+                                                "address": out.address}
 
         coinbase_out = Transaction.from_dict(txs[0]).total_output
         if coinbase_out > self.blockchain.block_reward(height) + fees + _EPS:
@@ -504,9 +520,8 @@ class BHydraNode:
         """Полная проверка цепочки: структура (PoW/Меркл/связность) + транзакции."""
         if not blockchain.is_chain_valid():
             return False
-        # Вершина цепочки не должна быть из далёкого будущего.
-        if blockchain.last_block.timestamp > time.time() + MAX_FUTURE_DRIFT:
-            return False
+        # Метки времени (не назад, выше медианы, не из будущего) проверяет
+        # is_chain_valid — причём для КАЖДОГО блока, а не только для вершины.
         utxos: dict = {}
         pq_used: set = set()   # израсходованные XMSS-ключи на всю цепочку
         for height, block in enumerate(blockchain.chain):
@@ -531,6 +546,12 @@ class BHydraNode:
         if block.timestamp > time.time() + MAX_FUTURE_DRIFT:
             return False
         if block.timestamp < last.timestamp:
+            return False
+        # Метка обязана превзойти медиану последних блоков (MTP): «не раньше
+        # предыдущего» разрешало держать часы цепочки замороженными, а при
+        # LWMA застывшее время — это нулевые интервалы и разгон сложности.
+        median = self.blockchain.median_time_past(block.index)
+        if median is not None and block.timestamp <= median:
             return False
         if block.merkle_root != block._calculate_merkle_root():
             return False

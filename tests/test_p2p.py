@@ -1,5 +1,6 @@
 """Тесты P2P-синхронизации: общий генезис, рассылка блоков, sync, консенсус."""
 
+import json
 import socket
 import threading
 import time
@@ -40,9 +41,14 @@ def test_nodes_share_genesis(two_nodes):
 
 
 def test_block_is_broadcast(two_nodes):
+    """Блок доходит до соседа.
+
+    Ожидание обязательно: узел рассылает только АНОНС (хеш), а тело сосед
+    забирает сам — распространение асинхронное, как в Bitcoin.
+    """
     a, b = two_nodes
     a.mine(generate_wallet().address)
-    assert b.node.height == a.node.height
+    assert _wait_until(lambda: b.node.height == a.node.height)
     assert b.node.blockchain.last_block.hash == a.node.blockchain.last_block.hash
 
 
@@ -61,6 +67,7 @@ def test_transaction_propagates(two_nodes):
     a, b = two_nodes
     miner, bob = generate_wallet(), generate_wallet()
     a.mine(miner.address)              # рассылается → B тоже знает этот UTXO
+    assert _wait_until(lambda: b.node.height == a.node.height)
     tx = a.node.create_transaction(miner, bob.address, 5, fee=0.1)
     assert a.submit_transaction(tx)
     assert any(t.txid == tx.txid for t in b.node.mempool.transactions)
@@ -518,3 +525,613 @@ def test_sync_retry_is_throttled():
     peer = ("127.0.0.1", _free_port())      # недостижим — важен сам факт попытки
     node._sync_from_throttled(peer)         # первая попытка проходит
     assert node._sync_from_throttled(peer) is False   # вторая — отсечена
+
+
+# --- Инкрементальная синхронизация ------------------------------------------
+# Раньше цепочка отдавалась ЦЕЛИКОМ одним сообщением, а на сообщение стоит
+# лимит 32 МБ: у сети был жёсткий потолок длины, после которого новый узел не
+# смог бы синхронизироваться вовсе. Плюс догнать один блок стоило скачивания
+# и полной перепроверки всей цепочки.
+from b_hydra.p2p import MAX_BLOCKS_PER_MESSAGE
+
+
+def _chain_of(blocks, batch=4):
+    """Узел с готовой цепочкой и мелкими пачками — чтобы дробление было видно."""
+    node = P2PNode("127.0.0.1", _free_port(), BHydraNode(difficulty=1))
+    node.max_blocks_per_message = batch
+    miner = generate_wallet()
+    for _ in range(blocks):
+        node.node.mine_pending(miner.address)
+    node.start()
+    time.sleep(0.2)
+    return node
+
+
+def _count_traffic(node):
+    """Считает сообщения и объём ответов при синхронизации."""
+    stats = {"messages": 0, "bytes": 0, "max_blocks_in_one": 0}
+    original = node.send
+
+    def counted(host, port, message):
+        resp = original(host, port, message)
+        stats["messages"] += 1
+        stats["bytes"] += len(json.dumps(resp))
+        stats["max_blocks_in_one"] = max(
+            stats["max_blocks_in_one"], len(resp.get("blocks") or []))
+        return resp
+
+    node.send = counted
+    return stats
+
+
+def test_blocks_are_served_in_bounded_batches():
+    """Пачка блоков ограничена, даже если попросили всю цепочку разом."""
+    source = _chain_of(10, batch=3)
+    try:
+        resp = source.send(source.host, source.port,
+                           {"type": "get_blocks", "from": 0, "count": 10_000})
+        assert len(resp["blocks"]) == 3            # потолок пачки соблюдён
+        assert resp["height"] == source.node.height
+        assert resp["blocks"][0]["index"] == 0
+    finally:
+        source.stop()
+
+
+def test_get_blocks_returns_the_requested_slice():
+    source = _chain_of(8, batch=4)
+    try:
+        resp = source.send(source.host, source.port,
+                           {"type": "get_blocks", "from": 5, "count": 2})
+        assert [b["index"] for b in resp["blocks"]] == [5, 6]
+    finally:
+        source.stop()
+
+
+def test_fresh_node_syncs_across_several_batches():
+    """Новый узел догоняет цепочку, длиннее одной пачки."""
+    source = _chain_of(12, batch=3)
+    fresh = P2PNode("127.0.0.1", _free_port(), BHydraNode(difficulty=1))
+    fresh.max_blocks_per_message = 3
+    fresh.start()
+    time.sleep(0.2)
+    try:
+        fresh.add_peer(source.host, source.port)
+        stats = _count_traffic(fresh)
+        assert fresh.sync() is True
+        assert fresh.node.height == source.node.height
+        assert fresh.node.blockchain.last_block.hash == \
+            source.node.blockchain.last_block.hash
+        assert fresh.node.is_valid()
+        # Ни одно сообщение не принесло цепочку целиком — потолка длины больше нет.
+        assert stats["max_blocks_in_one"] <= 3
+    finally:
+        fresh.stop()
+        source.stop()
+
+
+def test_catching_up_one_block_does_not_refetch_the_chain():
+    """Догон одного блока стоит одного блока, а не всей цепочки."""
+    source = _chain_of(15, batch=50)
+    fresh = P2PNode("127.0.0.1", _free_port(), BHydraNode(difficulty=1))
+    fresh.start()
+    time.sleep(0.2)
+    try:
+        fresh.add_peer(source.host, source.port)
+        fresh.sync()                                   # догнали
+        assert fresh.node.height == source.node.height
+
+        source.node.mine_pending(generate_wallet().address)   # +1 блок
+        stats = _count_traffic(fresh)
+        assert fresh.sync() is True
+        assert fresh.node.height == source.node.height
+        # Прилетел ровно новый блок, а не пятнадцать предыдущих.
+        assert stats["max_blocks_in_one"] == 1
+    finally:
+        fresh.stop()
+        source.stop()
+
+
+def test_sync_switches_to_a_heavier_fork():
+    """Реорг: общий блок ищется, докачивается только чужой хвост."""
+    source = _chain_of(10, batch=4)
+    ours = P2PNode("127.0.0.1", _free_port(), BHydraNode(difficulty=1))
+    ours.start()
+    time.sleep(0.2)
+    try:
+        ours.add_peer(source.host, source.port)
+        ours.sync()
+        assert ours.node.height == source.node.height
+
+        # Своя короткая ветка поверх общего префикса.
+        forked = P2PNode("127.0.0.1", _free_port(), BHydraNode(difficulty=1))
+        forked.node.replace_chain(
+            [b.to_dict() for b in source.node.blockchain.chain[:6]])
+        for _ in range(8):
+            forked.node.mine_pending(generate_wallet().address)
+        forked.start()
+        time.sleep(0.2)
+        try:
+            ours.peers.clear()
+            ours.add_peer(forked.host, forked.port)
+            assert ours.sync() is True
+            assert ours.node.blockchain.last_block.hash == \
+                forked.node.blockchain.last_block.hash
+            assert ours.node.is_valid()
+        finally:
+            forked.stop()
+    finally:
+        ours.stop()
+        source.stop()
+
+
+def test_common_height_finds_the_fork_point():
+    """Двоичный поиск находит последний общий блок."""
+    source = _chain_of(10, batch=4)
+    ours = P2PNode("127.0.0.1", _free_port(), BHydraNode(difficulty=1))
+    try:
+        ours.add_peer(source.host, source.port)
+        ours.node.replace_chain(
+            [b.to_dict() for b in source.node.blockchain.chain])
+        # Полное совпадение — общий блок это наша вершина.
+        assert ours._common_height((source.host, source.port),
+                                   source.node.height) == ours.node.height - 1
+    finally:
+        source.stop()
+
+
+def test_sync_stops_at_the_block_limit_for_a_lying_peer():
+    """Пир, объявивший абсурдную высоту, не заставит качать бесконечно."""
+    source = _chain_of(6, batch=3)
+    ours = P2PNode("127.0.0.1", _free_port(), BHydraNode(difficulty=1))
+    ours.max_sync_blocks = 2
+    try:
+        fetched = ours._fetch_blocks((source.host, source.port), 0, 10 ** 9)
+        assert len(fetched) <= 2
+    finally:
+        source.stop()
+
+
+# --- Узел переживает перезапуск ---------------------------------------------
+# Таблица пиров жила только в памяти, а UDP-маяк работает лишь в пределах одной
+# локальной сети. Поэтому узел в интернете после рестарта оставался ОДИН и
+# требовал ручного --peer.
+def test_peers_are_saved_and_loaded(tmp_path):
+    path = str(tmp_path / "peers.json")
+    node = _lone_node()
+    node.peers_file = path
+    node.add_peer("10.0.0.1", 7001)
+    node.add_peer("10.0.0.2", 7002)
+    assert node.save_peers() is True
+
+    restarted = _lone_node()
+    restarted.peers_file = path
+    assert restarted.load_peers() == 2
+    assert ("10.0.0.1", 7001) in restarted.peers
+
+
+def test_stop_saves_peers(tmp_path):
+    """Соседи сохраняются при остановке — перезапуск не начинает с нуля."""
+    path = str(tmp_path / "peers.json")
+    node = _lone_node()
+    node.peers_file = path
+    node.add_peer("10.0.0.5", 7005)
+    node.start()
+    time.sleep(0.2)
+    node.stop()
+    assert json.loads(open(path, encoding="utf-8").read())["peers"] == [["10.0.0.5", 7005]]
+
+
+def test_corrupt_peers_file_is_ignored(tmp_path):
+    """Испорченный файл не роняет узел — просто начинаем без соседей."""
+    path = str(tmp_path / "peers.json")
+    open(path, "w", encoding="utf-8").write("{ это не json")
+    node = _lone_node()
+    node.peers_file = path
+    assert node.load_peers() == 0
+    assert node.peers == set()
+
+
+def test_missing_peers_file_is_not_an_error(tmp_path):
+    node = _lone_node()
+    node.peers_file = str(tmp_path / "нет-такого.json")
+    assert node.load_peers() == 0
+
+
+def test_load_peers_skips_garbage_entries(tmp_path):
+    path = str(tmp_path / "peers.json")
+    open(path, "w", encoding="utf-8").write(json.dumps(
+        {"peers": [None, 42, ["хост"], ["хост", "порт"], ["1.2.3.4", 5]]}))
+    node = _lone_node()
+    node.peers_file = path
+    assert node.load_peers() == 1
+    assert node.peers == {("1.2.3.4", 5)}
+
+
+def test_bootstrap_finds_the_network_from_a_seed():
+    """Первый запуск: узел знает только seed и всё равно догоняет сеть."""
+    source = _chain_of(6, batch=10)
+    fresh = P2PNode("127.0.0.1", _free_port(), BHydraNode(difficulty=1),
+                    seeds=[(source.host, source.port)])
+    fresh.start()
+    time.sleep(0.2)
+    try:
+        assert fresh.bootstrap() == 1
+        assert fresh.node.height == source.node.height
+        assert (source.host, source.port) in fresh.peers
+    finally:
+        fresh.stop()
+        source.stop()
+
+
+def test_bootstrap_works_from_saved_peers_without_any_seed(tmp_path):
+    """Перезапуск: seed'ов нет, соседи берутся с диска."""
+    path = str(tmp_path / "peers.json")
+    source = _chain_of(6, batch=10)
+    try:
+        json.dump({"peers": [[source.host, source.port]]},
+                  open(path, "w", encoding="utf-8"))
+        restarted = P2PNode("127.0.0.1", _free_port(), BHydraNode(difficulty=1),
+                            peers_file=path)          # seeds не заданы вовсе
+        restarted.start()
+        time.sleep(0.2)
+        try:
+            assert restarted.bootstrap() == 1
+            assert restarted.node.height == source.node.height
+        finally:
+            restarted.stop()
+    finally:
+        source.stop()
+
+
+def test_bootstrap_drops_a_peer_from_another_network():
+    alien = _alien_node()
+    alien.start()
+    time.sleep(0.2)
+    ours = P2PNode("127.0.0.1", _free_port(), BHydraNode(difficulty=1),
+                   seeds=[(alien.host, alien.port)])
+    try:
+        assert ours.bootstrap() == 0
+        assert (alien.host, alien.port) not in ours.peers
+    finally:
+        alien.stop()
+
+
+# --- Остановка и выбор источника синхронизации ------------------------------
+def test_stop_really_stops_the_server():
+    """После stop() узел не должен отвечать.
+
+    close() не будит поток, висящий в accept(), поэтому «остановленный» узел
+    продолжал обслуживать запросы — и другие узлы считали его живым соседом.
+    """
+    node = _lone_node()
+    node.start()
+    time.sleep(0.3)
+    probe = _lone_node()
+    assert probe.send(node.host, node.port, {"type": "ping"})["type"] == "pong"
+    node.stop()
+    time.sleep(0.3)
+    with pytest.raises(OSError):
+        probe.send(node.host, node.port, {"type": "ping"})
+
+
+def test_sync_tries_the_next_peer_when_the_best_one_fails():
+    """Один негодный пир не должен перекрывать синхронизацию со всеми.
+
+    Пир, объявивший огромную работу, всегда выигрывает выбор источника. Пока
+    пробовался только лучший кандидат, такой сосед — упавший или намеренно
+    лгущий — навсегда блокировал догон честной цепочки.
+    """
+    honest = _chain_of(6, batch=10)
+    liar_port = _free_port()
+    server = socket.socket()
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind(("127.0.0.1", liar_port))
+    server.listen(8)
+
+    def lie():
+        from b_hydra.tcp import recv_message, send_message
+        while True:
+            try:
+                conn, _ = server.accept()
+            except OSError:
+                return
+            with conn:
+                if recv_message(conn):
+                    # Огромная работа, но ни хешей, ни блоков не отдаём.
+                    send_message(conn, json.dumps(
+                        {"type": "height", "height": 10 ** 6,
+                         "work": 10 ** 40}).encode())
+
+    threading.Thread(target=lie, daemon=True).start()
+
+    ours = P2PNode("127.0.0.1", _free_port(), BHydraNode(difficulty=1))
+    try:
+        ours.add_peer("127.0.0.1", liar_port)
+        ours.add_peer(honest.host, honest.port)
+        assert ours.sync() is True                 # лжец не должен нас запереть
+        assert ours.node.height == honest.node.height
+    finally:
+        server.close()
+        honest.stop()
+
+
+# --- Репутация пиров ---------------------------------------------------------
+# Прежние лимиты ограничивали УЩЕРБ от плохого соседа, но не отсекали источник:
+# пир, шлющий мусор, оставался в таблице и продолжал получать gossip.
+from b_hydra.p2p import (BAN_SCORE, PENALTY_BAD_MESSAGE, PENALTY_INVALID_BLOCK,
+                         PENALTY_FOREIGN_NETWORK, PENALTY_GARBAGE_PEERS)
+from b_hydra.tcp import recv_message as _recv, send_message as _send
+
+EXTERNAL = "203.0.113.7"          # адрес из документационного диапазона
+
+
+def _strict_node(**kwargs):
+    """Узел, который банит и локальные адреса — иначе тесты на loopback немы."""
+    node = _lone_node(**kwargs)
+    node.ban_loopback = True
+    return node
+
+
+def _send_garbage(node):
+    with socket.socket() as client:
+        client.settimeout(3)
+        client.connect((node.host, node.port))
+        _send(client, b"\xff\xfe not json \x00")
+        return _recv(client)
+
+
+def test_penalties_accumulate_and_lead_to_a_ban():
+    node = _strict_node()
+    hits = BAN_SCORE // PENALTY_BAD_MESSAGE
+    for _ in range(hits - 1):
+        node._penalise(EXTERNAL, PENALTY_BAD_MESSAGE)
+    assert node.is_banned(EXTERNAL) is False
+    assert node.ban_score(EXTERNAL) == PENALTY_BAD_MESSAGE * (hits - 1)
+    node._penalise(EXTERNAL, PENALTY_BAD_MESSAGE)
+    assert node.is_banned(EXTERNAL) is True
+
+
+def test_garbage_messages_get_the_sender_banned():
+    """Поток неразбираемых сообщений отсекает отправителя."""
+    node = _strict_node()
+    node.start()
+    time.sleep(0.2)
+    try:
+        for _ in range(BAN_SCORE // PENALTY_BAD_MESSAGE):
+            try:
+                _send_garbage(node)
+            except OSError:
+                pass                     # последнее соединение уже могут закрыть
+        assert node.is_banned("127.0.0.1") is True
+    finally:
+        node.stop()
+
+
+def test_banned_peer_is_not_served():
+    """Забаненному отказывают сразу, не тратя поток на разбор сообщения."""
+    node = _strict_node()
+    node.start()
+    time.sleep(0.2)
+    try:
+        assert node.send(node.host, node.port, {"type": "ping"})["type"] == "pong"
+        node.ban_peer("127.0.0.1")
+        # Соединение закрывают сразу: send() возвращает пустой ответ (или
+        # получает разрыв) — обслуживания нет ни в том, ни в другом случае.
+        try:
+            answer = node.send(node.host, node.port, {"type": "ping"})
+        except OSError:
+            answer = {}
+        assert not answer
+    finally:
+        node.stop()
+
+
+def test_banned_host_cannot_be_added_back():
+    node = _strict_node()
+    node.ban_peer(EXTERNAL)
+    assert node.add_peer(EXTERNAL, 7001) is False
+    assert node.peers == set()
+
+
+def test_ban_drops_every_port_of_that_host():
+    node = _strict_node()
+    node.add_peer(EXTERNAL, 7001)
+    node.add_peer(EXTERNAL, 7002)
+    node.add_peer("198.51.100.9", 7003)          # другой хост — не трогаем
+    node.ban_peer(EXTERNAL)
+    assert node.peers == {("198.51.100.9", 7003)}
+
+
+def test_ban_expires():
+    node = _strict_node()
+    node.ban_peer(EXTERNAL, duration=0.3)
+    assert node.is_banned(EXTERNAL) is True
+    time.sleep(0.5)
+    assert node.is_banned(EXTERNAL) is False
+
+
+def test_isolated_mistake_is_forgiven():
+    """Редкий сбой у честного соседа не должен копиться годами."""
+    node = _strict_node()
+    node.score_reset_after = 0.2
+    node._penalise(EXTERNAL, PENALTY_BAD_MESSAGE)
+    assert node.ban_score(EXTERNAL) == PENALTY_BAD_MESSAGE
+    time.sleep(0.4)                              # давнее нарушение прощается
+    node._penalise(EXTERNAL, PENALTY_BAD_MESSAGE)
+    assert node.ban_score(EXTERNAL) == PENALTY_BAD_MESSAGE
+
+
+def test_loopback_is_not_banned_by_default():
+    """Иначе одно битое сообщение положило бы все узлы на машине."""
+    node = _lone_node()                          # ban_loopback выключен
+    for _ in range(BAN_SCORE * 2 // PENALTY_BAD_MESSAGE):
+        node._penalise("127.0.0.1", PENALTY_BAD_MESSAGE)
+    assert node.is_banned("127.0.0.1") is False
+    for _ in range(BAN_SCORE // PENALTY_BAD_MESSAGE):
+        node._penalise(EXTERNAL, PENALTY_BAD_MESSAGE)
+    assert node.is_banned(EXTERNAL) is True      # внешний — банится как обычно
+
+
+def test_foreign_network_hello_is_penalised():
+    ours = _strict_node()
+    alien = _alien_node()
+    ours._dispatch(ours._json({"type": "hello", "host": "1.2.3.4", "port": 5,
+                               **alien.network_id()}), EXTERNAL)
+    assert ours.ban_score(EXTERNAL) == PENALTY_FOREIGN_NETWORK
+
+
+def test_garbage_peer_list_is_penalised():
+    node = _strict_node()
+    node._accept_peers({"peers": [None, 42, ["1.2.3.4", 5]], **node.network_id()},
+                       source=EXTERNAL)
+    assert node.ban_score(EXTERNAL) == PENALTY_GARBAGE_PEERS
+
+
+def test_unusable_block_is_penalised():
+    node = _strict_node()
+    bogus = {"index": node.node.height, "previous_hash": "00" * 64,
+             "data": [], "timestamp": 1.0, "nonce": 0,
+             "target": "%x" % node.node.blockchain.genesis_target,
+             "hash": "ab" * 64, "merkle_root": "cd" * 64}
+    node._dispatch(node._json({"type": "block", "block": bogus}), EXTERNAL)
+    assert node.ban_score(EXTERNAL) == PENALTY_INVALID_BLOCK
+
+
+def test_lagging_behind_does_not_punish_an_honest_peer():
+    """Блок «из будущего» — не вина соседа, а наше отставание.
+
+    Честный майнер, ушедший вперёд, не должен зарабатывать штрафы только за
+    то, что мы за ним не поспеваем.
+    """
+    source = _chain_of(5, batch=10)
+    node = _strict_node()
+    try:
+        ahead = source.node.blockchain.last_block.to_dict()
+        assert node._block_is_ahead(ahead)
+        node._dispatch(node._json({"type": "block", "block": ahead}), EXTERNAL)
+        assert node.ban_score(EXTERNAL) == 0
+        assert node.is_banned(EXTERNAL) is False
+    finally:
+        source.stop()
+
+
+# --- Анонс блока (inv) вместо рассылки тела ---------------------------------
+# Раньше полный блок улетал каждому пиру, даже тому, у кого он уже есть:
+# трафик = размер блока × число соседей.
+def test_mining_announces_only_the_hash():
+    """В рассылке уходит анонс, а не тело блока."""
+    node = _lone_node()
+    sent = []
+    node._gossip = lambda message, **kw: sent.append(message)
+    node.node.mine_pending(generate_wallet().address)
+    node._announce_block(node.node.blockchain.last_block.hash, background=False)
+    assert sent and sent[-1]["type"] == "inv"
+    assert "block" not in sent[-1]                 # тела в анонсе нет
+    assert sent[-1]["hash"] == node.node.blockchain.last_block.hash
+
+
+def test_get_block_returns_the_body_by_hash():
+    source = _chain_of(3, batch=10)
+    try:
+        wanted = source.node.blockchain.last_block.hash
+        resp = source.send(source.host, source.port,
+                           {"type": "get_block", "hash": wanted})
+        assert resp["block"]["hash"] == wanted
+        missing = source.send(source.host, source.port,
+                              {"type": "get_block", "hash": "ff" * 64})
+        assert missing["block"] is None
+    finally:
+        source.stop()
+
+
+def test_known_block_is_not_refetched():
+    """Анонс уже известного блока не тянет тело заново."""
+    node = _lone_node()
+    node.node.mine_pending(generate_wallet().address)
+    known = node.node.blockchain.last_block.hash
+    with node._seen_lock:
+        node.seen_blocks.add(known)
+    resp = json.loads(node._dispatch(node._json(
+        {"type": "inv", "kind": "block", "hash": known,
+         "from": [node.host, node.port]}), "127.0.0.1").decode())
+    assert resp["wanted"] is False
+
+
+def test_inv_without_a_source_is_ignored():
+    """Без адреса, у кого спрашивать, анонс бесполезен."""
+    node = _lone_node()
+    resp = json.loads(node._dispatch(node._json(
+        {"type": "inv", "kind": "block", "hash": "ab" * 64}), None).decode())
+    assert resp["wanted"] is False
+
+
+def test_concurrent_fetches_are_bounded():
+    """Число одновременных докачек тел ограничено, а хеши не дублируются."""
+    from b_hydra.p2p import MAX_INFLIGHT_FETCHES
+    node = _lone_node()
+    reserved = [node._start_fetch("%064x" % i) for i in range(MAX_INFLIGHT_FETCHES)]
+    assert all(reserved)
+    assert node._start_fetch("ff" * 64) is False       # слоты кончились
+    node._fetch_slots.release()
+    assert node._start_fetch("%064x" % 0) is False     # такой хеш уже качаем
+
+
+def test_block_propagates_through_announcement(two_nodes):
+    """Сквозная проверка: сосед сам забирает тело по анонсу."""
+    a, b = two_nodes
+    block = a.mine(generate_wallet().address)
+    assert _wait_until(lambda: b.node.height == a.node.height)
+    assert b.node.blockchain.last_block.hash == block.hash
+    assert b.node.is_valid()
+
+
+# --- Блок со СВЯЗАННЫМИ транзакциями ----------------------------------------
+def test_block_with_chained_transactions_is_accepted_by_others():
+    """Мемпул разрешает тратить неподтверждённую сдачу — блок с такой цепочкой
+    обязан приниматься и другими узлами.
+
+    Раньше _validate_block_transactions искала входы только в подтверждённом
+    наборе UTXO, поэтому вторая транзакция цепочки не находила выход первой.
+    Такой блок принимал только сам майнер, а сеть его отвергала — то есть узел
+    не мог распространить собственный штатный блок.
+    """
+    source = BHydraNode(difficulty=1)
+    alice, bob = generate_wallet(), generate_wallet()
+    source.mine_pending(alice.address)
+    for _ in range(6):                       # цепочка: каждая тратит сдачу
+        source.add_transaction(
+            source.create_transaction(alice, bob.address, 0.01, fee=0.001))
+    assert len(source.mempool) == 6
+    source.mine_pending(alice.address)
+
+    other = BHydraNode(difficulty=1)
+    for index in (1, 2):
+        assert other.receive_block(source.blockchain.chain[index].to_dict())
+    assert other.get_balance(bob.address) == source.get_balance(bob.address)
+    assert other.is_valid()
+
+
+def test_transaction_cannot_spend_a_later_output_in_the_same_block():
+    """Внутри блока порядок обязан быть топологическим.
+
+    Иначе можно было бы сослаться на выход транзакции, которая идёт ПОЗЖЕ, —
+    а значит и на ещё не существующие деньги.
+    """
+    source = BHydraNode(difficulty=1)
+    alice, bob = generate_wallet(), generate_wallet()
+    source.mine_pending(alice.address)
+    first = source.create_transaction(alice, bob.address, 1, fee=0.001)
+    source.add_transaction(first)
+    second = source.create_transaction(alice, bob.address, 0.5, fee=0.001)
+    source.add_transaction(second)
+    block = source.mine_pending(alice.address)
+
+    # Переставляем связанные транзакции местами — блок должен стать негодным.
+    swapped = list(block.data)
+    swapped[1], swapped[2] = swapped[2], swapped[1]
+    block.data = swapped
+    other = BHydraNode(difficulty=1)
+    other.receive_block(source.blockchain.chain[1].to_dict())
+    assert other._validate_block_transactions(
+        block, block.index, other.utxo_set(),
+        pq_used=other.pq_used_indices(include_mempool=False)) is False

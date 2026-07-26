@@ -122,6 +122,12 @@ def genesis_target_for(difficulty: int) -> int:
 MAX_BLOCK_TRANSACTIONS = 5000      # максимум транзакций в блоке
 MAX_MEMPOOL_TRANSACTIONS = 50000   # вместимость мемпула (неподтверждённых тх)
 MAX_FUTURE_DRIFT = 2 * 60 * 60 # блок не может быть из будущего более чем на 2 ч
+# Медиана времени последних блоков (MTP, как в Bitcoin). Правило «не раньше
+# предыдущего» запрещает ход времени назад, но разрешает заморозку: метки могут
+# стоять на месте сколько угодно. После перехода на LWMA это стало опасно —
+# застывшее время означает нулевые интервалы, а они гонят сложность в потолок
+# ограничителя. MTP требует, чтобы часы цепочки ДЕЙСТВИТЕЛЬНО шли вперёд.
+MEDIAN_TIME_BLOCKS = 11
 
 # Фиксированная метка времени генезис-блока. Благодаря ей все узлы с одинаковой
 # базовой сложностью получают ИДЕНТИЧНЫЙ генезис — иначе сеть не сможет
@@ -386,6 +392,31 @@ class Blockchain:
         self.chain.append(new_block)
         return new_block
 
+    def block_by_hash(self, block_hash):
+        """Блок по хешу или None.
+
+        Ищем с конца: спрашивают почти всегда свежие блоки, поэтому обычно это
+        первое же сравнение.
+        """
+        if not block_hash:
+            return None
+        for block in reversed(self.chain):
+            if block.hash == block_hash:
+                return block
+        return None
+
+    def median_time_past(self, height):
+        """Медиана меток времени последних MEDIAN_TIME_BLOCKS блоков до height.
+
+        Именно её обязан превзойти новый блок. Медиана устойчива к выбросам:
+        одна метка «из будущего» её почти не двигает, поэтому подтолкнуть часы
+        цепочки одиночным блоком нельзя — нужно большинство окна.
+        Возвращает None, если блоков перед height нет (сам генезис).
+        """
+        start = max(0, height - MEDIAN_TIME_BLOCKS)
+        stamps = sorted(block.timestamp for block in self.chain[start:height])
+        return stamps[len(stamps) // 2] if stamps else None
+
     def is_chain_valid(self):
         """Проверяет целостность цепочки, PoW и корректность сложности."""
         for i in range(1, len(self.chain)):
@@ -406,8 +437,18 @@ class Blockchain:
             # …и хеш — реально удовлетворять порогу (PoW).
             if int(current.hash, 16) > current.target:
                 return False
-            # Время блока не может идти назад (защита от манипуляций временем).
+            # Время блока не может идти назад (защита от манипуляций временем)…
             if current.timestamp < previous.timestamp:
+                return False
+            # …и обязано превзойти медиану последних блоков: без этого метки
+            # можно было держать замороженными сколько угодно.
+            median = self.median_time_past(i)
+            if median is not None and current.timestamp <= median:
+                return False
+            # Блок «из будущего» невалиден на ЛЮБОЙ высоте, а не только на
+            # вершине: иначе внутрь цепочки можно было спрятать метку, которой
+            # ещё не наступило время.
+            if current.timestamp > time.time() + MAX_FUTURE_DRIFT:
                 return False
         return True
 
