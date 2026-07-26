@@ -683,3 +683,167 @@ def test_sync_stops_at_the_block_limit_for_a_lying_peer():
         assert len(fetched) <= 2
     finally:
         source.stop()
+
+
+# --- Узел переживает перезапуск ---------------------------------------------
+# Таблица пиров жила только в памяти, а UDP-маяк работает лишь в пределах одной
+# локальной сети. Поэтому узел в интернете после рестарта оставался ОДИН и
+# требовал ручного --peer.
+def test_peers_are_saved_and_loaded(tmp_path):
+    path = str(tmp_path / "peers.json")
+    node = _lone_node()
+    node.peers_file = path
+    node.add_peer("10.0.0.1", 7001)
+    node.add_peer("10.0.0.2", 7002)
+    assert node.save_peers() is True
+
+    restarted = _lone_node()
+    restarted.peers_file = path
+    assert restarted.load_peers() == 2
+    assert ("10.0.0.1", 7001) in restarted.peers
+
+
+def test_stop_saves_peers(tmp_path):
+    """Соседи сохраняются при остановке — перезапуск не начинает с нуля."""
+    path = str(tmp_path / "peers.json")
+    node = _lone_node()
+    node.peers_file = path
+    node.add_peer("10.0.0.5", 7005)
+    node.start()
+    time.sleep(0.2)
+    node.stop()
+    assert json.loads(open(path, encoding="utf-8").read())["peers"] == [["10.0.0.5", 7005]]
+
+
+def test_corrupt_peers_file_is_ignored(tmp_path):
+    """Испорченный файл не роняет узел — просто начинаем без соседей."""
+    path = str(tmp_path / "peers.json")
+    open(path, "w", encoding="utf-8").write("{ это не json")
+    node = _lone_node()
+    node.peers_file = path
+    assert node.load_peers() == 0
+    assert node.peers == set()
+
+
+def test_missing_peers_file_is_not_an_error(tmp_path):
+    node = _lone_node()
+    node.peers_file = str(tmp_path / "нет-такого.json")
+    assert node.load_peers() == 0
+
+
+def test_load_peers_skips_garbage_entries(tmp_path):
+    path = str(tmp_path / "peers.json")
+    open(path, "w", encoding="utf-8").write(json.dumps(
+        {"peers": [None, 42, ["хост"], ["хост", "порт"], ["1.2.3.4", 5]]}))
+    node = _lone_node()
+    node.peers_file = path
+    assert node.load_peers() == 1
+    assert node.peers == {("1.2.3.4", 5)}
+
+
+def test_bootstrap_finds_the_network_from_a_seed():
+    """Первый запуск: узел знает только seed и всё равно догоняет сеть."""
+    source = _chain_of(6, batch=10)
+    fresh = P2PNode("127.0.0.1", _free_port(), BHydraNode(difficulty=1),
+                    seeds=[(source.host, source.port)])
+    fresh.start()
+    time.sleep(0.2)
+    try:
+        assert fresh.bootstrap() == 1
+        assert fresh.node.height == source.node.height
+        assert (source.host, source.port) in fresh.peers
+    finally:
+        fresh.stop()
+        source.stop()
+
+
+def test_bootstrap_works_from_saved_peers_without_any_seed(tmp_path):
+    """Перезапуск: seed'ов нет, соседи берутся с диска."""
+    path = str(tmp_path / "peers.json")
+    source = _chain_of(6, batch=10)
+    try:
+        json.dump({"peers": [[source.host, source.port]]},
+                  open(path, "w", encoding="utf-8"))
+        restarted = P2PNode("127.0.0.1", _free_port(), BHydraNode(difficulty=1),
+                            peers_file=path)          # seeds не заданы вовсе
+        restarted.start()
+        time.sleep(0.2)
+        try:
+            assert restarted.bootstrap() == 1
+            assert restarted.node.height == source.node.height
+        finally:
+            restarted.stop()
+    finally:
+        source.stop()
+
+
+def test_bootstrap_drops_a_peer_from_another_network():
+    alien = _alien_node()
+    alien.start()
+    time.sleep(0.2)
+    ours = P2PNode("127.0.0.1", _free_port(), BHydraNode(difficulty=1),
+                   seeds=[(alien.host, alien.port)])
+    try:
+        assert ours.bootstrap() == 0
+        assert (alien.host, alien.port) not in ours.peers
+    finally:
+        alien.stop()
+
+
+# --- Остановка и выбор источника синхронизации ------------------------------
+def test_stop_really_stops_the_server():
+    """После stop() узел не должен отвечать.
+
+    close() не будит поток, висящий в accept(), поэтому «остановленный» узел
+    продолжал обслуживать запросы — и другие узлы считали его живым соседом.
+    """
+    node = _lone_node()
+    node.start()
+    time.sleep(0.3)
+    probe = _lone_node()
+    assert probe.send(node.host, node.port, {"type": "ping"})["type"] == "pong"
+    node.stop()
+    time.sleep(0.3)
+    with pytest.raises(OSError):
+        probe.send(node.host, node.port, {"type": "ping"})
+
+
+def test_sync_tries_the_next_peer_when_the_best_one_fails():
+    """Один негодный пир не должен перекрывать синхронизацию со всеми.
+
+    Пир, объявивший огромную работу, всегда выигрывает выбор источника. Пока
+    пробовался только лучший кандидат, такой сосед — упавший или намеренно
+    лгущий — навсегда блокировал догон честной цепочки.
+    """
+    honest = _chain_of(6, batch=10)
+    liar_port = _free_port()
+    server = socket.socket()
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind(("127.0.0.1", liar_port))
+    server.listen(8)
+
+    def lie():
+        from b_hydra.tcp import recv_message, send_message
+        while True:
+            try:
+                conn, _ = server.accept()
+            except OSError:
+                return
+            with conn:
+                if recv_message(conn):
+                    # Огромная работа, но ни хешей, ни блоков не отдаём.
+                    send_message(conn, json.dumps(
+                        {"type": "height", "height": 10 ** 6,
+                         "work": 10 ** 40}).encode())
+
+    threading.Thread(target=lie, daemon=True).start()
+
+    ours = P2PNode("127.0.0.1", _free_port(), BHydraNode(difficulty=1))
+    try:
+        ours.add_peer("127.0.0.1", liar_port)
+        ours.add_peer(honest.host, honest.port)
+        assert ours.sync() is True                 # лжец не должен нас запереть
+        assert ours.node.height == honest.node.height
+    finally:
+        server.close()
+        honest.stop()

@@ -11,6 +11,7 @@ P2P.py — одноранговая синхронизация узлов B-hydr
 """
 
 import json
+import os
 import secrets
 import socket
 import threading
@@ -47,6 +48,15 @@ SYNC_RETRY_INTERVAL = 2.0        # секунд между докачками ц
 # догнать один блок стоило скачивания и полной перепроверки всей цепочки.
 MAX_BLOCKS_PER_MESSAGE = 500     # блоков в одной пачке
 MAX_SYNC_BLOCKS = 100_000        # потолок докачки за одну синхронизацию
+SYNC_PEER_ATTEMPTS = 4           # сколько кандидатов пробуем за одну sync()
+
+# Узел должен переживать перезапуск. Таблица пиров жила только в памяти, а
+# UDP-маяк работает лишь в пределах одной локальной сети (широковещание за
+# роутер не уходит) — поэтому узел в интернете после рестарта оставался ОДИН и
+# требовал ручного --peer. Теперь соседи сохраняются на диск, а для самого
+# первого запуска (файла ещё нет) есть seed-узлы — как DNS seeds в Bitcoin.
+DEFAULT_PEERS_FILE = "bhydra_peers.json"
+DEFAULT_SEEDS = ()               # адреса вида ("host", port); задаются сетью
 
 
 class _BoundedSet:
@@ -97,12 +107,17 @@ class P2PNode:
     """Сетевой узел B-hydra: TCP-сервер + клиент + синхронизация."""
 
     def __init__(self, host="127.0.0.1", port=5000, node=None,
-                 seen_limit=SEEN_LIMIT, max_peers=MAX_PEERS):
+                 seen_limit=SEEN_LIMIT, max_peers=MAX_PEERS,
+                 peers_file=None, seeds=None):
         self.host = host
         self.port = port
         self.node = node if node is not None else BHydraNode()
         self.peers = set()          # известные пиры: множество (host, port)
         self.max_peers = max(1, int(max_peers))
+        # Куда сохранять соседей между запусками и с чего начинать, если файла
+        # ещё нет. Без пути сохранение выключено (так работают тесты и демо).
+        self.peers_file = peers_file
+        self.seeds = [(str(h), int(p)) for h, p in (seeds or DEFAULT_SEEDS)]
         # Таймауты — атрибуты узла, а не константы: их удобно ужимать в тестах
         # и подкручивать под медленную сеть.
         self.peer_timeout = PEER_TIMEOUT
@@ -352,10 +367,21 @@ class P2PNode:
         return thread
 
     def stop(self):
+        # Сохраняем соседей до закрытия сокета: после перезапуска узел должен
+        # знать, к кому идти, а не начинать с пустой таблицы.
+        self.save_peers()
         self._running = False
         self._discovery_running = False
-        if self._server is not None:
-            self._server.close()
+        server, self._server = self._server, None
+        if server is not None:
+            # Одного close() мало: поток, висящий в accept(), от него не
+            # просыпается, и «остановленный» узел продолжает отвечать на
+            # запросы. shutdown() прерывает accept и по-настоящему гасит узел.
+            try:
+                server.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            server.close()
 
     # --- Клиент ----------------------------------------------------------
     def send(self, host, port, message: dict) -> dict:
@@ -388,6 +414,78 @@ class P2PNode:
     def remove_peer(self, host, port) -> None:
         with self._peers_lock:
             self.peers.discard((host, port))
+
+    # --- Соседи между запусками ------------------------------------------
+    def save_peers(self, path=None) -> bool:
+        """Сохраняет таблицу пиров, чтобы после перезапуска не начинать с нуля.
+
+        Запись атомарная (во временный файл и переименование): оборванное
+        сохранение не должно оставить узел с испорченным списком соседей.
+        """
+        path = path or self.peers_file
+        if not path:
+            return False
+        payload = {"peers": [list(peer) for peer in self.peer_list()]}
+        temporary = f"{path}.tmp"
+        try:
+            with open(temporary, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, ensure_ascii=False)
+            os.replace(temporary, path)
+            return True
+        except OSError:
+            return False
+
+    def load_peers(self, path=None) -> int:
+        """Читает соседей с прошлого запуска. Возвращает, скольких добавили.
+
+        Недоступные адреса не отбрасываем: узел мог просто быть выключен и ещё
+        вернётся. Отсеивает их bootstrap — и только тех, кто ответил из ЧУЖОЙ
+        сети.
+        """
+        path = path or self.peers_file
+        if not path:
+            return 0
+        try:
+            with open(path, encoding="utf-8") as handle:
+                stored = json.load(handle)
+        except (OSError, ValueError):
+            return 0                      # файла нет или он испорчен — не беда
+        added = 0
+        for entry in (stored.get("peers") or [])[:self.max_peers]:
+            try:
+                host, port = str(entry[0]), int(entry[1])
+            except (TypeError, ValueError, IndexError, KeyError):
+                continue
+            if self.add_peer(host, port):
+                added += 1
+        return added
+
+    def bootstrap(self) -> int:
+        """Первое подключение: соседи с диска плюс seed-узлы.
+
+        Здоровается со всеми параллельно, забирает их списки пиров и один раз
+        синхронизируется. Возвращает число живых соседей нашей сети.
+        """
+        self.load_peers()
+        for host, port in self.seeds:
+            self.add_peer(host, port)
+
+        candidates = self.peer_list()
+        if not candidates:
+            return 0
+        alive = 0
+        for peer, resp in self._fanout(
+                candidates,
+                lambda host, port: self.send(host, port, self._hello_message())):
+            if self.same_network(resp):
+                self._accept_peers(resp)   # заодно узнаём их соседей
+                alive += 1
+            elif resp:
+                self.remove_peer(*peer)    # ответил, но из другой сети
+        if alive:
+            self.sync()
+            self.save_peers()
+        return alive
 
     def _accept_peers(self, resp: dict):
         """Берёт адреса из ответа пира: не больше MAX_PEERS_PER_MESSAGE и с
@@ -608,14 +706,20 @@ class P2PNode:
         heavier = [(resp["work"], peer) for peer, resp in replies
                    if isinstance(resp.get("work"), int)
                    and resp["work"] > self.node.blockchain.total_work]
-        if heavier:
-            return self._sync_from(max(heavier)[1])
-
         # Запасной путь: пир не сообщил работу (старая версия) — судим по высоте.
         taller = [(resp.get("height", 0), peer) for peer, resp in replies
                   if resp.get("work") is None
                   and resp.get("height", 0) > self.node.height]
-        return self._sync_from(max(taller)[1]) if taller else False
+
+        # Пробуем нескольких кандидатов подряд, а не только лучшего. Иначе один
+        # пир — упавший, подвисший или намеренно объявивший огромную работу —
+        # навсегда перекрывал бы синхронизацию со всеми остальными: он всегда
+        # выигрывал выбор, а докачка с него всегда проваливалась.
+        ranked = sorted(heavier, reverse=True) or sorted(taller, reverse=True)
+        for _rank, peer in ranked[:SYNC_PEER_ATTEMPTS]:
+            if self._sync_from(peer):
+                return True
+        return False
 
     def _block_is_ahead(self, block_dict) -> bool:
         """True, если блок выше нашей вершины — значит мы просто отстали.
@@ -783,6 +887,10 @@ def main():
     parser = argparse.ArgumentParser(description="P2P-узел B-hydra")
     parser.add_argument("--port", type=int, help="порт узла (если не задан — демо)")
     parser.add_argument("--peer", help="узел для подключения, формат host:port")
+    parser.add_argument("--seed", action="append", default=[],
+                        help="seed-узел для первого запуска (можно повторять)")
+    parser.add_argument("--peers-file", default=DEFAULT_PEERS_FILE,
+                        help="файл с соседями между запусками")
     parser.add_argument("--difficulty", type=int, default=3, help="базовая сложность")
     parser.add_argument("--demo", action="store_true", help="запустить демо из 3 узлов")
     args = parser.parse_args()
@@ -791,19 +899,34 @@ def main():
         _demo()
         return
 
-    node = P2PNode("0.0.0.0", args.port, BHydraNode(difficulty=args.difficulty))
+    # Seed-узлы: из --seed и из переменной окружения BHYDRA_SEEDS
+    # ("host:port,host:port") — так их удобно задавать в докере/сервисе.
+    raw_seeds = list(args.seed) + [
+        item for item in os.environ.get("BHYDRA_SEEDS", "").split(",") if item]
+    seeds = []
+    for item in raw_seeds:
+        host, _, port = item.rpartition(":")
+        if host and port.isdigit():
+            seeds.append((host, int(port)))
+
+    node = P2PNode("0.0.0.0", args.port, BHydraNode(difficulty=args.difficulty),
+                   peers_file=args.peers_file, seeds=seeds)
     node.start()
+    # Соседи с прошлого запуска + seed-узлы: узел находит сеть сам, без --peer.
+    alive = node.bootstrap()
     if args.peer:
-        host, port = args.peer.split(":")
+        host, _, port = args.peer.rpartition(":")
         node.connect(host, int(port))
     print(f"P2P-узел B-hydra на :{args.port} | пиров: {len(node.peers)} "
-          f"| высота: {node.node.height}  (Ctrl+C — стоп)")
+          f"(живых при старте: {alive}) | высота: {node.node.height}"
+          f"  (Ctrl+C — стоп)")
     try:
         while True:                 # периодически подтягиваем цепочку у пиров
             time.sleep(5)
             node.sync()
+            node.save_peers()       # свежий список переживёт даже аварийный выход
     except KeyboardInterrupt:
-        node.stop()
+        node.stop()                 # stop() тоже сохраняет соседей
 
 
 if __name__ == "__main__":
