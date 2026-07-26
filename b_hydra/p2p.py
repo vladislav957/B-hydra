@@ -40,6 +40,14 @@ FANOUT_WORKERS = 32              # параллелизм рассылки по 
 # сколько угодно часто.
 SYNC_RETRY_INTERVAL = 2.0        # секунд между докачками цепочки по чужому блоку
 
+# Цепочка передаётся ПАЧКАМИ. Раньше на запрос отдавалась вся цепочка одним
+# сообщением, а на сообщение стоит лимит 32 МБ — то есть у сети был жёсткий
+# потолок длины (~30 тыс. блоков с одним coinbase, ~10 тыс. с транзакциями),
+# после которого новый узел не смог бы синхронизироваться в принципе. Плюс
+# догнать один блок стоило скачивания и полной перепроверки всей цепочки.
+MAX_BLOCKS_PER_MESSAGE = 500     # блоков в одной пачке
+MAX_SYNC_BLOCKS = 100_000        # потолок докачки за одну синхронизацию
+
 
 class _BoundedSet:
     """Множество с пределом размера и FIFO-вытеснением (только stdlib).
@@ -100,6 +108,8 @@ class P2PNode:
         self.peer_timeout = PEER_TIMEOUT
         self.inbound_timeout = INBOUND_TIMEOUT
         self.sync_retry_interval = SYNC_RETRY_INTERVAL
+        self.max_blocks_per_message = MAX_BLOCKS_PER_MESSAGE
+        self.max_sync_blocks = MAX_SYNC_BLOCKS
         self._sync_lock = threading.Lock()
         self._last_block_sync = 0.0     # когда последний раз тянули цепочку
         # peers читают потоки gossip/sync, а пишут — discovery и обработчики
@@ -160,11 +170,35 @@ class P2PNode:
             return self._json({"type": "height", "height": self.node.height,
                                "work": self.node.blockchain.total_work})
 
-        if mtype == "get_chain":
+        if mtype == "get_blocks":
+            # Пачка блоков с указанной высоты. Отдавать цепочку целиком нельзя:
+            # она упиралась бы в лимит размера сообщения (32 МБ), то есть у
+            # сети был бы жёсткий потолок длины, после которого новые узлы уже
+            # не смогли бы синхронизироваться вовсе.
+            chain = self.node.blockchain.chain
+            start = max(0, int(message.get("from", 0)))
+            count = int(message.get("count", self.max_blocks_per_message))
+            count = max(1, min(count, self.max_blocks_per_message))
             return self._json({
-                "type": "chain",
-                "chain": self.node.blockchain.to_dicts(),
+                "type": "blocks",
+                "from": start,
+                "blocks": [b.to_dict() for b in chain[start:start + count]],
+                "height": len(chain),
+                "work": self.node.blockchain.total_work,
                 "base_difficulty": self.node.blockchain.difficulty,
+            })
+
+        if mtype == "get_hashes":
+            # Только хеши — по ним ищется общий блок перед докачкой (дёшево).
+            chain = self.node.blockchain.chain
+            start = max(0, int(message.get("from", 0)))
+            count = int(message.get("count", self.max_blocks_per_message))
+            count = max(1, min(count, self.max_blocks_per_message))
+            return self._json({
+                "type": "hashes",
+                "from": start,
+                "hashes": [b.hash for b in chain[start:start + count]],
+                "height": len(chain),
             })
 
         if mtype == "transaction":
@@ -607,12 +641,99 @@ class P2PNode:
             self._last_block_sync = now
         return self._sync_from(peer)
 
-    def _sync_from(self, peer) -> bool:
+    def _peer_hash(self, peer, index):
+        """Хеш блока пира на высоте index (или None, если недоступен)."""
         try:
-            resp = self.send(peer[0], peer[1], {"type": "get_chain"})
+            resp = self.send(peer[0], peer[1],
+                             {"type": "get_hashes", "from": index, "count": 1})
+        except OSError:
+            return None
+        hashes = resp.get("hashes") or []
+        return hashes[0] if hashes else None
+
+    def _common_height(self, peer, their_height):
+        """Наибольшая высота, на которой наш блок совпадает с блоком пира.
+
+        Обычный случай (пир просто ушёл вперёд) решается одним запросом.
+        Развилка — двоичным поиском, это ~log2(длины) запросов вместо
+        скачивания всей чужой цепочки ради поиска точки расхождения.
+        """
+        high = min(self.node.height, their_height) - 1
+        if high < 0:
+            return None
+        chain = self.node.blockchain.chain
+        if self._peer_hash(peer, high) == chain[high].hash:
+            return high                      # общий префикс — вся наша цепочка
+        if self._peer_hash(peer, 0) != chain[0].hash:
+            return None                      # чужой генезис — это другая сеть
+
+        low = 0
+        while low < high:
+            middle = (low + high + 1) // 2
+            if self._peer_hash(peer, middle) == chain[middle].hash:
+                low = middle
+            else:
+                high = middle - 1
+        return low
+
+    def _fetch_blocks(self, peer, start, stop):
+        """Тянет блоки [start; stop) пачками, а не одним куском."""
+        stop = min(stop, start + self.max_sync_blocks)
+        blocks = []
+        at = start
+        while at < stop:
+            try:
+                resp = self.send(peer[0], peer[1], {
+                    "type": "get_blocks", "from": at,
+                    "count": min(self.max_blocks_per_message, stop - at)})
+            except OSError:
+                break
+            batch = resp.get("blocks") or []
+            if not batch:
+                break                        # пир больше ничего не даёт
+            blocks.extend(batch)
+            at += len(batch)
+        return blocks
+
+    def _sync_from(self, peer) -> bool:
+        """Догоняет цепочку пира инкрементально.
+
+        Раньше здесь скачивалась ВСЯ чужая цепочка одним сообщением и
+        перепроверялась с нуля — даже ради одного блока. Теперь ищется общий
+        блок, докачивается только хвост после него, и если это простое
+        продолжение нашей цепочки, блоки применяются по одному: проверяется
+        только новое, поверх уже проверенного префикса.
+        """
+        try:
+            info = self.send(peer[0], peer[1], {"type": "get_height"})
         except OSError:
             return False
-        return self.node.replace_chain(resp.get("chain", []))
+        their_height = int(info.get("height") or 0)
+        if their_height <= 0:
+            return False
+
+        fork = self._common_height(peer, their_height)
+        if fork is None:
+            return False
+
+        blocks = self._fetch_blocks(peer, fork + 1, their_height)
+        if not blocks:
+            return False
+
+        if fork + 1 == self.node.height:
+            # Чистое продолжение: применяем по одному. Каждый блок проверяется
+            # против текущего набора UTXO — это O(новых блоков), а не O(цепи).
+            applied = 0
+            for block in blocks:
+                if not self.node.receive_block(block):
+                    break
+                applied += 1
+            return applied > 0
+
+        # Развилка: собираем кандидата из нашего общего префикса и чужого
+        # хвоста. Решение принимает replace_chain — по суммарной работе.
+        prefix = [b.to_dict() for b in self.node.blockchain.chain[:fork + 1]]
+        return self.node.replace_chain(prefix + blocks)
 
 
 def _demo():

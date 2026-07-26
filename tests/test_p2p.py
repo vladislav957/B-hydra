@@ -1,5 +1,6 @@
 """Тесты P2P-синхронизации: общий генезис, рассылка блоков, sync, консенсус."""
 
+import json
 import socket
 import threading
 import time
@@ -518,3 +519,167 @@ def test_sync_retry_is_throttled():
     peer = ("127.0.0.1", _free_port())      # недостижим — важен сам факт попытки
     node._sync_from_throttled(peer)         # первая попытка проходит
     assert node._sync_from_throttled(peer) is False   # вторая — отсечена
+
+
+# --- Инкрементальная синхронизация ------------------------------------------
+# Раньше цепочка отдавалась ЦЕЛИКОМ одним сообщением, а на сообщение стоит
+# лимит 32 МБ: у сети был жёсткий потолок длины, после которого новый узел не
+# смог бы синхронизироваться вовсе. Плюс догнать один блок стоило скачивания
+# и полной перепроверки всей цепочки.
+from b_hydra.p2p import MAX_BLOCKS_PER_MESSAGE
+
+
+def _chain_of(blocks, batch=4):
+    """Узел с готовой цепочкой и мелкими пачками — чтобы дробление было видно."""
+    node = P2PNode("127.0.0.1", _free_port(), BHydraNode(difficulty=1))
+    node.max_blocks_per_message = batch
+    miner = generate_wallet()
+    for _ in range(blocks):
+        node.node.mine_pending(miner.address)
+    node.start()
+    time.sleep(0.2)
+    return node
+
+
+def _count_traffic(node):
+    """Считает сообщения и объём ответов при синхронизации."""
+    stats = {"messages": 0, "bytes": 0, "max_blocks_in_one": 0}
+    original = node.send
+
+    def counted(host, port, message):
+        resp = original(host, port, message)
+        stats["messages"] += 1
+        stats["bytes"] += len(json.dumps(resp))
+        stats["max_blocks_in_one"] = max(
+            stats["max_blocks_in_one"], len(resp.get("blocks") or []))
+        return resp
+
+    node.send = counted
+    return stats
+
+
+def test_blocks_are_served_in_bounded_batches():
+    """Пачка блоков ограничена, даже если попросили всю цепочку разом."""
+    source = _chain_of(10, batch=3)
+    try:
+        resp = source.send(source.host, source.port,
+                           {"type": "get_blocks", "from": 0, "count": 10_000})
+        assert len(resp["blocks"]) == 3            # потолок пачки соблюдён
+        assert resp["height"] == source.node.height
+        assert resp["blocks"][0]["index"] == 0
+    finally:
+        source.stop()
+
+
+def test_get_blocks_returns_the_requested_slice():
+    source = _chain_of(8, batch=4)
+    try:
+        resp = source.send(source.host, source.port,
+                           {"type": "get_blocks", "from": 5, "count": 2})
+        assert [b["index"] for b in resp["blocks"]] == [5, 6]
+    finally:
+        source.stop()
+
+
+def test_fresh_node_syncs_across_several_batches():
+    """Новый узел догоняет цепочку, длиннее одной пачки."""
+    source = _chain_of(12, batch=3)
+    fresh = P2PNode("127.0.0.1", _free_port(), BHydraNode(difficulty=1))
+    fresh.max_blocks_per_message = 3
+    fresh.start()
+    time.sleep(0.2)
+    try:
+        fresh.add_peer(source.host, source.port)
+        stats = _count_traffic(fresh)
+        assert fresh.sync() is True
+        assert fresh.node.height == source.node.height
+        assert fresh.node.blockchain.last_block.hash == \
+            source.node.blockchain.last_block.hash
+        assert fresh.node.is_valid()
+        # Ни одно сообщение не принесло цепочку целиком — потолка длины больше нет.
+        assert stats["max_blocks_in_one"] <= 3
+    finally:
+        fresh.stop()
+        source.stop()
+
+
+def test_catching_up_one_block_does_not_refetch_the_chain():
+    """Догон одного блока стоит одного блока, а не всей цепочки."""
+    source = _chain_of(15, batch=50)
+    fresh = P2PNode("127.0.0.1", _free_port(), BHydraNode(difficulty=1))
+    fresh.start()
+    time.sleep(0.2)
+    try:
+        fresh.add_peer(source.host, source.port)
+        fresh.sync()                                   # догнали
+        assert fresh.node.height == source.node.height
+
+        source.node.mine_pending(generate_wallet().address)   # +1 блок
+        stats = _count_traffic(fresh)
+        assert fresh.sync() is True
+        assert fresh.node.height == source.node.height
+        # Прилетел ровно новый блок, а не пятнадцать предыдущих.
+        assert stats["max_blocks_in_one"] == 1
+    finally:
+        fresh.stop()
+        source.stop()
+
+
+def test_sync_switches_to_a_heavier_fork():
+    """Реорг: общий блок ищется, докачивается только чужой хвост."""
+    source = _chain_of(10, batch=4)
+    ours = P2PNode("127.0.0.1", _free_port(), BHydraNode(difficulty=1))
+    ours.start()
+    time.sleep(0.2)
+    try:
+        ours.add_peer(source.host, source.port)
+        ours.sync()
+        assert ours.node.height == source.node.height
+
+        # Своя короткая ветка поверх общего префикса.
+        forked = P2PNode("127.0.0.1", _free_port(), BHydraNode(difficulty=1))
+        forked.node.replace_chain(
+            [b.to_dict() for b in source.node.blockchain.chain[:6]])
+        for _ in range(8):
+            forked.node.mine_pending(generate_wallet().address)
+        forked.start()
+        time.sleep(0.2)
+        try:
+            ours.peers.clear()
+            ours.add_peer(forked.host, forked.port)
+            assert ours.sync() is True
+            assert ours.node.blockchain.last_block.hash == \
+                forked.node.blockchain.last_block.hash
+            assert ours.node.is_valid()
+        finally:
+            forked.stop()
+    finally:
+        ours.stop()
+        source.stop()
+
+
+def test_common_height_finds_the_fork_point():
+    """Двоичный поиск находит последний общий блок."""
+    source = _chain_of(10, batch=4)
+    ours = P2PNode("127.0.0.1", _free_port(), BHydraNode(difficulty=1))
+    try:
+        ours.add_peer(source.host, source.port)
+        ours.node.replace_chain(
+            [b.to_dict() for b in source.node.blockchain.chain])
+        # Полное совпадение — общий блок это наша вершина.
+        assert ours._common_height((source.host, source.port),
+                                   source.node.height) == ours.node.height - 1
+    finally:
+        source.stop()
+
+
+def test_sync_stops_at_the_block_limit_for_a_lying_peer():
+    """Пир, объявивший абсурдную высоту, не заставит качать бесконечно."""
+    source = _chain_of(6, batch=3)
+    ours = P2PNode("127.0.0.1", _free_port(), BHydraNode(difficulty=1))
+    ours.max_sync_blocks = 2
+    try:
+        fetched = ours._fetch_blocks((source.host, source.port), 0, 10 ** 9)
+        assert len(fetched) <= 2
+    finally:
+        source.stop()
