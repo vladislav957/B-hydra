@@ -504,9 +504,8 @@ class BHydraNode:
         """Полная проверка цепочки: структура (PoW/Меркл/связность) + транзакции."""
         if not blockchain.is_chain_valid():
             return False
-        # Вершина цепочки не должна быть из далёкого будущего.
-        if blockchain.last_block.timestamp > time.time() + MAX_FUTURE_DRIFT:
-            return False
+        # Метки времени (не назад, выше медианы, не из будущего) проверяет
+        # is_chain_valid — причём для КАЖДОГО блока, а не только для вершины.
         utxos: dict = {}
         pq_used: set = set()   # израсходованные XMSS-ключи на всю цепочку
         for height, block in enumerate(blockchain.chain):
@@ -531,6 +530,12 @@ class BHydraNode:
         if block.timestamp > time.time() + MAX_FUTURE_DRIFT:
             return False
         if block.timestamp < last.timestamp:
+            return False
+        # Метка обязана превзойти медиану последних блоков (MTP): «не раньше
+        # предыдущего» разрешало держать часы цепочки замороженными, а при
+        # LWMA застывшее время — это нулевые интервалы и разгон сложности.
+        median = self.blockchain.median_time_past(block.index)
+        if median is not None and block.timestamp <= median:
             return False
         if block.merkle_root != block._calculate_merkle_root():
             return False

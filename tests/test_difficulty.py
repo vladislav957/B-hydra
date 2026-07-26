@@ -227,3 +227,131 @@ def test_difficulty_recovers_after_a_burst_of_fast_blocks():
         block.hash = "0" * 128
         chain.chain.append(block)
     assert chain.expected_target(len(chain.chain)) == chain.genesis_target
+
+
+# --- Метки времени: медиана последних блоков (MTP) --------------------------
+# Правило «не раньше предыдущего» запрещало ход времени назад, но разрешало
+# ЗАМОРОЗКУ: метки могли стоять на месте сколько угодно. После перехода на LWMA
+# это стало опасно — застывшее время означает нулевые интервалы, а они гонят
+# сложность в потолок ограничителя.
+import time as _time
+
+from b_hydra.blockchain import MEDIAN_TIME_BLOCKS, MAX_FUTURE_DRIFT
+
+
+def _mined_chain(stamps, difficulty=1):
+    """Цепочка с заданными метками времени и настоящим PoW."""
+    chain = Blockchain(difficulty=difficulty)
+    for stamp in stamps:
+        height = len(chain.chain)
+        block = Block(height, chain.last_block.hash, [], timestamp=stamp,
+                      target=chain.expected_target(height))
+        block.mine_block()
+        chain.chain.append(block)
+    return chain
+
+
+def test_median_time_past_is_the_middle_of_the_window():
+    now = _time.time()
+    chain = _mined_chain([now + i for i in range(1, 6)])
+    stamps = sorted(b.timestamp for b in chain.chain)
+    assert chain.median_time_past(len(chain.chain)) == stamps[len(stamps) // 2]
+
+
+def test_median_time_past_is_none_for_genesis():
+    assert Blockchain(difficulty=1).median_time_past(0) is None
+
+
+def test_median_uses_only_the_last_blocks():
+    """Окно ограничено: старые метки на медиану уже не влияют."""
+    now = _time.time()
+    chain = _mined_chain([now + i * 100 for i in range(1, MEDIAN_TIME_BLOCKS + 5)])
+    height = len(chain.chain)
+    window = sorted(b.timestamp
+                    for b in chain.chain[height - MEDIAN_TIME_BLOCKS:height])
+    assert chain.median_time_past(height) == window[len(window) // 2]
+
+
+def test_honest_chain_stays_valid():
+    now = _time.time()
+    chain = _mined_chain([now + i * 100 for i in range(1, MEDIAN_TIME_BLOCKS + 4)])
+    assert chain.is_chain_valid()
+
+
+def test_frozen_timestamps_are_rejected():
+    """Часы цепочки обязаны идти: заморозка меток больше не проходит."""
+    now = _time.time()
+    chain = _mined_chain([now] * (MEDIAN_TIME_BLOCKS + 3))
+    assert chain.is_chain_valid() is False
+
+
+def test_time_going_backwards_is_still_rejected():
+    now = _time.time()
+    chain = _mined_chain([now + 1000, now + 500])
+    assert chain.is_chain_valid() is False
+
+
+def test_future_block_inside_the_chain_is_rejected():
+    """Блок «из будущего» невалиден на любой высоте, а не только на вершине.
+
+    Раньше на далёкое будущее проверялась лишь вершина, поэтому такую метку
+    можно было спрятать внутри цепочки.
+    """
+    now = _time.time()
+    chain = _mined_chain([now + i * 100 for i in range(1, 6)])
+    assert chain.is_chain_valid()
+    chain.chain[3].timestamp = now + MAX_FUTURE_DRIFT + 7200
+    assert chain.is_chain_valid() is False
+
+
+def test_median_resists_a_single_outlier():
+    """Одна метка «из будущего» почти не двигает медиану.
+
+    Именно поэтому подтолкнуть часы цепочки одиночным блоком нельзя — нужно
+    большинство окна.
+    """
+    now = _time.time()
+    chain = _mined_chain([now + i * 100 for i in range(1, MEDIAN_TIME_BLOCKS + 2)])
+    height = len(chain.chain)
+    before = chain.median_time_past(height)
+    chain.chain[-1].timestamp = now + 100_000
+    assert chain.median_time_past(height) == before
+
+
+def test_node_rejects_a_block_at_or_below_the_median():
+    """Сетевой путь тоже проверяет MTP, а не только полная валидация."""
+    from b_hydra.node import BHydraNode
+    from b_hydra.transaction import coinbase
+
+    node = BHydraNode(difficulty=1)
+    for _ in range(MEDIAN_TIME_BLOCKS + 2):
+        node.mine_pending(generate_wallet().address)
+
+    median = node.blockchain.median_time_past(node.height)
+    reward = node.blockchain.block_reward(node.height)
+    stale = Block(node.height, node.blockchain.last_block.hash,
+                  [coinbase(generate_wallet().address, reward,
+                            height=node.height).to_dict()],
+                  timestamp=median,                 # ровно медиана — мало
+                  target=node.blockchain.expected_target(node.height))
+    stale.mine_block()
+    assert node.receive_block(stale.to_dict()) is False
+
+
+def test_node_accepts_a_block_above_the_median():
+    from b_hydra.node import BHydraNode
+    from b_hydra.transaction import coinbase
+
+    node = BHydraNode(difficulty=1)
+    for _ in range(MEDIAN_TIME_BLOCKS + 2):
+        node.mine_pending(generate_wallet().address)
+
+    reward = node.blockchain.block_reward(node.height)
+    fresh = Block(node.height, node.blockchain.last_block.hash,
+                  [coinbase(generate_wallet().address, reward,
+                            height=node.height).to_dict()],
+                  timestamp=node.blockchain.last_block.timestamp + 60,
+                  target=node.blockchain.expected_target(node.height))
+    fresh.mine_block()
+    assert node.receive_block(fresh.to_dict()) is True
+    assert node.is_valid()
