@@ -50,6 +50,12 @@ MAX_BLOCKS_PER_MESSAGE = 500     # блоков в одной пачке
 MAX_SYNC_BLOCKS = 100_000        # потолок докачки за одну синхронизацию
 SYNC_PEER_ATTEMPTS = 4           # сколько кандидатов пробуем за одну sync()
 
+# Блок анонсируется ХЕШЕМ (inv), тело запрашивается отдельно (get_block).
+# Раньше полный блок улетал каждому пиру, даже тому, у кого он уже есть:
+# трафик равнялся размеру блока, умноженному на число соседей, а заполненный
+# блок (до 5000 транзакций) — это мегабайты на каждого.
+MAX_INFLIGHT_FETCHES = 16        # сколько тел блоков качаем одновременно
+
 # Узел должен переживать перезапуск. Таблица пиров жила только в памяти, а
 # UDP-маяк работает лишь в пределах одной локальной сети (широковещание за
 # роутер не уходит) — поэтому узел в интернете после рестарта оставался ОДИН и
@@ -150,6 +156,9 @@ class P2PNode:
         # бывает, а демо, тесты и локальная разработка живут на loopback, где
         # один банный список положил бы сразу все узлы машины.
         self.ban_loopback = False
+        # Докачка тел блоков по анонсам: дедуп по хешу и потолок параллелизма.
+        self._inflight = set()
+        self._fetch_slots = threading.Semaphore(MAX_INFLIGHT_FETCHES)
         self._scores = {}               # хост → (очки, когда начислены)
         self._banned = {}               # хост → до какого момента забанен
         self._ban_lock = threading.Lock()
@@ -263,48 +272,46 @@ class P2PNode:
             return self._json({"type": "ack", "accepted": accepted})
 
         if mtype == "block":
-            block_dict = message["block"]
-            bhash = block_dict.get("hash")
-            origin = tuple(message["from"]) if message.get("from") else None
-
-            with self._seen_lock:
-                already_seen = bhash in self.seen_blocks
-            if already_seen:
-                # Повтор уже обработанного блока. Раньше здесь был молчаливый
-                # выход — и если блок отвергли из-за отставания, повторные
-                # рассылки того же блока узел игнорировал, оставаясь позади до
-                # ближайшего периодического sync (а его может и не быть).
-                # Теперь повтор — ещё один повод догнать.
-                if origin and self._block_is_ahead(block_dict):
-                    self._sync_from_throttled(origin)
-                return self._json({"type": "ack", "accepted": False,
-                                   "height": self.node.height})
-
-            accepted = self.node.receive_block(block_dict)
-            if accepted:
-                with self._seen_lock:
-                    self.seen_blocks.add(bhash)
-                # Gossip: пересылаем блок дальше по сети (кроме отправителя).
-                self._gossip({"type": "block", "block": block_dict,
-                              "from": [self.host, self.port]},
-                             exclude=origin, background=True)
-            else:
-                # Виденным помечаем только то, что нам и правда не подходит:
-                # бракованный блок или чужую развилку — их дорогая проверка
-                # выполнится один раз. Блок «из будущего» (мы просто отстали)
-                # НЕ помечаем: он ещё пригодится, а повторно отбрасывается за
-                # O(1) — receive_block сверяет previous_hash до всех проверок.
-                if not self._block_is_ahead(block_dict):
-                    with self._seen_lock:
-                        self.seen_blocks.add(bhash)
-                    # Блок не подошёл, и дело НЕ в нашем отставании: либо брак,
-                    # либо чужая развилка. Проверка его дорога — за поток
-                    # такого добра пир должен отвечать.
-                    self._penalise(host, PENALTY_INVALID_BLOCK)
-                if origin:
-                    self._sync_from_throttled(origin)
+            # Прямая доставка тела блока: так приходит ответ на наш get_block,
+            # и так же сосед может прислать блок сам.
+            accepted = self._process_block(
+                message["block"],
+                tuple(message["from"]) if message.get("from") else None,
+                host)
             return self._json({"type": "ack", "accepted": accepted,
                                "height": self.node.height})
+
+        if mtype == "inv":
+            # Анонс: приходит только ХЕШ блока. Тело запрашиваем, лишь если
+            # блока у нас нет, — иначе полный блок улетал бы каждому соседу,
+            # включая тех, у кого он уже есть.
+            bhash = message.get("hash")
+            announced = message.get("from") or []
+            try:
+                port = int(announced[1])
+            except (TypeError, ValueError, IndexError):
+                return self._json({"type": "ack", "wanted": False})
+            # Качаем ТОЛЬКО у того, кто с нами реально соединился: хост берём
+            # из соединения, а не из сообщения, иначе пир мог бы заставить нас
+            # ходить по произвольным адресам.
+            source = host or (announced[0] if announced else None)
+            if not bhash or not source:
+                return self._json({"type": "ack", "wanted": False})
+            with self._seen_lock:
+                known = bhash in self.seen_blocks
+            if known or not self._start_fetch(bhash):
+                return self._json({"type": "ack", "wanted": False})
+            # Тянем тело в фоне: делать это прямо в обработчике значило бы
+            # держать входящий поток на время исходящего запроса, а число
+            # таких потоков ограничено.
+            threading.Thread(target=self._fetch_block,
+                             args=((source, port), bhash), daemon=True).start()
+            return self._json({"type": "ack", "wanted": True})
+
+        if mtype == "get_block":
+            block = self.node.blockchain.block_by_hash(message.get("hash"))
+            return self._json({"type": "block_body",
+                               "block": block.to_dict() if block else None})
 
         return self._json({"type": "ack"})
 
@@ -783,8 +790,9 @@ class P2PNode:
         block = self.node.mine_pending(miner_address)
         with self._seen_lock:
             self.seen_blocks.add(block.hash)
-        self._gossip({"type": "block", "block": block.to_dict(),
-                      "from": [self.host, self.port]})
+        # Рассылаем ХЕШ, а не тело: соседи сами попросят блок, если он им
+        # нужен. Анонс уходит синхронно, докачка у соседей — асинхронно.
+        self._announce_block(block.hash, background=False)
         return block
 
     def sync(self) -> bool:
@@ -820,6 +828,71 @@ class P2PNode:
             if self._sync_from(peer):
                 return True
         return False
+
+    # --- Приём и распространение блоков -----------------------------------
+    def _process_block(self, block_dict, origin=None, host=None) -> bool:
+        """Разбирает полученный блок; принятый анонсируется дальше по сети."""
+        bhash = block_dict.get("hash")
+        with self._seen_lock:
+            already_seen = bhash in self.seen_blocks
+        if already_seen:
+            # Повтор уже обработанного блока. Раньше здесь был молчаливый
+            # выход — и если блок отвергли из-за отставания, повторные анонсы
+            # узел игнорировал, оставаясь позади до ближайшего sync.
+            if origin and self._block_is_ahead(block_dict):
+                self._sync_from_throttled(origin)
+            return False
+
+        accepted = self.node.receive_block(block_dict)
+        if accepted:
+            with self._seen_lock:
+                self.seen_blocks.add(bhash)
+            self._announce_block(bhash, exclude=origin)
+        else:
+            # Виденным помечаем только то, что нам и правда не подходит:
+            # бракованный блок или чужую развилку. Блок «из будущего» (мы
+            # просто отстали) НЕ помечаем — он ещё пригодится.
+            if not self._block_is_ahead(block_dict):
+                with self._seen_lock:
+                    self.seen_blocks.add(bhash)
+                self._penalise(host, PENALTY_INVALID_BLOCK)
+            if origin:
+                self._sync_from_throttled(origin)
+        return accepted
+
+    def _announce_block(self, block_hash, exclude=None, background=True):
+        """Рассылает соседям ХЕШ блока — тело они запросят сами, если нужно."""
+        self._gossip({"type": "inv", "kind": "block", "hash": block_hash,
+                      "from": [self.host, self.port]},
+                     exclude=exclude, background=background)
+
+    def _start_fetch(self, block_hash) -> bool:
+        """Резервирует место под докачку тела: дедуп по хешу и потолок."""
+        if not self._fetch_slots.acquire(blocking=False):
+            return False
+        with self._seen_lock:
+            if block_hash in self._inflight:
+                self._fetch_slots.release()
+                return False
+            self._inflight.add(block_hash)
+        return True
+
+    def _fetch_block(self, origin, block_hash) -> bool:
+        """Запрашивает тело анонсированного блока и применяет его."""
+        try:
+            resp = self.send(origin[0], origin[1],
+                             {"type": "get_block", "hash": block_hash})
+            body = resp.get("block")
+            # Пир обязан прислать именно то, что анонсировал.
+            if not body or body.get("hash") != block_hash:
+                return False
+            return self._process_block(body, origin, origin[0])
+        except (OSError, ValueError):
+            return False
+        finally:
+            with self._seen_lock:
+                self._inflight.discard(block_hash)
+            self._fetch_slots.release()
 
     def _block_is_ahead(self, block_dict) -> bool:
         """True, если блок выше нашей вершины — значит мы просто отстали.

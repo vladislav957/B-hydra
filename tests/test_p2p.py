@@ -41,9 +41,14 @@ def test_nodes_share_genesis(two_nodes):
 
 
 def test_block_is_broadcast(two_nodes):
+    """Блок доходит до соседа.
+
+    Ожидание обязательно: узел рассылает только АНОНС (хеш), а тело сосед
+    забирает сам — распространение асинхронное, как в Bitcoin.
+    """
     a, b = two_nodes
     a.mine(generate_wallet().address)
-    assert b.node.height == a.node.height
+    assert _wait_until(lambda: b.node.height == a.node.height)
     assert b.node.blockchain.last_block.hash == a.node.blockchain.last_block.hash
 
 
@@ -62,6 +67,7 @@ def test_transaction_propagates(two_nodes):
     a, b = two_nodes
     miner, bob = generate_wallet(), generate_wallet()
     a.mine(miner.address)              # рассылается → B тоже знает этот UTXO
+    assert _wait_until(lambda: b.node.height == a.node.height)
     tx = a.node.create_transaction(miner, bob.address, 5, fee=0.1)
     assert a.submit_transaction(tx)
     assert any(t.txid == tx.txid for t in b.node.mempool.transactions)
@@ -1007,3 +1013,125 @@ def test_lagging_behind_does_not_punish_an_honest_peer():
         assert node.is_banned(EXTERNAL) is False
     finally:
         source.stop()
+
+
+# --- Анонс блока (inv) вместо рассылки тела ---------------------------------
+# Раньше полный блок улетал каждому пиру, даже тому, у кого он уже есть:
+# трафик = размер блока × число соседей.
+def test_mining_announces_only_the_hash():
+    """В рассылке уходит анонс, а не тело блока."""
+    node = _lone_node()
+    sent = []
+    node._gossip = lambda message, **kw: sent.append(message)
+    node.node.mine_pending(generate_wallet().address)
+    node._announce_block(node.node.blockchain.last_block.hash, background=False)
+    assert sent and sent[-1]["type"] == "inv"
+    assert "block" not in sent[-1]                 # тела в анонсе нет
+    assert sent[-1]["hash"] == node.node.blockchain.last_block.hash
+
+
+def test_get_block_returns_the_body_by_hash():
+    source = _chain_of(3, batch=10)
+    try:
+        wanted = source.node.blockchain.last_block.hash
+        resp = source.send(source.host, source.port,
+                           {"type": "get_block", "hash": wanted})
+        assert resp["block"]["hash"] == wanted
+        missing = source.send(source.host, source.port,
+                              {"type": "get_block", "hash": "ff" * 64})
+        assert missing["block"] is None
+    finally:
+        source.stop()
+
+
+def test_known_block_is_not_refetched():
+    """Анонс уже известного блока не тянет тело заново."""
+    node = _lone_node()
+    node.node.mine_pending(generate_wallet().address)
+    known = node.node.blockchain.last_block.hash
+    with node._seen_lock:
+        node.seen_blocks.add(known)
+    resp = json.loads(node._dispatch(node._json(
+        {"type": "inv", "kind": "block", "hash": known,
+         "from": [node.host, node.port]}), "127.0.0.1").decode())
+    assert resp["wanted"] is False
+
+
+def test_inv_without_a_source_is_ignored():
+    """Без адреса, у кого спрашивать, анонс бесполезен."""
+    node = _lone_node()
+    resp = json.loads(node._dispatch(node._json(
+        {"type": "inv", "kind": "block", "hash": "ab" * 64}), None).decode())
+    assert resp["wanted"] is False
+
+
+def test_concurrent_fetches_are_bounded():
+    """Число одновременных докачек тел ограничено, а хеши не дублируются."""
+    from b_hydra.p2p import MAX_INFLIGHT_FETCHES
+    node = _lone_node()
+    reserved = [node._start_fetch("%064x" % i) for i in range(MAX_INFLIGHT_FETCHES)]
+    assert all(reserved)
+    assert node._start_fetch("ff" * 64) is False       # слоты кончились
+    node._fetch_slots.release()
+    assert node._start_fetch("%064x" % 0) is False     # такой хеш уже качаем
+
+
+def test_block_propagates_through_announcement(two_nodes):
+    """Сквозная проверка: сосед сам забирает тело по анонсу."""
+    a, b = two_nodes
+    block = a.mine(generate_wallet().address)
+    assert _wait_until(lambda: b.node.height == a.node.height)
+    assert b.node.blockchain.last_block.hash == block.hash
+    assert b.node.is_valid()
+
+
+# --- Блок со СВЯЗАННЫМИ транзакциями ----------------------------------------
+def test_block_with_chained_transactions_is_accepted_by_others():
+    """Мемпул разрешает тратить неподтверждённую сдачу — блок с такой цепочкой
+    обязан приниматься и другими узлами.
+
+    Раньше _validate_block_transactions искала входы только в подтверждённом
+    наборе UTXO, поэтому вторая транзакция цепочки не находила выход первой.
+    Такой блок принимал только сам майнер, а сеть его отвергала — то есть узел
+    не мог распространить собственный штатный блок.
+    """
+    source = BHydraNode(difficulty=1)
+    alice, bob = generate_wallet(), generate_wallet()
+    source.mine_pending(alice.address)
+    for _ in range(6):                       # цепочка: каждая тратит сдачу
+        source.add_transaction(
+            source.create_transaction(alice, bob.address, 0.01, fee=0.001))
+    assert len(source.mempool) == 6
+    source.mine_pending(alice.address)
+
+    other = BHydraNode(difficulty=1)
+    for index in (1, 2):
+        assert other.receive_block(source.blockchain.chain[index].to_dict())
+    assert other.get_balance(bob.address) == source.get_balance(bob.address)
+    assert other.is_valid()
+
+
+def test_transaction_cannot_spend_a_later_output_in_the_same_block():
+    """Внутри блока порядок обязан быть топологическим.
+
+    Иначе можно было бы сослаться на выход транзакции, которая идёт ПОЗЖЕ, —
+    а значит и на ещё не существующие деньги.
+    """
+    source = BHydraNode(difficulty=1)
+    alice, bob = generate_wallet(), generate_wallet()
+    source.mine_pending(alice.address)
+    first = source.create_transaction(alice, bob.address, 1, fee=0.001)
+    source.add_transaction(first)
+    second = source.create_transaction(alice, bob.address, 0.5, fee=0.001)
+    source.add_transaction(second)
+    block = source.mine_pending(alice.address)
+
+    # Переставляем связанные транзакции местами — блок должен стать негодным.
+    swapped = list(block.data)
+    swapped[1], swapped[2] = swapped[2], swapped[1]
+    block.data = swapped
+    other = BHydraNode(difficulty=1)
+    other.receive_block(source.blockchain.chain[1].to_dict())
+    assert other._validate_block_transactions(
+        block, block.index, other.utxo_set(),
+        pq_used=other.pq_used_indices(include_mempool=False)) is False

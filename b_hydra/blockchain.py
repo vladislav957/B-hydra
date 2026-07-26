@@ -392,6 +392,19 @@ class Blockchain:
         self.chain.append(new_block)
         return new_block
 
+    def block_by_hash(self, block_hash):
+        """Блок по хешу или None.
+
+        Ищем с конца: спрашивают почти всегда свежие блоки, поэтому обычно это
+        первое же сравнение.
+        """
+        if not block_hash:
+            return None
+        for block in reversed(self.chain):
+            if block.hash == block_hash:
+                return block
+        return None
+
     def median_time_past(self, height):
         """Медиана меток времени последних MEDIAN_TIME_BLOCKS блоков до height.
 

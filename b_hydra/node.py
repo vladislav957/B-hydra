@@ -462,6 +462,13 @@ class BHydraNode:
 
         fees = 0.0
         spent: set = set()
+        # Выходы, созданные транзакциями ЭТОГО же блока. Мемпул разрешает
+        # тратить неподтверждённую сдачу, поэтому в блок попадают цепочки
+        # связанных транзакций: вторая тратит выход первой. Без этого набора
+        # такой блок принимал бы только сам майнер (у него выход уже лежал в
+        # «эффективном» UTXO), а все остальные узлы его отвергали — сеть не
+        # смогла бы распространить собственный штатный блок.
+        created: dict = {}
         for raw in txs[1:]:
             if _is_coinbase_dict(raw):
                 return False  # только одна coinbase на блок
@@ -472,18 +479,27 @@ class BHydraNode:
             total_in = 0.0
             for inp in tx.vin:
                 outpoint = inp.outpoint
-                if outpoint in spent or outpoint not in utxos:
+                # Источником может быть подтверждённый выход или выход
+                # предыдущей транзакции этого блока — но только ПРЕДЫДУЩЕЙ:
+                # created пополняется после разбора каждой, поэтому порядок
+                # внутри блока обязан быть топологическим (как в Bitcoin).
+                source = utxos.get(outpoint) or created.get(outpoint)
+                if outpoint in spent or source is None:
                     return False  # двойная трата / несуществующий выход
                 spent.add(outpoint)
-                utxo = utxos[outpoint]
                 if not self._verify_input_auth(
                         inp.public_key, inp.signature, inp.pq_public_key,
-                        inp.pq_signature, utxo["address"], payload, pq_used):
+                        inp.pq_signature, source["address"], payload, pq_used):
                     return False
-                total_in += utxo["amount"]
+                total_in += source["amount"]
             if total_in + _EPS < tx.total_output:
                 return False
             fees += total_in - tx.total_output
+            # Выходы coinbase намеренно НЕ добавляем: награду нельзя потратить
+            # в том же блоке, где она создана.
+            for position, out in enumerate(tx.vout):
+                created[(tx.txid, position)] = {"amount": out.amount,
+                                                "address": out.address}
 
         coinbase_out = Transaction.from_dict(txs[0]).total_output
         if coinbase_out > self.blockchain.block_reward(height) + fees + _EPS:
