@@ -231,3 +231,150 @@ def test_unicode_message_is_measured_in_bytes():
         node.mine_pending(generate_wallet().address, message="я" * 60)
     block = node.mine_pending(generate_wallet().address, message="я" * 40)
     assert node.block_message(block.index) == "я" * 40
+
+
+# --- Подпись заметки майнера ------------------------------------------------
+# PoW доказывает, что блок ДОБЫТ, но не то, КТО написал заметку: текст в
+# coinbase свободный, и любой майнер может подписаться чужим именем. Поэтому
+# заметку можно подписать ключом майнера — тогда авторство проверяемо.
+from b_hydra.transaction import coinbase_message_author, message_payload
+
+
+def _signed_block(node, wallet, message, height=1, miner=None):
+    """Блок с подписанной заметкой, добытый «вручную» (для проверок чужим узлом)."""
+    reference = node.blockchain.chain[height - 1]
+    tx = coinbase(miner or wallet.address, 50, height=height,
+                  message=message, wallet=wallet)
+    block = Block(height, reference.hash, [tx.to_dict()],
+                  timestamp=reference.timestamp + 1,
+                  target=node.blockchain.expected_target(height))
+    block.mine_block()
+    return block
+
+
+def test_miner_signs_his_message():
+    node = BHydraNode(difficulty=1)
+    miner = generate_wallet()
+    block = node.mine_pending(miner.address, message="i-3ru", wallet=miner)
+    assert node.block_message(block.index) == "i-3ru"
+    assert node.block_message_author(block.index) == miner.address
+    assert node.is_valid()
+
+
+def test_unsigned_message_has_no_author():
+    """Подпись необязательна: анонимная заметка валидна, как в Bitcoin."""
+    node = BHydraNode(difficulty=1)
+    block = node.mine_pending(generate_wallet().address, message="аноним")
+    assert node.block_message(block.index) == "аноним"
+    assert node.block_message_author(block.index) is None
+
+
+def test_signed_message_travels_over_the_network():
+    node = BHydraNode(difficulty=1)
+    miner = generate_wallet()
+    block = _signed_block(node, miner, "i-3ru")
+    peer = BHydraNode(difficulty=1)
+    assert peer.receive_block(block.to_dict()) is True
+    assert peer.block_message_author(1) == miner.address
+
+
+def test_rewriting_a_signed_message_invalidates_the_block():
+    """Текст сменили, подпись оставили — блок отвергается всей сетью."""
+    node = BHydraNode(difficulty=1)
+    miner = generate_wallet()
+    block = _signed_block(node, miner, "i-3ru")
+    block.data[0]["vin"][0]["public_key"] = "это писал не я"
+    block.merkle_root = block._calculate_merkle_root()
+    block.mine_block()
+    assert BHydraNode(difficulty=1).receive_block(block.to_dict()) is False
+
+
+def test_stolen_signature_does_not_pass():
+    """Чужую подпись нельзя приложить к своему блоку.
+
+    В payload входит адрес получателя награды, поэтому подпись «прилипает» к
+    майнеру: переставить её на другой адрес — значит сломать проверку.
+    """
+    node = BHydraNode(difficulty=1)
+    miner, thief = generate_wallet(), generate_wallet()
+    block = _signed_block(node, miner, "i-3ru")
+    block.data[0]["vout"][0]["address"] = thief.address
+    block.merkle_root = block._calculate_merkle_root()
+    block.mine_block()
+    assert BHydraNode(difficulty=1).receive_block(block.to_dict()) is False
+
+
+def test_signing_with_someone_elses_key_does_not_pass():
+    """Ключ обязан принадлежать получателю награды, а не быть «каким-нибудь»."""
+    node = BHydraNode(difficulty=1)
+    miner, stranger = generate_wallet(), generate_wallet()
+    block = _signed_block(node, stranger, "i-3ru", miner=miner.address)
+    assert BHydraNode(difficulty=1).receive_block(block.to_dict()) is False
+
+
+def test_signature_is_bound_to_the_height():
+    """Подписанную заметку нельзя перенести в другой блок той же сети."""
+    miner = generate_wallet()
+    signed = coinbase(miner.address, 50, height=1, message="i-3ru",
+                      wallet=miner).to_dict()
+    assert coinbase_message_author(signed, 1) == miner.address
+    assert coinbase_message_author(signed, 2) is None
+
+
+def test_broken_signature_is_rejected_not_ignored():
+    """Мусор вместо подписи — блок невалиден, а не «просто без автора».
+
+    Иначе поле подписи стало бы ещё одним куском свободного текста, и по нему
+    нельзя было бы судить об авторстве вообще.
+    """
+    node = BHydraNode(difficulty=1)
+    miner = generate_wallet()
+    block = _signed_block(node, miner, "i-3ru")
+    block.data[0]["vin"][0]["signature"] = "00" * 64
+    block.merkle_root = block._calculate_merkle_root()
+    block.mine_block()
+    assert BHydraNode(difficulty=1).receive_block(block.to_dict()) is False
+
+
+def test_mining_with_a_foreign_key_is_refused():
+    node = BHydraNode(difficulty=1)
+    with pytest.raises(ValueError):
+        node.mine_pending(generate_wallet().address, message="i-3ru",
+                          wallet=generate_wallet())
+
+
+def test_unsigned_coinbase_serialisation_is_unchanged():
+    """Обычная (неподписанная) coinbase сериализуется как раньше.
+
+    Новое поле miner_key появляется только у подписанной — иначе изменился бы
+    лист дерева Меркла у всех старых блоков.
+    """
+    plain = coinbase("BHYx", 50, height=1, message="i-3ru").to_dict()
+    assert "miner_key" not in plain["vin"][0]
+    assert plain["vin"][0]["signature"] is None
+    signed = coinbase("BHYx", 50, height=1, message="i-3ru",
+                      wallet=generate_wallet()).to_dict()
+    assert "miner_key" in signed["vin"][0]
+
+
+def test_signature_does_not_change_the_txid():
+    """Подпись заметки не влияет на txid coinbase — как и сама заметка.
+
+    signing_payload берёт из входа только txid и index, поэтому награда
+    идентифицируется одинаково, подписался майнер или нет.
+    """
+    miner = generate_wallet()
+    plain = coinbase(miner.address, 50, height=1, message="i-3ru")
+    signed = coinbase(miner.address, 50, height=1, message="i-3ru",
+                      wallet=miner)
+    signed.timestamp = plain.timestamp
+    assert signed.txid == plain.txid
+
+
+def test_message_payload_binds_network_height_and_miner():
+    """В подписываемых байтах есть сеть, высота, майнер и текст."""
+    import json
+    from b_hydra.blockchain import CHAIN_ID
+    payload = json.loads(message_payload("i-3ru", "BHYx", 7).decode("utf-8"))
+    assert payload == {"chain_id": CHAIN_ID, "height": 7,
+                       "miner": "BHYx", "message": "i-3ru"}

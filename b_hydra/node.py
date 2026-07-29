@@ -27,6 +27,7 @@ from .blockchain import (
 )
 from .transaction import (
     NULL_TXID, Transaction, TxInput, TxOutput, TransactionPool, coinbase,
+    coinbase_message_author, claims_signed_message,
 )
 from .wallet import Wallet, is_valid_address
 
@@ -361,11 +362,16 @@ class BHydraNode:
         return tx
 
     # --- Майнинг ---------------------------------------------------------
-    def mine_pending(self, miner_address: str, message: str = None):
+    def mine_pending(self, miner_address: str, message: str = None,
+                     wallet: Wallet = None):
         """Собирает транзакции из мемпула в блок и майнит его.
 
         `message` — заметка майнера, которая останется в блоке навсегда (как
         coinbase-послание в Bitcoin). Не длиннее MAX_COINBASE_MESSAGE байт.
+
+        `wallet` — кошелёк майнера; если он передан, заметка ПОДПИСЫВАЕТСЯ им,
+        и любой узел сможет убедиться, что её написал держатель адреса, на
+        который ушла награда. Без ключа заметка остаётся анонимной.
 
         Берёт до MAX_BLOCK_TRANSACTIONS-1 транзакций (плюс coinbase), проверяя
         их по нарастающему набору UTXO — поэтому в один блок попадают и связанные
@@ -405,6 +411,10 @@ class BHydraNode:
 
         height = len(self.blockchain.chain)
         reward = self.blockchain.block_reward(height)
+        if wallet is not None and wallet.address != miner_address:
+            # Иначе подпись не сойдётся с получателем награды и сеть отвергнет
+            # собственный блок — лучше сказать об этом сразу.
+            raise ValueError("ключ не принадлежит адресу майнера")
         if message is None:
             reward_tx = coinbase(miner_address, reward, fees, height=height)
         else:
@@ -412,7 +422,7 @@ class BHydraNode:
                 raise ValueError(
                     f"сообщение майнера длиннее {MAX_COINBASE_MESSAGE} байт")
             reward_tx = coinbase(miner_address, reward, fees, height=height,
-                                 message=str(message))
+                                 message=str(message), wallet=wallet)
 
         data = [reward_tx.to_dict()] + [tx.to_dict() for tx in valid]
         block = self.blockchain.add_block(data=data)
@@ -493,6 +503,14 @@ class BHydraNode:
             if not isinstance(note, str):
                 return False
             if len(note.encode("utf-8")) > MAX_COINBASE_MESSAGE:
+                return False
+        # Заметку можно ПОДПИСАТЬ ключом майнера. Подпись необязательна
+        # (анонимная заметка валидна, как scriptSig в Bitcoin), но если она
+        # заявлена — обязана быть настоящей и принадлежать получателю награды.
+        # Иначе «подпись» стала бы просто ещё одним полем свободного текста, и
+        # ей нельзя было бы верить: любой майнер расписался бы чужим адресом.
+        if claims_signed_message(txs[0]):
+            if coinbase_message_author(txs[0], height) is None:
                 return False
 
         fees = 0.0
@@ -641,6 +659,16 @@ class BHydraNode:
         if 0 <= index < len(self.blockchain.chain):
             return self.blockchain.coinbase_message(self.blockchain.chain[index])
         return None
+
+    def block_message_author(self, index: int):
+        """Адрес того, кто ПОДПИСАЛ заметку в блоке (или None, если она
+        анонимна). Подпись проверяется здесь же — доверять полю нельзя."""
+        if not 0 <= index < len(self.blockchain.chain):
+            return None
+        txs = self._block_transactions(self.blockchain.chain[index])
+        if not txs:
+            return None
+        return coinbase_message_author(txs[0], index)
 
     def _resolve_output(self, txid, index):
         """Находит выход (txid, index) в цепочке — по индексу транзакций O(1)."""

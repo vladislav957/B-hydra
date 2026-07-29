@@ -12,7 +12,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 pip install pytest                            # единственная dev-зависимость
-python -m pytest -q                           # 330 тестов — держать зелёными
+python -m pytest -q                           # 342 теста — держать зелёными
 python -m pytest tests/test_node.py -q        # один файл
 python -m pytest tests/test_node.py -k mempool -q   # один тест по имени
 
@@ -58,7 +58,7 @@ python P2P.py --demo                          # демо-сеть из трёх 
 
 Корневые `*.py` (`cli.py`, `api.py`, `P2P.py`, `cache.py`, `IP.py`, …) — тонкие
 запускалки/шимы поверх пакета; править логику нужно в `b_hydra/`. Тесты —
-`tests/` (22 файла, 330 тестов, `pytest`). Полная карта слоёв — `ARCHITECTURE.md`,
+`tests/` (22 файла, 342 теста, `pytest`). Полная карта слоёв — `ARCHITECTURE.md`,
 схема REST-подписи — `API.md`.
 
 ## REST API (`b_hydra/api.py`)
@@ -140,6 +140,22 @@ python P2P.py --demo                          # демо-сеть из трёх 
   перемайнив блок. На txid НЕ влияет (`signing_payload` берёт из входа только
   `txid` и `index`). Лимит — правило сети: блок с более длинной заметкой
   невалиден, иначе в цепочку набивали бы данные, которые все хранят вечно.
+- **Подпись заметки** (`mine_pending(addr, message=…, wallet=…)`, CLI `--key`,
+  `POST /api/mine {private_key}`): подпись ложится в свободное поле
+  `signature` coinbase-входа, публичный ключ — в новое `miner_key`.
+  Подписывается `transaction.message_payload` = `{chain_id, height, miner,
+  message}` — заметка привязана к сети, ВЫСОТЕ и адресу получателя награды,
+  поэтому её нельзя ни переставить в другой блок, ни выдать за свою.
+  Проверяет `coinbase_message_author` / `node.block_message_author(index)`
+  (в `GET /api/block/<i>` — `miner_message_author`), причём ключ обязан
+  соответствовать coinbase-выходу. Подпись НЕОБЯЗАТЕЛЬНА (анонимная заметка
+  валидна, как в Bitcoin), но если заявлена — обязана быть настоящей: иначе
+  «подпись» была бы просто ещё одним полем свободного текста. Правило сети,
+  проверяется в `_validate_block_transactions`. PoW доказывает, что блок
+  ДОБЫТ, а не кто написал заметку, — авторство даёт только подпись.
+  ⚠️ `miner_key` пишется в dict только у подписанной coinbase: иначе изменился
+  бы лист дерева Меркла у всех прежних блоков. Гибридные адреса (`0x2f`)
+  заметку пока не подписывают — автор выводится по ECDSA-версии `0x1f`.
 - **Размер блока — правило сети**: `MAX_BLOCK_SIZE=4` МиБ проверяется в
   `is_chain_valid` (каждый блок) и в `node.receive_block`. Счётчика
   `MAX_BLOCK_TRANSACTIONS=5000` мало: транзакция с множеством входов/выходов
@@ -265,7 +281,7 @@ python P2P.py --demo                          # демо-сеть из трёх 
   `mine_pending` / `_validate_block_transactions` / `_validate_chain`).
   Квант ломает лишь ECDSA — монеты на гибридном адресе недоступны. Обычные
   ECDSA-кошельки (`0x1f`) работают как раньше (обратная совместимость).
-- **Перед push — `python -m pytest -q` должно быть зелёным** (330/330).
+- **Перед push — `python -m pytest -q` должно быть зелёным** (342/342).
 - Коммиты по-русски, осмысленные; заканчиваются трейлерами
   `Co-Authored-By:` и `Claude-Session:`.
 - Не хардкодить идентификатор модели в коде/коммитах/артефактах.

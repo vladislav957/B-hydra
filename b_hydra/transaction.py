@@ -51,7 +51,7 @@ class TxInput:
     """Вход транзакции: ссылка на конкретный выход (txid, index) + подпись."""
 
     def __init__(self, txid, index, public_key=None, signature=None,
-                 pq_public_key=None, pq_signature=None):
+                 pq_public_key=None, pq_signature=None, miner_key=None):
         self.txid = txid            # id транзакции, чей выход расходуется
         self.index = index          # номер выхода в той транзакции (vout)
         self.public_key = public_key  # hex ECDSA-публичного ключа владельца
@@ -59,6 +59,10 @@ class TxInput:
         # Пост-квантовая часть (только для гибридных входов):
         self.pq_public_key = pq_public_key   # XMSS-корень (hex) владельца
         self.pq_signature = pq_signature     # XMSS-подпись (dict) или None
+        # Только для coinbase: публичный ключ автора заметки майнера. У обычных
+        # входов ключ лежит в public_key, но у coinbase это поле занято самой
+        # заметкой — подписи там исторически не было, а место есть.
+        self.miner_key = miner_key
 
     @property
     def outpoint(self):
@@ -77,6 +81,10 @@ class TxInput:
         if self.pq_public_key is not None or self.pq_signature is not None:
             d["pq_public_key"] = self.pq_public_key
             d["pq_signature"] = self.pq_signature
+        # Ключ автора заметки — только у подписанной coinbase, чтобы обычные
+        # транзакции и неподписанные блоки сериализовались как раньше.
+        if self.miner_key is not None:
+            d["miner_key"] = self.miner_key
         return d
 
     @classmethod
@@ -88,6 +96,7 @@ class TxInput:
             signature=data.get("signature"),
             pq_public_key=data.get("pq_public_key"),
             pq_signature=data.get("pq_signature"),
+            miner_key=data.get("miner_key"),
         )
 
     def __repr__(self):
@@ -179,16 +188,79 @@ class Transaction:
         return f"<{kind} {self.txid[:12]}… in={len(self.vin)} out={len(self.vout)}>"
 
 
-def coinbase(recipient, reward, fee_total=0.0, height=0, message="B-hydra"):
+def message_payload(message, miner, height) -> bytes:
+    """
+    Канонические байты, которые подписывает майнер, оставляя заметку в блоке.
+
+    Заметка привязана к сети (chain_id), к ВЫСОТЕ и к адресу получателя
+    награды — поэтому подписанную чужую заметку нельзя ни переставить в другой
+    блок, ни выдать за свою: адрес в payload не совпадёт с coinbase-выходом.
+    """
+    payload = {
+        "chain_id": CHAIN_ID,
+        "height": int(height),
+        "miner": miner,
+        "message": message,
+    }
+    return json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
+
+
+def coinbase(recipient, reward, fee_total=0.0, height=0, message="B-hydra",
+             wallet=None):
     """
     Создаёт coinbase-транзакцию (награда майнеру + собранные комиссии).
 
     Вход — фиктивный (NULL_TXID); `height` в поле index делает txid уникальным
-    для каждого блока. Подпись не требуется.
+    для каждого блока. Подпись входа не требуется.
+
+    `wallet` — кошелёк майнера. Если он передан, заметка ПОДПИСЫВАЕТСЯ его
+    ключом: подпись ложится в свободное поле signature фиктивного входа, ключ —
+    в miner_key. Любой узел потом проверит, что заметку написал держатель
+    адреса, на который ушла награда.
     """
     vin = [TxInput(txid=NULL_TXID, index=height, public_key=message)]
     vout = [TxOutput(amount=reward + fee_total, address=recipient)]
+    if wallet is not None:
+        vin[0].miner_key = wallet.public_key_hex
+        vin[0].signature = wallet.sign(message_payload(message, recipient, height))
     return Transaction(vin=vin, vout=vout)
+
+
+def coinbase_message_author(raw, height):
+    """
+    Адрес автора заметки майнера — или None, если заметка не подписана либо
+    подпись негодная.
+
+    `raw` — coinbase-транзакция в виде dict (как она лежит в блоке).
+    Проверяется и сама подпись, и то, что ключ принадлежит получателю награды:
+    иначе заметку можно было бы подписать любым ключом и «расписаться» чужим.
+    """
+    from .wallet import Wallet   # локально: wallet.py не должен зависеть от tx
+
+    try:
+        vin = raw["vin"][0]
+        miner = raw["vout"][0]["address"]
+    except (KeyError, IndexError, TypeError):
+        return None
+    key = vin.get("miner_key")
+    signature = vin.get("signature")
+    message = vin.get("public_key")
+    if not (isinstance(key, str) and isinstance(signature, str)
+            and isinstance(message, str)):
+        return None
+    if not Wallet.verify(key, message_payload(message, miner, height), signature):
+        return None
+    author = Wallet.address_from_public_key(key)
+    return author if author == miner else None
+
+
+def claims_signed_message(raw) -> bool:
+    """Заявлена ли у coinbase подпись заметки (есть ключ или подпись)."""
+    try:
+        vin = raw["vin"][0]
+    except (KeyError, IndexError, TypeError):
+        return False
+    return vin.get("miner_key") is not None or vin.get("signature") is not None
 
 
 class TransactionPool:
