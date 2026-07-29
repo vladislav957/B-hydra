@@ -133,6 +133,12 @@ MAX_BLOCK_TRANSACTIONS = 5000      # максимум транзакций в б
 # test_block_size_fits_the_transport в tests/test_blockchain.py: менять эти
 # числа поодиночке нельзя.
 MAX_BLOCK_SIZE = 4 * 1024 * 1024   # 4 МиБ — потолок размера блока в байтах
+# Сообщение майнера в coinbase — как scriptSig в Bitcoin, где в генезисе лежит
+# «The Times 03/Jan/2009…». Произвольный текст, который нашедший блок оставляет
+# в нём навсегда. Длина ограничена: это данные, которые каждый узел хранит
+# вечно, и без потолка блок можно было бы набивать чем угодно. 100 байт — тот
+# же лимит, что у Bitcoin.
+MAX_COINBASE_MESSAGE = 100         # байт (UTF-8) на сообщение майнера
 MAX_MEMPOOL_TRANSACTIONS = 50000   # вместимость мемпула (неподтверждённых тх)
 MAX_FUTURE_DRIFT = 2 * 60 * 60 # блок не может быть из будущего более чем на 2 ч
 # Медиана времени последних блоков (MTP, как в Bitcoin). Правило «не раньше
@@ -291,6 +297,24 @@ class Blockchain:
         «дешёвых» блоков низкой сложности.
         """
         return sum(block.work for block in self.chain)
+
+    @staticmethod
+    def coinbase_message(block):
+        """Сообщение майнера из блока (или None, если его там нет).
+
+        Лежит в поле public_key фиктивного входа coinbase — подпись там не
+        нужна, а место есть. Входит в лист дерева Меркла, поэтому защищено
+        proof-of-work: переписать сообщение задним числом нельзя, не
+        перемайнив блок.
+        """
+        data = block.data
+        if not (isinstance(data, list) and data and isinstance(data[0], dict)):
+            return None
+        vin = data[0].get("vin")
+        if not (vin and isinstance(vin[0], dict)):
+            return None
+        message = vin[0].get("public_key")
+        return message if isinstance(message, str) else None
 
     @staticmethod
     def _miner_of(block):

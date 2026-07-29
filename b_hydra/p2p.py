@@ -807,9 +807,12 @@ class P2PNode:
                           "from": [self.host, self.port]})
         return accepted
 
-    def mine(self, miner_address):
-        """Майнит блок и распространяет его по сети."""
-        block = self.node.mine_pending(miner_address)
+    def mine(self, miner_address, message=None):
+        """Майнит блок и распространяет его по сети.
+
+        `message` — заметка майнера, которая останется в блоке навсегда.
+        """
+        block = self.node.mine_pending(miner_address, message=message)
         with self._seen_lock:
             self.seen_blocks.add(block.hash)
         # Рассылаем ХЕШ, а не тело: соседи сами попросят блок, если он им

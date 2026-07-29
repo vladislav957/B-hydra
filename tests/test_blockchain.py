@@ -44,6 +44,8 @@ def test_from_dicts_roundtrip():
 # Тесты ниже ЗАКРЕПЛЯЮТ величины: поменять их молча не выйдет.
 import json
 
+import pytest
+
 from b_hydra.blockchain import (
     Block, MAX_BLOCK_SIZE, MAX_BLOCK_TRANSACTIONS,
 )
@@ -143,3 +145,89 @@ def test_miner_never_builds_an_oversized_block(monkeypatch):
     block = node.mine_pending(alice.address)
     assert len(block.data) - 1 < 8          # часть транзакций не влезла
     assert len(node.mempool) > 0            # и осталась в мемпуле
+
+
+# --- Заметка майнера в блоке (coinbase-послание) ----------------------------
+# Как scriptSig в Bitcoin, где в генезисе лежит «The Times 03/Jan/2009…»:
+# произвольный текст, который нашедший блок оставляет в нём навсегда.
+from b_hydra.blockchain import MAX_COINBASE_MESSAGE
+from b_hydra.transaction import coinbase
+
+
+def test_miner_can_leave_a_message():
+    node = BHydraNode(difficulty=1)
+    block = node.mine_pending(generate_wallet().address, message="i-3ru")
+    assert node.block_message(block.index) == "i-3ru"
+    assert node.is_valid()
+
+
+def test_message_defaults_when_not_given():
+    node = BHydraNode(difficulty=1)
+    block = node.mine_pending(generate_wallet().address)
+    assert node.block_message(block.index) == "B-hydra"
+
+
+def test_message_is_protected_by_proof_of_work():
+    """Заметка входит в дерево Меркла, значит защищена PoW.
+
+    Переписать её задним числом нельзя — изменится корень Меркла, а с ним и
+    хеш блока, то есть придётся перемайнить блок заново.
+    """
+    reference = Block(1, "0", [coinbase("BHYx", 50, height=1,
+                                        message="первая").to_dict()],
+                      timestamp=1.0)
+    altered = Block(1, "0", [coinbase("BHYx", 50, height=1,
+                                      message="вторая").to_dict()],
+                    timestamp=reference.data[0]["timestamp"])
+    altered.data[0]["timestamp"] = reference.data[0]["timestamp"]
+    altered.merkle_root = altered._calculate_merkle_root()
+    altered.hash = altered.calculate_hash()
+    assert altered.merkle_root != reference.merkle_root
+    assert altered.hash != reference.hash
+
+
+def test_message_length_is_capped():
+    node = BHydraNode(difficulty=1)
+    with pytest.raises(ValueError):
+        node.mine_pending(generate_wallet().address,
+                          message="я" * (MAX_COINBASE_MESSAGE + 1))
+
+
+def test_node_rejects_a_block_with_an_oversized_message():
+    """Чужой блок с раздутой заметкой невалиден — это правило сети.
+
+    Иначе блок можно было бы набивать произвольными данными, которые каждый
+    узел обязан хранить вечно.
+    """
+    node = BHydraNode(difficulty=1)
+    reference = node.mine_pending(generate_wallet().address)
+    fat = coinbase(generate_wallet().address, 50, height=1,
+                   message="x" * (MAX_COINBASE_MESSAGE + 1))
+    block = Block(1, node.blockchain.chain[0].hash, [fat.to_dict()],
+                  timestamp=reference.timestamp, target=reference.target)
+    block.mine_block()
+    assert BHydraNode(difficulty=1).receive_block(block.to_dict()) is False
+
+
+def test_message_exactly_at_the_limit_is_accepted():
+    node = BHydraNode(difficulty=1)
+    reference = node.mine_pending(generate_wallet().address)
+    edge = coinbase(generate_wallet().address, 50, height=1,
+                    message="x" * MAX_COINBASE_MESSAGE)
+    block = Block(1, node.blockchain.chain[0].hash, [edge.to_dict()],
+                  timestamp=reference.timestamp, target=reference.target)
+    block.mine_block()
+    assert BHydraNode(difficulty=1).receive_block(block.to_dict()) is True
+
+
+def test_unicode_message_is_measured_in_bytes():
+    """Лимит считается в БАЙТАХ UTF-8, а не в символах.
+
+    Кириллица занимает по два байта, поэтому 60 букв — это уже 120 байт.
+    """
+    node = BHydraNode(difficulty=1)
+    assert len(("я" * 60).encode("utf-8")) > MAX_COINBASE_MESSAGE
+    with pytest.raises(ValueError):
+        node.mine_pending(generate_wallet().address, message="я" * 60)
+    block = node.mine_pending(generate_wallet().address, message="я" * 40)
+    assert node.block_message(block.index) == "я" * 40

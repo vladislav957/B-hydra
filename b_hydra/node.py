@@ -21,7 +21,8 @@ if __name__ == "__main__" and __package__ in (None, ""):
 
 from .blockchain import (
     Block, Blockchain, DEFAULT_DIFFICULTY, sha512d,
-    MAX_BLOCK_TRANSACTIONS, MAX_BLOCK_SIZE, MAX_MEMPOOL_TRANSACTIONS,
+    MAX_BLOCK_TRANSACTIONS, MAX_BLOCK_SIZE, MAX_COINBASE_MESSAGE,
+    MAX_MEMPOOL_TRANSACTIONS,
     MAX_FUTURE_DRIFT,
 )
 from .transaction import (
@@ -360,8 +361,11 @@ class BHydraNode:
         return tx
 
     # --- Майнинг ---------------------------------------------------------
-    def mine_pending(self, miner_address: str):
+    def mine_pending(self, miner_address: str, message: str = None):
         """Собирает транзакции из мемпула в блок и майнит его.
+
+        `message` — заметка майнера, которая останется в блоке навсегда (как
+        coinbase-послание в Bitcoin). Не длиннее MAX_COINBASE_MESSAGE байт.
 
         Берёт до MAX_BLOCK_TRANSACTIONS-1 транзакций (плюс coinbase), проверяя
         их по нарастающему набору UTXO — поэтому в один блок попадают и связанные
@@ -401,7 +405,14 @@ class BHydraNode:
 
         height = len(self.blockchain.chain)
         reward = self.blockchain.block_reward(height)
-        reward_tx = coinbase(miner_address, reward, fees, height=height)
+        if message is None:
+            reward_tx = coinbase(miner_address, reward, fees, height=height)
+        else:
+            if len(str(message).encode("utf-8")) > MAX_COINBASE_MESSAGE:
+                raise ValueError(
+                    f"сообщение майнера длиннее {MAX_COINBASE_MESSAGE} байт")
+            reward_tx = coinbase(miner_address, reward, fees, height=height,
+                                 message=str(message))
 
         data = [reward_tx.to_dict()] + [tx.to_dict() for tx in valid]
         block = self.blockchain.add_block(data=data)
@@ -475,6 +486,14 @@ class BHydraNode:
             return False
         if not _is_coinbase_dict(txs[0]):
             return False
+        # Сообщение майнера ограничено по длине: это данные, которые каждый
+        # узел хранит вечно, и без потолка блок набивали бы чем угодно.
+        note = txs[0]["vin"][0].get("public_key")
+        if note is not None:
+            if not isinstance(note, str):
+                return False
+            if len(note.encode("utf-8")) > MAX_COINBASE_MESSAGE:
+                return False
 
         fees = 0.0
         spent: set = set()
@@ -615,6 +634,12 @@ class BHydraNode:
         """Блок по высоте (dict) или None."""
         if 0 <= index < len(self.blockchain.chain):
             return self.blockchain.chain[index].to_dict()
+        return None
+
+    def block_message(self, index: int):
+        """Заметка майнера из блока по высоте (или None)."""
+        if 0 <= index < len(self.blockchain.chain):
+            return self.blockchain.coinbase_message(self.blockchain.chain[index])
         return None
 
     def _resolve_output(self, txid, index):

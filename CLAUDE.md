@@ -12,12 +12,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 pip install pytest                            # единственная dev-зависимость
-python -m pytest -q                           # 323 теста — держать зелёными
+python -m pytest -q                           # 330 тестов — держать зелёными
 python -m pytest tests/test_node.py -q        # один файл
 python -m pytest tests/test_node.py -k mempool -q   # один тест по имени
 
 python -m b_hydra.cli wallet                  # создать кошелёк (адрес + приватный ключ)
-python -m b_hydra.cli mine BHY<адрес>         # добыть блок (награда майнеру)
+python -m b_hydra.cli mine BHY<адрес> --message "i-3ru"   # добыть блок + заметка
 python -m b_hydra.cli send <ключ> <адрес> 10 --fee 0.5
 python -m b_hydra.cli balance BHY<адрес>      # состояние CLI — bhydra_chain.json
 python -m b_hydra.api                         # веб-сервер: http://0.0.0.0:8000
@@ -58,7 +58,7 @@ python P2P.py --demo                          # демо-сеть из трёх 
 
 Корневые `*.py` (`cli.py`, `api.py`, `P2P.py`, `cache.py`, `IP.py`, …) — тонкие
 запускалки/шимы поверх пакета; править логику нужно в `b_hydra/`. Тесты —
-`tests/` (22 файла, 323 теста, `pytest`). Полная карта слоёв — `ARCHITECTURE.md`,
+`tests/` (22 файла, 330 тестов, `pytest`). Полная карта слоёв — `ARCHITECTURE.md`,
 схема REST-подписи — `API.md`.
 
 ## REST API (`b_hydra/api.py`)
@@ -130,6 +130,16 @@ python P2P.py --demo                          # демо-сеть из трёх 
   И не больше `MAX_BLOCK_SIZE` по объёму — узел не должен собирать блок,
   который сам же признает невалидным и не сможет передать. Что не влезло,
   остаётся в мемпуле.
+- **Заметка майнера** (`MAX_COINBASE_MESSAGE=100` байт UTF-8) лежит в поле
+  `public_key` фиктивного входа coinbase — как scriptSig в Bitcoin, где в
+  генезисе «The Times 03/Jan/2009…». Читается через
+  `blockchain.coinbase_message(block)` / `node.block_message(index)`, задаётся
+  в `mine_pending(addr, message=…)`, CLI `--message`, `POST /api/mine`
+  `{message}`; видна в `GET /api/block/<i>` как `miner_message`. Входит в лист
+  дерева Меркла, поэтому защищена PoW — переписать задним числом нельзя, не
+  перемайнив блок. На txid НЕ влияет (`signing_payload` берёт из входа только
+  `txid` и `index`). Лимит — правило сети: блок с более длинной заметкой
+  невалиден, иначе в цепочку набивали бы данные, которые все хранят вечно.
 - **Размер блока — правило сети**: `MAX_BLOCK_SIZE=4` МиБ проверяется в
   `is_chain_valid` (каждый блок) и в `node.receive_block`. Счётчика
   `MAX_BLOCK_TRANSACTIONS=5000` мало: транзакция с множеством входов/выходов
@@ -255,7 +265,7 @@ python P2P.py --demo                          # демо-сеть из трёх 
   `mine_pending` / `_validate_block_transactions` / `_validate_chain`).
   Квант ломает лишь ECDSA — монеты на гибридном адресе недоступны. Обычные
   ECDSA-кошельки (`0x1f`) работают как раньше (обратная совместимость).
-- **Перед push — `python -m pytest -q` должно быть зелёным** (323/323).
+- **Перед push — `python -m pytest -q` должно быть зелёным** (330/330).
 - Коммиты по-русски, осмысленные; заканчиваются трейлерами
   `Co-Authored-By:` и `Claude-Session:`.
 - Не хардкодить идентификатор модели в коде/коммитах/артефактах.
