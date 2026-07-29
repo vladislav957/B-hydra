@@ -1135,3 +1135,91 @@ def test_transaction_cannot_spend_a_later_output_in_the_same_block():
     assert other._validate_block_transactions(
         block, block.index, other.utxo_set(),
         pq_used=other.pq_used_indices(include_mempool=False)) is False
+
+
+# --- Пачка блоков ограничена не только числом, но и РАЗМЕРОМ ----------------
+# Блок вмещает до 5000 транзакций (~3,8 МБ), поэтому 500 таких блоков — около
+# 1,9 ГБ. Сообщение больше MAX_MESSAGE_SIZE получатель просто отбрасывает:
+# пачка не пролезает, докачка возвращает пустоту и синхронизация встаёт —
+# ровно тот потолок длины, ради снятия которого пачки и вводились.
+from b_hydra.p2p import MAX_BATCH_BYTES
+from b_hydra.tcp import MAX_MESSAGE_SIZE as _MESSAGE_LIMIT
+
+
+def _fat_chain(blocks=5, per_block=12):
+    """Цепочка из блоков с транзакциями — чтобы тела были ощутимыми."""
+    node = P2PNode("127.0.0.1", _free_port(), BHydraNode(difficulty=1))
+    alice, bob = generate_wallet(), generate_wallet()
+    node.node.mine_pending(alice.address)
+    for _ in range(blocks):
+        for _ in range(per_block):
+            try:
+                node.node.add_transaction(node.node.create_transaction(
+                    alice, bob.address, 0.001, fee=0.0001))
+            except Exception:
+                break
+        node.node.mine_pending(alice.address)
+    node.start()
+    time.sleep(0.2)
+    return node
+
+
+def test_batch_budget_is_derived_from_the_message_limit():
+    """Бюджет пачки считается ОТ лимита сообщения и заведомо меньше его.
+
+    Два независимых числа рано или поздно разъедутся, и пачка снова
+    перестанет пролезать.
+    """
+    assert MAX_BATCH_BYTES < _MESSAGE_LIMIT
+    assert P2PNode("127.0.0.1", _free_port(),
+                   BHydraNode(difficulty=1)).max_batch_bytes == MAX_BATCH_BYTES
+
+
+def test_batch_is_cut_by_size_not_only_by_count():
+    """При тесном бюджете пачка укорачивается, хотя лимит по числу не достигнут."""
+    source = _fat_chain()
+    try:
+        one_block = len(json.dumps(source.node.blockchain.chain[1].to_dict()))
+        source.max_batch_bytes = one_block * 2      # заведомо меньше всей цепочки
+        resp = source.send(source.host, source.port,
+                           {"type": "get_blocks", "from": 0, "count": 500})
+        assert 0 < len(resp["blocks"]) < source.node.height
+        assert len(json.dumps(resp["blocks"])) <= source.max_batch_bytes + one_block
+    finally:
+        source.stop()
+
+
+def test_a_single_oversized_block_is_still_served():
+    """Один блок отдаём всегда, даже если он больше бюджета.
+
+    Иначе цепочку с крупным блоком нельзя было бы догнать вовсе — докачка
+    возвращала бы пустую пачку и вставала.
+    """
+    source = _fat_chain()
+    try:
+        source.max_batch_bytes = 1                  # бюджет меньше любого блока
+        resp = source.send(source.host, source.port,
+                           {"type": "get_blocks", "from": 1, "count": 500})
+        assert len(resp["blocks"]) == 1
+        assert resp["blocks"][0]["index"] == 1
+    finally:
+        source.stop()
+
+
+def test_sync_completes_when_batches_must_be_split():
+    """Сквозная проверка: узел догоняет цепочку, даже если в пачку влезает
+    всего один блок."""
+    source = _fat_chain()
+    fresh = P2PNode("127.0.0.1", _free_port(), BHydraNode(difficulty=1))
+    fresh.start()
+    time.sleep(0.2)
+    try:
+        source.max_batch_bytes = len(
+            json.dumps(source.node.blockchain.chain[1].to_dict()))
+        fresh.add_peer(source.host, source.port)
+        assert fresh.sync() is True
+        assert fresh.node.height == source.node.height
+        assert fresh.node.is_valid()
+    finally:
+        fresh.stop()
+        source.stop()

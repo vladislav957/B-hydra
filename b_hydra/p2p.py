@@ -19,6 +19,8 @@ import time
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+from .tcp import MAX_MESSAGE_SIZE, recv_message, send_message
+
 # Предел числа запомненных txid/хешей блоков для анти-петли gossip. Без него
 # множества seen_* росли бы без границ (утечка памяти и мягкий DoS: атакующий
 # шлёт много уникальных txid). 10 000 последних — с запасом хватает, чтобы не
@@ -46,7 +48,16 @@ SYNC_RETRY_INTERVAL = 2.0        # секунд между докачками ц
 # потолок длины (~30 тыс. блоков с одним coinbase, ~10 тыс. с транзакциями),
 # после которого новый узел не смог бы синхронизироваться в принципе. Плюс
 # догнать один блок стоило скачивания и полной перепроверки всей цепочки.
-MAX_BLOCKS_PER_MESSAGE = 500     # блоков в одной пачке
+MAX_BLOCKS_PER_MESSAGE = 500     # блоков в одной пачке (потолок по числу)
+# …и потолок по РАЗМЕРУ. Одного счётчика блоков мало: блок вмещает до 5000
+# транзакций (~3,8 МБ), поэтому 500 таких блоков — это около 1,9 ГБ, а
+# сообщение больше MAX_MESSAGE_SIZE просто отбрасывается получателем. Тогда
+# пачка не пролезает, докачка возвращает пустоту и синхронизация встаёт —
+# ровно тот потолок длины, ради снятия которого вводились пачки.
+# Считается ОТ лимита сообщения, а не задаётся отдельным числом: два
+# независимых значения рано или поздно разъедутся, и пачка снова перестанет
+# пролезать. Четверть — запас на JSON-обвязку ответа.
+MAX_BATCH_BYTES = MAX_MESSAGE_SIZE // 4
 MAX_SYNC_BLOCKS = 100_000        # потолок докачки за одну синхронизацию
 SYNC_PEER_ATTEMPTS = 4           # сколько кандидатов пробуем за одну sync()
 
@@ -119,7 +130,6 @@ if __name__ == "__main__" and __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     __package__ = "b_hydra"
 
-from .tcp import recv_message, send_message
 from .blockchain import CHAIN_ID
 from .node import BHydraNode
 
@@ -145,6 +155,7 @@ class P2PNode:
         self.inbound_timeout = INBOUND_TIMEOUT
         self.sync_retry_interval = SYNC_RETRY_INTERVAL
         self.max_blocks_per_message = MAX_BLOCKS_PER_MESSAGE
+        self.max_batch_bytes = MAX_BATCH_BYTES
         self.max_sync_blocks = MAX_SYNC_BLOCKS
         self._sync_lock = threading.Lock()
         self._last_block_sync = 0.0     # когда последний раз тянули цепочку
@@ -233,10 +244,21 @@ class P2PNode:
             start = max(0, int(message.get("from", 0)))
             count = int(message.get("count", self.max_blocks_per_message))
             count = max(1, min(count, self.max_blocks_per_message))
+            # Набираем пачку, пока она укладывается в бюджет по размеру.
+            blocks, used = [], 0
+            for block in chain[start:start + count]:
+                payload = block.to_dict()
+                weight = len(json.dumps(payload))
+                # Один блок отдаём всегда, даже если он больше бюджета: иначе
+                # цепочку с крупным блоком нельзя было бы догнать вовсе.
+                if blocks and used + weight > self.max_batch_bytes:
+                    break
+                blocks.append(payload)
+                used += weight
             return self._json({
                 "type": "blocks",
                 "from": start,
-                "blocks": [b.to_dict() for b in chain[start:start + count]],
+                "blocks": blocks,
                 "height": len(chain),
                 "work": self.node.blockchain.total_work,
                 "base_difficulty": self.node.blockchain.difficulty,
