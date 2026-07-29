@@ -21,7 +21,8 @@ if __name__ == "__main__" and __package__ in (None, ""):
 
 from .blockchain import (
     Block, Blockchain, DEFAULT_DIFFICULTY, sha512d,
-    MAX_BLOCK_TRANSACTIONS, MAX_MEMPOOL_TRANSACTIONS, MAX_FUTURE_DRIFT,
+    MAX_BLOCK_TRANSACTIONS, MAX_BLOCK_SIZE, MAX_MEMPOOL_TRANSACTIONS,
+    MAX_FUTURE_DRIFT,
 )
 from .transaction import (
     NULL_TXID, Transaction, TxInput, TxOutput, TransactionPool, coinbase,
@@ -30,6 +31,10 @@ from .wallet import Wallet, is_valid_address
 
 # Допуск для сравнения сумм с плавающей точкой.
 _EPS = 1e-9
+
+# Запас в бюджете блока под coinbase и обвязку JSON — чтобы собранный блок
+# гарантированно уложился в MAX_BLOCK_SIZE, а не оказался на волосок больше.
+_BLOCK_SIZE_RESERVE = 4096
 
 
 def _is_coinbase_dict(tx: dict) -> bool:
@@ -372,14 +377,25 @@ class BHydraNode:
         fees = 0.0
         snapshot = list(self.mempool.transactions)
         leftover = []
+        # Бюджет по размеру, а не только по числу: транзакции бывают крупные, и
+        # узел не должен собирать блок, который потом не сможет ни передать, ни
+        # даже сам признать валидным. Запас — под coinbase и обвязку блока.
+        budget = MAX_BLOCK_SIZE - _BLOCK_SIZE_RESERVE
+        used = 0
         for i, tx in enumerate(snapshot):
             if len(valid) >= limit:
                 leftover = snapshot[i:]  # не влезло — оставляем в мемпуле
                 break
             if self.validate_transaction(tx, utxos=utxos, pq_used=pq_used):
+                weight = len(json.dumps(tx.to_dict(),
+                                        ensure_ascii=False).encode("utf-8"))
+                if valid and used + weight > budget:
+                    leftover = snapshot[i:]   # блок полон по размеру
+                    break
                 fees += self._tx_fee(tx, utxos)
                 self._apply_tx_to_utxos(tx, utxos)
                 valid.append(tx)
+                used += weight
             # невалидная транзакция просто отбрасывается
         self.mempool.transactions = leftover
 
@@ -552,6 +568,10 @@ class BHydraNode:
         # LWMA застывшее время — это нулевые интервалы и разгон сложности.
         median = self.blockchain.median_time_past(block.index)
         if median is not None and block.timestamp <= median:
+            return False
+        # Блок сверх потолка сети невалиден: такой мы всё равно не смогли бы
+        # передать дальше (см. MAX_BLOCK_SIZE).
+        if block.size_bytes() > MAX_BLOCK_SIZE:
             return False
         if block.merkle_root != block._calculate_merkle_root():
             return False
