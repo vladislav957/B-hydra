@@ -267,14 +267,15 @@ class TransactionPool:
     """Мемпул неподтверждённых транзакций.
 
     max_size ограничивает вместимость (анти-DoS): по умолчанию пул держит до
-    MAX_MEMPOOL_TRANSACTIONS транзакций. Поиск дублей идёт по множеству txid,
-    поэтому add() — O(1), и мемпул спокойно вмещает десятки тысяч транзакций.
+    MAX_MEMPOOL_TRANSACTIONS транзакций. Дедуп и поиск идут по индексу
+    txid → транзакция, поэтому add() и get() — O(1), и мемпул спокойно вмещает
+    десятки тысяч транзакций.
     """
 
     def __init__(self, max_size=50000):
         self.max_size = max_size
         self._transactions = []
-        self._txids = set()
+        self._index = {}                # txid → Transaction
 
     @property
     def transactions(self):
@@ -285,16 +286,22 @@ class TransactionPool:
         # Прямое присваивание (например, из _prune_mempool) держит индекс
         # txid в синхроне, чтобы дедуп в add() оставался корректным.
         self._transactions = list(txs)
-        self._txids = {t.txid for t in self._transactions}
+        self._index = {t.txid: t for t in self._transactions}
 
     def add(self, transaction: Transaction) -> bool:
-        if transaction.txid in self._txids:
+        if transaction.txid in self._index:
             return False  # дубликат
         if self.max_size is not None and len(self._transactions) >= self.max_size:
             return False  # мемпул переполнен
         self._transactions.append(transaction)
-        self._txids.add(transaction.txid)
+        self._index[transaction.txid] = transaction
         return True
+
+    def get(self, txid):
+        """Транзакция по txid или None. Нужна для ответа на get_tx: сосед
+        анонсирует txid, а тело просит отдельно — искать линейным перебором по
+        50 000 транзакциям на каждый анонс было бы дорого."""
+        return self._index.get(txid)
 
     def spent_outpoints(self):
         """Все outpoints, уже расходуемые транзакциями в мемпуле."""
