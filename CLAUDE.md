@@ -12,7 +12,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 pip install pytest                            # единственная dev-зависимость
-python -m pytest -q                           # 401 тест — держать зелёными
+python -m pytest -q                           # 425 тестов — держать зелёными
 python -m pytest tests/test_node.py -q        # один файл
 python -m pytest tests/test_node.py -k mempool -q   # один тест по имени
 
@@ -25,6 +25,10 @@ python bhydra_gui.py                          # десктоп-клиент (tki
 python P2P.py --demo                          # демо-сеть из трёх узлов
 python P2P.py --port 5000 --seed host:port    # узел в сети (канал шифруется)
 python -m b_hydra.secure                      # демо рукопожатия и кадров
+
+g++ -O2 -std=c++17 -pthread -I cpp -o bhydra_bridge cpp/bhydra_bridge.cpp
+./bhydra_bridge selftest                      # нативный транспорт: свои векторы
+./bhydra_bridge connect 127.0.0.1 5000 <ключ_узла> '{"type": "ping"}'
 ```
 
 Линтера/форматтера в проекте нет. Сборка `.exe` — `pyinstaller`, см. `BUILD.md`.
@@ -54,14 +58,16 @@ python -m b_hydra.secure                      # демо рукопожатия 
 | `secure.py` | шифрование канала: эфемерный ECDH secp256k1, SHAKE-256-поток, HMAC, TOFU-закрепление ключа узла |
 | `api.py`, `cli.py`, `gui.py`, `mobile_client.py` | REST/HTTP, CLI, tkinter-GUI, моб. клиент |
 
-Единственный файл не на Python — корневой `bhydra-sign.js`: подпись транзакций
-в браузере (SHA-512, HMAC, RIPEMD-160, base58, secp256k1, RFC 6979 и
-сериализация «как в Python»), без зависимостей. Мост для тестов —
-`tests/js_bridge.js`.
+Не на Python два места, оба — вторые реализации существующих форматов, без
+зависимостей. Корневой `bhydra-sign.js`: подпись транзакций в браузере
+(SHA-512, HMAC, RIPEMD-160, base58, secp256k1, RFC 6979 и сериализация «как в
+Python»); мост для тестов — `tests/js_bridge.js`. Каталог `cpp/`: нативный
+шифрованный транспорт (`bhydra_hash.hpp`, `bhydra_ec.hpp`,
+`bhydra_secure.hpp`) и мост `cpp/bhydra_bridge.cpp` — см. `cpp/README.md`.
 
 Корневые `*.py` (`cli.py`, `api.py`, `P2P.py`, `cache.py`, `IP.py`, …) — тонкие
 запускалки/шимы поверх пакета; править логику нужно в `b_hydra/`. Тесты —
-`tests/` (23 файла, 401 тест, `pytest`). Полная карта слоёв — `ARCHITECTURE.md`,
+`tests/` (24 файла, 425 тестов, `pytest`). Полная карта слоёв — `ARCHITECTURE.md`,
 схема REST-подписи — `API.md`.
 
 ## REST API (`b_hydra/api.py`)
@@ -272,6 +278,15 @@ python -m b_hydra.secure                      # демо рукопожатия 
   подменит ключ незаметно (как в SSH); со второго раза видно. Клиент себя не
   аутентифицирует — у входящего всё равно виден только IP, по нему и баны.
   UDP-маяки не шифруются: там только «я узел на порту N» и отпечаток сети.
+  ⚠️ У транспорта есть ВТОРАЯ реализация — нативная, `cpp/` (см. там README).
+  Тот же протокол байт-в-байт, сверяется в `tests/test_cpp_secure.py`: хеши,
+  ECDH, подписи, ключи сессии, кадры + живое рукопожатие через сокет в обе
+  стороны и запрос к настоящему `P2PNode`. Замер: рукопожатие 65 → 2,2 мс
+  (в 29 раз), подпись 12,4 → 0,32 мс, проверка 14,6 → 0,57 мс. ⚠️ А вот ПОТОК
+  шифра в Python БЫСТРЕЕ (42 мс на 4 МиБ против 91): там работает
+  `hashlib.shake_256`, то есть оптимизированный C, и простой перенос на C++ его
+  не обогнал. Выигрыш нативного кода — там, где Python считает САМ (кривая).
+  Меняешь протокол — правь обе реализации, тест поймает расхождение.
   ⚠️ Шифруется канал УЗЕЛ↔УЗЕЛ. REST (`api.py`, кошелёк и обозреватель) —
   по-прежнему открытый HTTP: там нужен TLS/обратный прокси, это отдельная
   задача. Приватный ключ через `/api/send` по открытой сети посылать нельзя.
@@ -367,7 +382,7 @@ python -m b_hydra.secure                      # демо рукопожатия 
   `mine_pending` / `_validate_block_transactions` / `_validate_chain`).
   Квант ломает лишь ECDSA — монеты на гибридном адресе недоступны. Обычные
   ECDSA-кошельки (`0x1f`) работают как раньше (обратная совместимость).
-- **Перед push — `python -m pytest -q` должно быть зелёным** (401/401).
+- **Перед push — `python -m pytest -q` должно быть зелёным** (425/425).
 - Коммиты по-русски, осмысленные; заканчиваются трейлерами
   `Co-Authored-By:` и `Claude-Session:`.
 - Не хардкодить идентификатор модели в коде/коммитах/артефактах.

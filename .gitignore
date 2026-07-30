@@ -37,3 +37,7 @@ CppProperties.json
 build/
 dist/
 *.spec
+
+# Сборка нативного транспорта (cpp/)
+bhydra_bridge
+*.o
