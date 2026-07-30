@@ -57,12 +57,23 @@ def cmd_init(args):
 
 def cmd_mine(args):
     node = _load_or_init(args.file)
-    block = node.mine_pending(args.address)
+    # С ключом заметка подписывается: читатель сможет убедиться, что её
+    # написал держатель адреса, а не любой, кто добыл блок.
+    wallet = Wallet.from_private_hex(args.key) if args.key else None
+    if wallet is not None and wallet.address != args.address:
+        print("Ошибка: ключ не принадлежит адресу майнера.")
+        return
+    block = node.mine_pending(args.address, message=args.message, wallet=wallet)
     node.save(args.file)
     n_tx = len(block.data) if isinstance(block.data, list) else 1
     print(f"Блок #{block.index} добыт (транзакций: {n_tx})")
     print(f"  сложность : {block.difficulty} (хеш начинается с {block.difficulty} нулей)")
     print(f"  перебрано : {block.mining_attempts:,} хешей → найден nonce {block.nonce}")
+    note = node.blockchain.coinbase_message(block)
+    if note:
+        author = node.block_message_author(block.index)
+        mark = f" (подписано {author[:16]}…)" if author else " (без подписи)"
+        print(f"  сообщение : {note}{mark}")
     print(f"  hash : {block.hash[:32]}…")
     print(f"  Баланс {args.address[:16]}…: {node.get_balance(args.address):.4f} BHY")
 
@@ -157,6 +168,8 @@ def build_parser():
 
     p_mine = sub.add_parser("mine", help="добыть блок (награда майнеру)")
     p_mine.add_argument("address", help="адрес майнера")
+    p_mine.add_argument("--message", help="заметка майнера в блоке (до 100 байт)")
+    p_mine.add_argument("--key", help="приватный ключ майнера — подписать заметку")
     p_mine.set_defaults(func=cmd_mine)
 
     p_send = sub.add_parser("send", help="отправить средства")

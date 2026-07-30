@@ -19,6 +19,9 @@ import time
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+from . import secure
+from .tcp import MAX_MESSAGE_SIZE, recv_message, send_message
+
 # Предел числа запомненных txid/хешей блоков для анти-петли gossip. Без него
 # множества seen_* росли бы без границ (утечка памяти и мягкий DoS: атакующий
 # шлёт много уникальных txid). 10 000 последних — с запасом хватает, чтобы не
@@ -34,7 +37,33 @@ MAX_PEERS_PER_MESSAGE = 32       # сколько адресов принима�
 PEER_TIMEOUT = 2.0               # таймаут исходящего запроса к пиру, с
 INBOUND_TIMEOUT = 10.0           # таймаут чтения входящего сообщения, с
 MAX_INBOUND_CONNECTIONS = 64     # одновременно обслуживаемых входящих соединений
+# …и не больше этого с ОДНОГО хоста. Пока соединение жило одно сообщение, слот
+# освобождался сам через миллисекунды. Постоянное соединение держится, пока пир
+# его не отпустит, поэтому один сосед мог бы занять все 64 слота и не пускать
+# никого больше — причём совершенно легально, просто изредка пингуя. Лимит на
+# хост оставляет ему свою долю и ничего не отнимает у остальных.
+# Loopback не ограничиваем — по той же причине, что и не баним (ban_loopback):
+# демо и тесты поднимают десятки узлов на 127.0.0.1, и общий лимит на хост
+# запретил бы им разговаривать друг с другом.
+MAX_INBOUND_PER_HOST = 16
 FANOUT_WORKERS = 32              # параллелизм рассылки по пирам
+
+# --- Постоянные соединения --------------------------------------------------
+# Раньше на КАЖДОЕ сообщение открывался новый TCP-сокет: три пакета рукопожатия
+# и полный круг задержки до передачи первого байта полезных данных. Больнее
+# всего это било по синхронизации, где на один вызов _sync_from приходятся
+# get_height + ~log2(длины) запросов get_hashes + по запросу на каждую пачку
+# блоков — десятки соединений подряд к одному и тому же соседу.
+# Теперь исходящие соединения переиспользуются: сокет после ответа возвращается
+# в пул и следующий запрос к тому же пиру идёт по нему.
+MAX_POOLED_PER_PEER = 4          # idle-соединений на одного пира
+MAX_POOLED_CONNECTIONS = 64      # общий потолок пула (файловые дескрипторы)
+# Держать сокет в пуле дольше, чем сосед готов его ждать, бессмысленно: сервер
+# закрывает молчащее соединение по inbound_timeout, и переиспользование такого
+# сокета всегда приводило бы к повторной попытке. Поэтому срок жизни в пуле
+# СЧИТАЕТСЯ ОТ таймаута сервера, а не задаётся отдельным числом — два
+# независимых значения неизбежно разъехались бы.
+POOL_IDLE_TIMEOUT = INBOUND_TIMEOUT / 2
 
 # Повтор чужого блока — повод попробовать догнать цепочку, но не чаще, чем
 # раз в SYNC_RETRY_INTERVAL: иначе пир гонял бы нас за полной цепочкой
@@ -46,7 +75,16 @@ SYNC_RETRY_INTERVAL = 2.0        # секунд между докачками ц
 # потолок длины (~30 тыс. блоков с одним coinbase, ~10 тыс. с транзакциями),
 # после которого новый узел не смог бы синхронизироваться в принципе. Плюс
 # догнать один блок стоило скачивания и полной перепроверки всей цепочки.
-MAX_BLOCKS_PER_MESSAGE = 500     # блоков в одной пачке
+MAX_BLOCKS_PER_MESSAGE = 500     # блоков в одной пачке (потолок по числу)
+# …и потолок по РАЗМЕРУ. Одного счётчика блоков мало: блок вмещает до 5000
+# транзакций (~3,8 МБ), поэтому 500 таких блоков — это около 1,9 ГБ, а
+# сообщение больше MAX_MESSAGE_SIZE просто отбрасывается получателем. Тогда
+# пачка не пролезает, докачка возвращает пустоту и синхронизация встаёт —
+# ровно тот потолок длины, ради снятия которого вводились пачки.
+# Считается ОТ лимита сообщения, а не задаётся отдельным числом: два
+# независимых значения рано или поздно разъедутся, и пачка снова перестанет
+# пролезать. Четверть — запас на JSON-обвязку ответа.
+MAX_BATCH_BYTES = MAX_MESSAGE_SIZE // 4
 MAX_SYNC_BLOCKS = 100_000        # потолок докачки за одну синхронизацию
 SYNC_PEER_ATTEMPTS = 4           # сколько кандидатов пробуем за одну sync()
 
@@ -55,6 +93,14 @@ SYNC_PEER_ATTEMPTS = 4           # сколько кандидатов проб�
 # трафик равнялся размеру блока, умноженному на число соседей, а заполненный
 # блок (до 5000 транзакций) — это мегабайты на каждого.
 MAX_INFLIGHT_FETCHES = 16        # сколько тел блоков качаем одновременно
+# Транзакции анонсируются так же, как блоки: сначала txid (inv), тело — по
+# запросу get_tx. Прежде транзакция рассылалась ЦЕЛИКОМ каждому соседу, и в
+# связной сети один и тот же байт приходил столько раз, сколько у узла соседей:
+# каждый пересылал тело дальше, а получатель отбрасывал его по дедупу — то есть
+# трафик тратился уже ПОСЛЕ того, как становился ненужным.
+# Свой потолок, а не общий с блоками: поток анонсов транзакций не должен
+# вытеснять докачку блоков — блоки двигают консенсус, транзакции ждут.
+MAX_INFLIGHT_TX_FETCHES = 32     # сколько тел транзакций качаем одновременно
 
 # Узел должен переживать перезапуск. Таблица пиров жила только в памяти, а
 # UDP-маяк работает лишь в пределах одной локальной сети (широковещание за
@@ -63,6 +109,10 @@ MAX_INFLIGHT_FETCHES = 16        # сколько тел блоков качае
 # первого запуска (файла ещё нет) есть seed-узлы — как DNS seeds в Bitcoin.
 DEFAULT_PEERS_FILE = "bhydra_peers.json"
 DEFAULT_SEEDS = ()               # адреса вида ("host", port); задаются сетью
+# Долговременный ключ УЗЛА (не кошелька!): им подписывается рукопожатие, по нему
+# соседи узнают нас после перезапуска. Утечка этого файла позволяет выдать себя
+# за наш узел, но НЕ тронуть монеты — это разные ключи.
+DEFAULT_IDENTITY_FILE = "bhydra_identity.json"
 
 # --- Репутация пиров --------------------------------------------------------
 # Лимиты выше ограничивают УЩЕРБ от плохого соседа, но не отсекают источник:
@@ -78,6 +128,10 @@ PENALTY_BAD_MESSAGE = 25         # неразбираемое или битое 
 PENALTY_INVALID_BLOCK = 50       # заведомо негодный блок (не «мы отстали»)
 PENALTY_FOREIGN_NETWORK = 20     # представился из чужой сети
 PENALTY_GARBAGE_PEERS = 10       # мусор вместо адресов в списке пиров
+
+
+# Маркер «открытый текст, но он запрещён» — отличается и от сессии, и от None.
+_REFUSED = object()
 
 
 class _BoundedSet:
@@ -119,7 +173,6 @@ if __name__ == "__main__" and __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     __package__ = "b_hydra"
 
-from .tcp import recv_message, send_message
 from .blockchain import CHAIN_ID
 from .node import BHydraNode
 
@@ -129,9 +182,19 @@ class P2PNode:
 
     def __init__(self, host="127.0.0.1", port=5000, node=None,
                  seen_limit=SEEN_LIMIT, max_peers=MAX_PEERS,
-                 peers_file=None, seeds=None):
+                 peers_file=None, seeds=None, encrypt=True,
+                 require_encryption=False, identity=None, identity_file=None):
         self.host = host
         self.port = port
+        # Шифрование канала. `encrypt` управляет ИСХОДЯЩИМИ соединениями, сервер
+        # же принимает и шифрованные, и открытые — иначе узел, намеренно
+        # запущенный открытым, оказался бы отрезан от сети. Полностью закрыть
+        # приём открытого текста — `require_encryption=True`.
+        self.encrypt = bool(encrypt)
+        self.require_encryption = bool(require_encryption)
+        self.identity_file = identity_file
+        self.identity = identity or self._load_identity()
+        self._pins = {}                 # (host, port) → долговременный ключ пира
         self.node = node if node is not None else BHydraNode()
         self.peers = set()          # известные пиры: множество (host, port)
         self.max_peers = max(1, int(max_peers))
@@ -145,6 +208,7 @@ class P2PNode:
         self.inbound_timeout = INBOUND_TIMEOUT
         self.sync_retry_interval = SYNC_RETRY_INTERVAL
         self.max_blocks_per_message = MAX_BLOCKS_PER_MESSAGE
+        self.max_batch_bytes = MAX_BATCH_BYTES
         self.max_sync_blocks = MAX_SYNC_BLOCKS
         self._sync_lock = threading.Lock()
         self._last_block_sync = 0.0     # когда последний раз тянули цепочку
@@ -159,6 +223,20 @@ class P2PNode:
         # Докачка тел блоков по анонсам: дедуп по хешу и потолок параллелизма.
         self._inflight = set()
         self._fetch_slots = threading.Semaphore(MAX_INFLIGHT_FETCHES)
+        # То же для транзакций — со своим потолком, чтобы поток анонсов
+        # транзакций не вытеснял докачку блоков.
+        self._inflight_tx = set()
+        self._tx_fetch_slots = threading.Semaphore(MAX_INFLIGHT_TX_FETCHES)
+        # Пул исходящих соединений: (host, port) → [(сокет, когда освободился)].
+        self._pool = {}
+        self._pooled = 0                # сколько сокетов лежит в пуле
+        self._pool_open = True          # после stop() в пул больше не кладём
+        self._pool_lock = threading.Lock()
+        # Живые входящие соединения: их нужно закрывать в stop(), иначе
+        # «остановленный» узел продолжает отвечать по уже открытым сокетам.
+        self._conns = set()
+        self._per_host = {}             # host → сколько его соединений обслуживаем
+        self._conns_lock = threading.Lock()
         self._scores = {}               # хост → (очки, когда начислены)
         self._banned = {}               # хост → до какого момента забанен
         self._ban_lock = threading.Lock()
@@ -233,10 +311,21 @@ class P2PNode:
             start = max(0, int(message.get("from", 0)))
             count = int(message.get("count", self.max_blocks_per_message))
             count = max(1, min(count, self.max_blocks_per_message))
+            # Набираем пачку, пока она укладывается в бюджет по размеру.
+            blocks, used = [], 0
+            for block in chain[start:start + count]:
+                payload = block.to_dict()
+                weight = len(json.dumps(payload))
+                # Один блок отдаём всегда, даже если он больше бюджета: иначе
+                # цепочку с крупным блоком нельзя было бы догнать вовсе.
+                if blocks and used + weight > self.max_batch_bytes:
+                    break
+                blocks.append(payload)
+                used += weight
             return self._json({
                 "type": "blocks",
                 "from": start,
-                "blocks": [b.to_dict() for b in chain[start:start + count]],
+                "blocks": blocks,
                 "height": len(chain),
                 "work": self.node.blockchain.total_work,
                 "base_difficulty": self.node.blockchain.difficulty,
@@ -256,20 +345,17 @@ class P2PNode:
             })
 
         if mtype == "transaction":
-            from .transaction import Transaction
-            tx = Transaction.from_dict(message["transaction"])
-            with self._seen_lock:
-                first_seen = tx.txid not in self.seen_tx
-                self.seen_tx.add(tx.txid)
-            accepted = self.node.add_transaction(tx)
-            if accepted and first_seen:
-                # Gossip: пересылаем транзакцию дальше (кроме отправителя).
-                origin = tuple(message["from"]) if message.get("from") else None
-                self._gossip({"type": "transaction",
-                              "transaction": message["transaction"],
-                              "from": [self.host, self.port]},
-                             exclude=origin, background=True)
+            # Тело транзакции напрямую: так приходит ответ на наш get_tx, так
+            # её отдаёт кошелёк/API, и так же сосед может прислать её сам.
+            accepted = self._process_tx(
+                message["transaction"],
+                tuple(message["from"]) if message.get("from") else None)
             return self._json({"type": "ack", "accepted": accepted})
+
+        if mtype == "get_tx":
+            tx = self.node.mempool.get(message.get("txid"))
+            return self._json({"type": "tx_body",
+                               "transaction": tx.to_dict() if tx else None})
 
         if mtype == "block":
             # Прямая доставка тела блока: так приходит ответ на наш get_block,
@@ -282,10 +368,10 @@ class P2PNode:
                                "height": self.node.height})
 
         if mtype == "inv":
-            # Анонс: приходит только ХЕШ блока. Тело запрашиваем, лишь если
-            # блока у нас нет, — иначе полный блок улетал бы каждому соседу,
-            # включая тех, у кого он уже есть.
-            bhash = message.get("hash")
+            # Анонс: приходит только ХЕШ (блока или txid транзакции). Тело
+            # запрашиваем, лишь если его у нас нет, — иначе полное тело улетало
+            # бы каждому соседу, включая тех, у кого оно уже есть.
+            digest = message.get("hash")
             announced = message.get("from") or []
             try:
                 port = int(announced[1])
@@ -295,17 +381,20 @@ class P2PNode:
             # из соединения, а не из сообщения, иначе пир мог бы заставить нас
             # ходить по произвольным адресам.
             source = host or (announced[0] if announced else None)
-            if not bhash or not source:
+            if not digest or not source:
                 return self._json({"type": "ack", "wanted": False})
+            is_tx = message.get("kind") == "tx"
             with self._seen_lock:
-                known = bhash in self.seen_blocks
-            if known or not self._start_fetch(bhash):
+                known = digest in (self.seen_tx if is_tx else self.seen_blocks)
+            reserve = self._start_tx_fetch if is_tx else self._start_fetch
+            if known or not reserve(digest):
                 return self._json({"type": "ack", "wanted": False})
             # Тянем тело в фоне: делать это прямо в обработчике значило бы
             # держать входящий поток на время исходящего запроса, а число
             # таких потоков ограничено.
-            threading.Thread(target=self._fetch_block,
-                             args=((source, port), bhash), daemon=True).start()
+            fetch = self._fetch_tx if is_tx else self._fetch_block
+            threading.Thread(target=fetch,
+                             args=((source, port), digest), daemon=True).start()
             return self._json({"type": "ack", "wanted": True})
 
         if mtype == "get_block":
@@ -386,25 +475,99 @@ class P2PNode:
             if not self._inbound.acquire(blocking=False):
                 conn.close()
                 continue
+            # Доля одного хоста ограничена: постоянное соединение держится
+            # долго, и без этого один сосед занял бы всю таблицу слотов.
+            if not self._claim_host_slot(addr[0]):
+                self._inbound.release()
+                conn.close()
+                continue
             threading.Thread(target=self._handle_conn, args=(conn, addr[0]),
                              daemon=True).start()
 
+    def _accept_session(self, conn, first_frame):
+        """Разбирает первый кадр: рукопожатие, открытый текст или отказ.
+
+        Возвращает Session (шифрованный клиент), None (открытый — терпим) или
+        _REFUSED, если открытый текст запрещён.
+        """
+        if secure.is_handshake(first_frame):
+            return secure.server_handshake(conn, first_frame, self.identity)
+        return _REFUSED if self.require_encryption else None
+
+    def _claim_host_slot(self, host) -> bool:
+        """Занимает слот входящего соединения под хост (или отказывает)."""
+        if self._is_loopback(host):
+            return True
+        with self._conns_lock:
+            if self._per_host.get(host, 0) >= MAX_INBOUND_PER_HOST:
+                return False
+            self._per_host[host] = self._per_host.get(host, 0) + 1
+            return True
+
+    def _release_host_slot(self, host) -> None:
+        if self._is_loopback(host):
+            return
+        with self._conns_lock:
+            left = self._per_host.get(host, 0) - 1
+            if left > 0:
+                self._per_host[host] = left
+            else:
+                self._per_host.pop(host, None)
+
+    def inbound_connections(self, host=None) -> int:
+        """Сколько входящих соединений обслуживается сейчас (всего или с хоста)."""
+        with self._conns_lock:
+            return self._per_host.get(host, 0) if host else len(self._conns)
+
     def _handle_conn(self, conn, host=None):
-        """Обслуживает одно входящее сообщение и закрывает соединение.
+        """Обслуживает соединение, пока пир его не закроет или не замолчит.
+
+        Соединение ПОСТОЯННОЕ: в одном сокете идёт сколько угодно запросов
+        подряд, поэтому синхронизация (get_height + поиск развилки + пачки
+        блоков) обходится одним рукопожатием вместо десятков.
 
         Таймаут обязателен: без него пир, который открыл соединение и замолчал
         (или прислал половину заголовка длины), держал бы поток бесконечно —
-        полсотни таких «молчунов» навсегда занимают полсотни потоков.
+        полсотни таких «молчунов» навсегда занимают полсотни потоков. Он же
+        освобождает слот из-под забытого постоянного соединения.
         """
         try:
             with conn:
+                with self._conns_lock:
+                    self._conns.add(conn)
                 conn.settimeout(self.inbound_timeout)
-                raw = recv_message(conn)
-                if raw:
-                    send_message(conn, self._handle_message(raw, host))
+                first = recv_message(conn)
+                if not first:
+                    return
+                session = self._accept_session(conn, first)
+                if session is _REFUSED:
+                    return          # открытый текст при require_encryption
+                if session is not None:
+                    first = None    # первый кадр был рукопожатием, данных в нём нет
+                while self._running:
+                    if first is None:
+                        frame = recv_message(conn)
+                        if not frame:
+                            break   # пир закрыл соединение, замолчал или прислал
+                                    # кадр сверх лимита — поток дальше не разобрать
+                        raw = session.decrypt(frame) if session else frame
+                    else:
+                        raw, first = first, None      # уже прочитанный кадр
+                    response = self._handle_message(raw, host)
+                    send_message(conn, session.encrypt(response) if session
+                                 else response)
+        except secure.DecryptError:
+            # Тег не сошёлся: кадр подделан или испорчен в пути. Соединение
+            # закрываем, но штраф НЕ начисляем — испортить кадр может кто-то НА
+            # ПУТИ, а не сам сосед, и наказание позволило бы такому атакующему
+            # ссорить нас с честными пирами и дробить сеть.
+            pass
         except OSError:
             pass                    # таймаут или разрыв — просто закрываем
         finally:
+            with self._conns_lock:
+                self._conns.discard(conn)
+            self._release_host_slot(host)
             self._inbound.release()
 
     def start(self):
@@ -418,6 +581,22 @@ class P2PNode:
         self.save_peers()
         self._running = False
         self._discovery_running = False
+        # Постоянные соединения нужно рвать явно. Закрытия слушающего сокета
+        # мало: уже принятые соединения живут отдельно от него, и узел
+        # продолжал бы обслуживать по ним запросы — то есть выглядел бы живым
+        # для всех, кто успел с ним соединиться.
+        with self._conns_lock:
+            conns, self._conns = list(self._conns), set()
+            self._per_host = {}
+        for conn in conns:
+            try:
+                conn.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            self._close(conn)
+        with self._pool_lock:
+            self._pool_open = False
+        self.close_pool()
         server, self._server = self._server, None
         if server is not None:
             # Одного close() мало: поток, висящий в accept(), от него не
@@ -429,14 +608,188 @@ class P2PNode:
                 pass
             server.close()
 
-    # --- Клиент ----------------------------------------------------------
+    # --- Долговременный ключ узла и закрепление ключей соседей -------------
+    def _load_identity(self):
+        """Ключ узла с диска, а если файла нет — новый (и сохраняем).
+
+        Ключ обязан переживать перезапуск: соседи закрепляют его за нашим
+        адресом, и новый ключ после каждого старта выглядел бы для них ровно
+        как подмена узла.
+        """
+        from .wallet import Wallet, generate_wallet
+
+        path = self.identity_file
+        if path:
+            try:
+                with open(path, encoding="utf-8") as handle:
+                    stored = json.load(handle)
+                return Wallet.from_private_hex(stored["private_key"])
+            except (OSError, ValueError, KeyError):
+                pass                      # нет файла или он испорчен — заведём новый
+        identity = generate_wallet()
+        if path:
+            self._save_identity(identity, path)
+        return identity
+
+    @staticmethod
+    def _save_identity(identity, path) -> bool:
+        """Пишет ключ узла атомарно и только для владельца (0600)."""
+        temporary = f"{path}.tmp"
+        try:
+            with open(temporary, "w", encoding="utf-8") as handle:
+                json.dump({"private_key": identity.private_key_hex}, handle)
+            os.chmod(temporary, 0o600)
+            os.replace(temporary, path)
+            return True
+        except OSError:
+            return False
+
+    @property
+    def node_key(self) -> str:
+        """Публичный ключ узла (hex) — то, что соседи закрепляют за нами."""
+        return self.identity.public_key_hex
+
+    def pinned_key(self, host, port):
+        """Ключ, закреплённый за пиром при первом успешном соединении."""
+        with self._pool_lock:
+            return self._pins.get((host, port))
+
+    def pin_peer(self, host, port, key) -> None:
+        """Запоминает ключ пира (TOFU). Первый ключ не перезаписывается."""
+        if not key:
+            return
+        with self._pool_lock:
+            self._pins.setdefault((host, port), key)
+
+    # --- Клиент: пул постоянных соединений --------------------------------
+    def _checkout(self, host, port):
+        """Забирает из пула живое соединение к пиру (или None).
+
+        Соединение отдаётся ИСКЛЮЧИТЕЛЬНО одному вызывающему: рассылка идёт из
+        32 потоков, и два потока не могут читать/писать в один сокет — ответы
+        перепутались бы между запросами.
+        """
+        deadline = time.time() - POOL_IDLE_TIMEOUT
+        with self._pool_lock:
+            idle = self._pool.get((host, port))
+            while idle:
+                sock, session, last_used = idle.pop()
+                if last_used < deadline:
+                    self._close(sock)     # залежался — сосед его уже закрыл
+                    self._pooled -= 1
+                    continue
+                self._pooled -= 1
+                return sock, session
+            self._pool.pop((host, port), None)
+        return None
+
+    def _checkin(self, host, port, sock, session=None) -> None:
+        """Возвращает соединение (вместе с его сессией) в пул."""
+        with self._pool_lock:
+            if not self._pool_open or self._pooled >= MAX_POOLED_CONNECTIONS:
+                self._close(sock)         # пул полон — дешевле закрыть
+                return
+            idle = self._pool.setdefault((host, port), [])
+            if len(idle) >= MAX_POOLED_PER_PEER:
+                self._close(sock)
+                return
+            # Сессия неотделима от сокета: у неё счётчики кадров и ключи именно
+            # этого соединения, к другому сокету её не приложить.
+            idle.append((sock, session, time.time()))
+            self._pooled += 1
+
+    @staticmethod
+    def _close(sock) -> None:
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+    def close_pool(self, host=None) -> int:
+        """Закрывает пул целиком или все соединения к одному хосту."""
+        with self._pool_lock:
+            keys = [k for k in self._pool if host is None or k[0] == host]
+            closed = 0
+            for key in keys:
+                for sock, _session, _ts in self._pool.pop(key, []):
+                    self._close(sock)
+                    closed += 1
+            self._pooled = max(0, self._pooled - closed)
+        return closed
+
+    def _exchange(self, sock, payload: bytes, session=None):
+        """Один запрос-ответ по готовому соединению.
+
+        Возвращает распарсенный ответ, None — если пир закрыл соединение, не
+        ответив (для соединения из пула это норма: сосед мог закрыть его по
+        своему таймауту, пока мы молчали).
+        """
+        sock.settimeout(self.peer_timeout)
+        send_message(sock, session.encrypt(payload) if session else payload)
+        raw = recv_message(sock)
+        if not raw:
+            return None
+        if session is not None:
+            raw = session.decrypt(raw)
+        return json.loads(raw.decode("utf-8"))
+
     def send(self, host, port, message: dict) -> dict:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client:
-            client.settimeout(self.peer_timeout)
-            client.connect((host, port))
-            send_message(client, self._json(message))
-            raw = recv_message(client)
-        return json.loads(raw.decode("utf-8")) if raw else {}
+        """Запрос к пиру с переиспользованием соединения.
+
+        Сначала пробуем сокет из пула, и ТОЛЬКО при неудаче открываем новый.
+        Повтор здесь обязателен: между нашими запросами сосед мог закрыть
+        соединение по своему таймауту, и без второй попытки такое штатное
+        закрытие выглядело бы как «пир недоступен». Повтор ровно один — на
+        свежем соединении ошибка настоящая, и прятать её нельзя.
+
+        ⚠️ Повтор безопасен только потому, что ПОВТОРНАЯ ДОСТАВКА безвредна:
+        сосед мог успеть обработать первую попытку и умереть до ответа. Запросы
+        (`get_*`, `hello`) — чтение, а `transaction`, `block` и `inv` сосед
+        дедуплицирует сам по txid/хешу. Неидемпотентное сообщение здесь
+        добавлять нельзя — его выполнят дважды.
+        """
+        payload = self._json(message)
+        pooled = self._checkout(host, port)
+        if pooled is not None:
+            sock, session = pooled
+            try:
+                response = self._exchange(sock, payload, session)
+            except (OSError, ValueError):
+                response = None
+            if response is not None:
+                self._checkin(host, port, sock, session)
+                return response
+            self._close(sock)
+
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            sock.settimeout(self.peer_timeout)
+            sock.connect((host, port))
+            session = self._start_session(sock, host, port)
+            response = self._exchange(sock, payload, session)
+        except BaseException:
+            self._close(sock)
+            raise
+        if response is None:
+            self._close(sock)             # пир промолчал — сокет непригоден
+            return {}
+        self._checkin(host, port, sock, session)
+        return response
+
+    def _start_session(self, sock, host, port):
+        """Шифрует свежее соединение (или оставляет открытым, если encrypt=False).
+
+        Отката на открытый текст при неудаче НЕТ: молчаливое понижение — ровно
+        то, чего добивается активный атакующий (испортил рукопожатие и читает
+        дальше). Ошибка рукопожатия — это отказ соединения.
+        """
+        if not self.encrypt:
+            return None
+        session = secure.client_handshake(sock, expect_key=self.pinned_key(host, port))
+        # Доверие при первом контакте: первый ключ запоминаем, дальше требуем
+        # именно его (сверка — внутри рукопожатия, до вывода ключей сессии).
+        self.pin_peer(host, port, session.peer_key)
+        return session
 
     def peer_list(self):
         """Снимок таблицы пиров — безопасен при параллельных add_peer."""
@@ -493,6 +846,9 @@ class P2PNode:
         for peer in self.peer_list():
             if peer[0] == host:
                 self.remove_peer(*peer)
+        # И рвём постоянные соединения к нему: бан, при котором мы продолжаем
+        # разговаривать по уже открытому сокету, — не бан.
+        self.close_pool(host)
 
     def _penalise(self, host, points) -> bool:
         """Начисляет штраф и банит при переполнении. True, если забанили.
@@ -529,7 +885,13 @@ class P2PNode:
         path = path or self.peers_file
         if not path:
             return False
-        payload = {"peers": [list(peer) for peer in self.peer_list()]}
+        # Закреплённые ключи соседей сохраняются вместе с адресами: иначе после
+        # перезапуска каждое соединение снова было бы «первым контактом», и
+        # подмена узла опять проходила бы незамеченной.
+        with self._pool_lock:
+            pins = {f"{h}:{p}": key for (h, p), key in self._pins.items()}
+        payload = {"peers": [list(peer) for peer in self.peer_list()],
+                   "pins": pins}
         temporary = f"{path}.tmp"
         try:
             with open(temporary, "w", encoding="utf-8") as handle:
@@ -562,6 +924,12 @@ class P2PNode:
                 continue
             if self.add_peer(host, port):
                 added += 1
+        for entry, key in (stored.get("pins") or {}).items():
+            host, _, port = str(entry).rpartition(":")
+            try:
+                self.pin_peer(host, int(port), str(key))
+            except (TypeError, ValueError):
+                continue                  # мусор в закреплениях просто пропускаем
         return added
 
     def bootstrap(self) -> int:
@@ -776,18 +1144,23 @@ class P2PNode:
 
     # --- Высокоуровневые операции ----------------------------------------
     def submit_transaction(self, tx) -> bool:
-        """Добавляет транзакцию локально и распространяет её по сети."""
+        """Добавляет транзакцию локально и анонсирует её по сети."""
         accepted = self.node.add_transaction(tx)
         if accepted:
             with self._seen_lock:
                 self.seen_tx.add(tx.txid)
-            self._gossip({"type": "transaction", "transaction": tx.to_dict(),
-                          "from": [self.host, self.port]})
+            # Как и блок: рассылаем txid, тело сосед запросит сам.
+            self._announce_tx(tx.txid, background=False)
         return accepted
 
-    def mine(self, miner_address):
-        """Майнит блок и распространяет его по сети."""
-        block = self.node.mine_pending(miner_address)
+    def mine(self, miner_address, message=None, wallet=None):
+        """Майнит блок и распространяет его по сети.
+
+        `message` — заметка майнера, которая останется в блоке навсегда;
+        `wallet` — ключ майнера, которым эта заметка подписывается.
+        """
+        block = self.node.mine_pending(miner_address, message=message,
+                                       wallet=wallet)
         with self._seen_lock:
             self.seen_blocks.add(block.hash)
         # Рассылаем ХЕШ, а не тело: соседи сами попросят блок, если он им
@@ -865,6 +1238,60 @@ class P2PNode:
         self._gossip({"type": "inv", "kind": "block", "hash": block_hash,
                       "from": [self.host, self.port]},
                      exclude=exclude, background=background)
+
+    # --- Приём и распространение транзакций -------------------------------
+    def _process_tx(self, tx_dict, origin=None) -> bool:
+        """Разбирает полученную транзакцию; принятая анонсируется дальше."""
+        from .transaction import Transaction
+
+        tx = Transaction.from_dict(tx_dict)
+        with self._seen_lock:
+            first_seen = tx.txid not in self.seen_tx
+            self.seen_tx.add(tx.txid)
+        accepted = self.node.add_transaction(tx)
+        if accepted and first_seen:
+            self._announce_tx(tx.txid, exclude=origin)
+        return accepted
+
+    def _announce_tx(self, txid, exclude=None, background=True):
+        """Рассылает соседям txid — тело они запросят сами, если нужно."""
+        self._gossip({"type": "inv", "kind": "tx", "hash": txid,
+                      "from": [self.host, self.port]},
+                     exclude=exclude, background=background)
+
+    def _start_tx_fetch(self, txid) -> bool:
+        """Резервирует место под докачку тела транзакции (дедуп + потолок)."""
+        if not self._tx_fetch_slots.acquire(blocking=False):
+            return False
+        with self._seen_lock:
+            if txid in self._inflight_tx:
+                self._tx_fetch_slots.release()
+                return False
+            self._inflight_tx.add(txid)
+        return True
+
+    def _fetch_tx(self, origin, txid) -> bool:
+        """Запрашивает тело анонсированной транзакции и применяет её."""
+        from .transaction import Transaction
+
+        try:
+            resp = self.send(origin[0], origin[1],
+                             {"type": "get_tx", "txid": txid})
+            body = resp.get("transaction")
+            if not body:
+                return False
+            # Пир обязан прислать именно то, что анонсировал. txid считается
+            # ОТ СОДЕРЖИМОГО, поэтому сверяем пересчитанный, а не поле в JSON:
+            # иначе под видом анонсированного txid пришло бы что угодно.
+            if Transaction.from_dict(body).txid != txid:
+                return False
+            return self._process_tx(body, origin)
+        except (OSError, ValueError, KeyError, TypeError):
+            return False
+        finally:
+            with self._seen_lock:
+                self._inflight_tx.discard(txid)
+            self._tx_fetch_slots.release()
 
     def _start_fetch(self, block_hash) -> bool:
         """Резервирует место под докачку тела: дедуп по хешу и потолок."""
@@ -1064,6 +1491,12 @@ def main():
                         help="seed-узел для первого запуска (можно повторять)")
     parser.add_argument("--peers-file", default=DEFAULT_PEERS_FILE,
                         help="файл с соседями между запусками")
+    parser.add_argument("--identity-file", default=DEFAULT_IDENTITY_FILE,
+                        help="файл с долговременным ключом УЗЛА (не кошелька)")
+    parser.add_argument("--no-encrypt", action="store_true",
+                        help="не шифровать исходящие соединения")
+    parser.add_argument("--require-encryption", action="store_true",
+                        help="не обслуживать открытые (нешифрованные) соединения")
     parser.add_argument("--difficulty", type=int, default=3, help="базовая сложность")
     parser.add_argument("--demo", action="store_true", help="запустить демо из 3 узлов")
     args = parser.parse_args()
@@ -1083,15 +1516,20 @@ def main():
             seeds.append((host, int(port)))
 
     node = P2PNode("0.0.0.0", args.port, BHydraNode(difficulty=args.difficulty),
-                   peers_file=args.peers_file, seeds=seeds)
+                   peers_file=args.peers_file, seeds=seeds,
+                   encrypt=not args.no_encrypt,
+                   require_encryption=args.require_encryption,
+                   identity_file=args.identity_file)
     node.start()
     # Соседи с прошлого запуска + seed-узлы: узел находит сеть сам, без --peer.
     alive = node.bootstrap()
     if args.peer:
         host, _, port = args.peer.rpartition(":")
         node.connect(host, int(port))
+    channel = "шифрован" if node.encrypt else "ОТКРЫТ"
     print(f"P2P-узел B-hydra на :{args.port} | пиров: {len(node.peers)} "
           f"(живых при старте: {alive}) | высота: {node.node.height}"
+          f" | канал: {channel} | ключ узла: {node.node_key[:16]}…"
           f"  (Ctrl+C — стоп)")
     try:
         while True:                 # периодически подтягиваем цепочку у пиров

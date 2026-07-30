@@ -10,6 +10,10 @@ venv/
 wallet.key
 bhydra_chain.json
 qrcode.png
+bhydra_peers.json
+# Долговременный ключ УЗЛА: не кошелёк, но в репозиторий ему нельзя —
+# кто его получил, тот выдаёт себя за этот узел.
+bhydra_identity.json
 
 # Среды разработки / IDE (Visual Studio, VS Code, JetBrains)
 .vs/
@@ -33,3 +37,7 @@ CppProperties.json
 build/
 dist/
 *.spec
+
+# Сборка нативного транспорта (cpp/)
+bhydra_bridge
+*.o

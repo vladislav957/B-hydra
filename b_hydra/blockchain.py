@@ -120,6 +120,25 @@ def genesis_target_for(difficulty: int) -> int:
 
 # Лимиты безопасности (анти-DoS / манипуляции).
 MAX_BLOCK_TRANSACTIONS = 5000      # максимум транзакций в блоке
+# ⚠️ ПРАВИЛО СЕТИ, а не настройка. Счётчика транзакций мало: транзакция с
+# множеством входов/выходов может быть сколь угодно большой, поэтому «5000
+# штук» само по себе размер блока НЕ ограничивает. Величина выбрана так, чтобы
+# полный блок из обычных транзакций (~795 байт каждая) впритык укладывался:
+# 1091 + 795×4999 ≈ 3,79 МиБ.
+#
+# И главное — она связана с транспортом: MAX_MESSAGE_SIZE (32 МиБ) = ровно
+# 8 × MAX_BLOCK_SIZE. Поднять этот потолок, не подняв лимит сообщения, значит
+# сделать часть валидных блоков непередаваемыми — узлы примут блок, но не
+# смогут его друг другу отдать, и сеть встанет. Соотношение закреплено тестом
+# test_block_size_fits_the_transport в tests/test_blockchain.py: менять эти
+# числа поодиночке нельзя.
+MAX_BLOCK_SIZE = 4 * 1024 * 1024   # 4 МиБ — потолок размера блока в байтах
+# Сообщение майнера в coinbase — как scriptSig в Bitcoin, где в генезисе лежит
+# «The Times 03/Jan/2009…». Произвольный текст, который нашедший блок оставляет
+# в нём навсегда. Длина ограничена: это данные, которые каждый узел хранит
+# вечно, и без потолка блок можно было бы набивать чем угодно. 100 байт — тот
+# же лимит, что у Bitcoin.
+MAX_COINBASE_MESSAGE = 100         # байт (UTF-8) на сообщение майнера
 MAX_MEMPOOL_TRANSACTIONS = 50000   # вместимость мемпула (неподтверждённых тх)
 MAX_FUTURE_DRIFT = 2 * 60 * 60 # блок не может быть из будущего более чем на 2 ч
 # Медиана времени последних блоков (MTP, как в Bitcoin). Правило «не раньше
@@ -159,6 +178,11 @@ class Block:
         self.target = target if target is not None else genesis_target_for(DEFAULT_DIFFICULTY)
         self.merkle_root = self._calculate_merkle_root()
         self.hash = self.calculate_hash()
+
+    def size_bytes(self) -> int:
+        """Размер блока в байтах — ровно в том виде, в каком он идёт по сети."""
+        return len(json.dumps(self.to_dict(),
+                              ensure_ascii=False).encode("utf-8"))
 
     # «Сложность» в привычных единицах (число ведущих нулей hex) — для показа.
     @property
@@ -273,6 +297,28 @@ class Blockchain:
         «дешёвых» блоков низкой сложности.
         """
         return sum(block.work for block in self.chain)
+
+    @staticmethod
+    def coinbase_message(block):
+        """Сообщение майнера из блока (или None, если его там нет).
+
+        Лежит в поле public_key фиктивного входа coinbase — ключ владельца там
+        не нужен, а место есть. Входит в лист дерева Меркла, поэтому защищено
+        proof-of-work: переписать сообщение задним числом нельзя, не
+        перемайнив блок.
+
+        Сама заметка — свободный текст; АВТОРСТВО подтверждает необязательная
+        подпись (см. node.block_message_author): PoW доказывает, что блок
+        добыт, но не то, кто написал заметку.
+        """
+        data = block.data
+        if not (isinstance(data, list) and data and isinstance(data[0], dict)):
+            return None
+        vin = data[0].get("vin")
+        if not (vin and isinstance(vin[0], dict)):
+            return None
+        message = vin[0].get("public_key")
+        return message if isinstance(message, str) else None
 
     @staticmethod
     def _miner_of(block):
@@ -436,6 +482,10 @@ class Blockchain:
                 return False
             # …и хеш — реально удовлетворять порогу (PoW).
             if int(current.hash, 16) > current.target:
+                return False
+            # Блок не может быть больше потолка сети: иначе валидный блок
+            # оказался бы непередаваемым (см. MAX_BLOCK_SIZE).
+            if current.size_bytes() > MAX_BLOCK_SIZE:
                 return False
             # Время блока не может идти назад (защита от манипуляций временем)…
             if current.timestamp < previous.timestamp:

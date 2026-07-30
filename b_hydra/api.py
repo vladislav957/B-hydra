@@ -11,7 +11,8 @@ api.py — REST API узла B-hydra (для мобильных кошелько
     GET  /api/balance/<address>  — баланс адреса (сумма UTXO)
     GET  /api/utxos/<address>    — непотраченные выходы адреса (для входов)
     GET  /api/chain              — вся цепочка блоков
-    GET  /api/block/<index>      — блок по высоте
+    GET  /api/block/<index>      — блок по высоте (+ miner_message и его
+                                   проверенный автор miner_message_author)
     GET  /api/tx/<txid>          — транзакция по идентификатору
     GET  /api/proof/<txid>       — доказательство включения (SPV audit-путь)
     GET  /api/address/<address>  — баланс и история транзакций адреса
@@ -20,7 +21,9 @@ api.py — REST API узла B-hydra (для мобильных кошелько
     POST /api/transaction        — отправить ПОДПИСАННУЮ транзакцию (vin/vout)
     POST /api/send               — перевод {"private_key","to","amount","fee"}
                                    (узел подписывает сам — для своего локального узла)
-    POST /api/mine               — добыть блок {"miner": "<address>"}
+    POST /api/mine               — добыть блок {"miner": "<address>",
+                                   "message"?: "заметка майнера",
+                                   "private_key"?: подписать заметку ключом}
 
 Смарт-контракты (средства реально блокируются на адресе контракта):
     GET  /api/contract                    — адрес контракта, эскроу и чеки
@@ -230,6 +233,16 @@ class BHydraAPI(BaseHTTPRequestHandler):
             if parts == ["api", "block"] or (len(parts) == 3 and parts[:2] == ["api", "block"]):
                 index = int(parts[2]) if len(parts) == 3 else -1
                 block = self.node.get_block(index)
+                if block:
+                    # Заметка майнера — рядом с блоком, чтобы её не пришлось
+                    # выковыривать из coinbase вручную.
+                    block = dict(
+                        block,
+                        miner_message=self.node.block_message(index),
+                        # Проверенный автор заметки или None: подпись
+                        # необязательна, но если есть — она уже проверена.
+                        miner_message_author=self.node.block_message_author(index),
+                    )
                 self._send(200 if block else 404,
                            block or {"error": "block not found"})
                 return
@@ -421,8 +434,18 @@ class BHydraAPI(BaseHTTPRequestHandler):
                 if not is_valid_address(miner):
                     self._send(400, {"error": "invalid miner address"})
                     return
+                note = data.get("message")
+                # Ключ (необязательный) подписывает заметку — как и /api/send,
+                # это путь ДЛЯ СВОЕГО узла: приватный ключ наружу не шлют.
+                key = data.get("private_key")
                 with self.lock:
-                    block = self.node.mine_pending(miner)
+                    try:
+                        wallet = Wallet.from_private_hex(key) if key else None
+                        block = self.node.mine_pending(miner, message=note,
+                                                       wallet=wallet)
+                    except ValueError as err:
+                        self._send(400, {"error": str(err)})
+                        return
                     self._save()
                 self._send(200, {
                     "index": block.index,

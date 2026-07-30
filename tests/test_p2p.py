@@ -70,7 +70,10 @@ def test_transaction_propagates(two_nodes):
     assert _wait_until(lambda: b.node.height == a.node.height)
     tx = a.node.create_transaction(miner, bob.address, 5, fee=0.1)
     assert a.submit_transaction(tx)
-    assert any(t.txid == tx.txid for t in b.node.mempool.transactions)
+    # Транзакция, как и блок, распространяется АНОНСОМ: тело сосед забирает сам,
+    # поэтому submit_transaction возвращает управление раньше доставки.
+    assert _wait_until(
+        lambda: any(t.txid == tx.txid for t in b.node.mempool.transactions))
 
 
 def test_longest_valid_chain_wins(two_nodes):
@@ -1135,3 +1138,719 @@ def test_transaction_cannot_spend_a_later_output_in_the_same_block():
     assert other._validate_block_transactions(
         block, block.index, other.utxo_set(),
         pq_used=other.pq_used_indices(include_mempool=False)) is False
+
+
+# --- Пачка блоков ограничена не только числом, но и РАЗМЕРОМ ----------------
+# Блок вмещает до 5000 транзакций (~3,8 МБ), поэтому 500 таких блоков — около
+# 1,9 ГБ. Сообщение больше MAX_MESSAGE_SIZE получатель просто отбрасывает:
+# пачка не пролезает, докачка возвращает пустоту и синхронизация встаёт —
+# ровно тот потолок длины, ради снятия которого пачки и вводились.
+from b_hydra.p2p import MAX_BATCH_BYTES
+from b_hydra.tcp import MAX_MESSAGE_SIZE as _MESSAGE_LIMIT
+
+
+def _fat_chain(blocks=5, per_block=12):
+    """Цепочка из блоков с транзакциями — чтобы тела были ощутимыми."""
+    node = P2PNode("127.0.0.1", _free_port(), BHydraNode(difficulty=1))
+    alice, bob = generate_wallet(), generate_wallet()
+    node.node.mine_pending(alice.address)
+    for _ in range(blocks):
+        for _ in range(per_block):
+            try:
+                node.node.add_transaction(node.node.create_transaction(
+                    alice, bob.address, 0.001, fee=0.0001))
+            except Exception:
+                break
+        node.node.mine_pending(alice.address)
+    node.start()
+    time.sleep(0.2)
+    return node
+
+
+def test_batch_budget_is_derived_from_the_message_limit():
+    """Бюджет пачки считается ОТ лимита сообщения и заведомо меньше его.
+
+    Два независимых числа рано или поздно разъедутся, и пачка снова
+    перестанет пролезать.
+    """
+    assert MAX_BATCH_BYTES < _MESSAGE_LIMIT
+    assert P2PNode("127.0.0.1", _free_port(),
+                   BHydraNode(difficulty=1)).max_batch_bytes == MAX_BATCH_BYTES
+
+
+def test_batch_is_cut_by_size_not_only_by_count():
+    """При тесном бюджете пачка укорачивается, хотя лимит по числу не достигнут."""
+    source = _fat_chain()
+    try:
+        one_block = len(json.dumps(source.node.blockchain.chain[1].to_dict()))
+        source.max_batch_bytes = one_block * 2      # заведомо меньше всей цепочки
+        resp = source.send(source.host, source.port,
+                           {"type": "get_blocks", "from": 0, "count": 500})
+        assert 0 < len(resp["blocks"]) < source.node.height
+        assert len(json.dumps(resp["blocks"])) <= source.max_batch_bytes + one_block
+    finally:
+        source.stop()
+
+
+def test_a_single_oversized_block_is_still_served():
+    """Один блок отдаём всегда, даже если он больше бюджета.
+
+    Иначе цепочку с крупным блоком нельзя было бы догнать вовсе — докачка
+    возвращала бы пустую пачку и вставала.
+    """
+    source = _fat_chain()
+    try:
+        source.max_batch_bytes = 1                  # бюджет меньше любого блока
+        resp = source.send(source.host, source.port,
+                           {"type": "get_blocks", "from": 1, "count": 500})
+        assert len(resp["blocks"]) == 1
+        assert resp["blocks"][0]["index"] == 1
+    finally:
+        source.stop()
+
+
+def test_sync_completes_when_batches_must_be_split():
+    """Сквозная проверка: узел догоняет цепочку, даже если в пачку влезает
+    всего один блок."""
+    source = _fat_chain()
+    fresh = P2PNode("127.0.0.1", _free_port(), BHydraNode(difficulty=1))
+    fresh.start()
+    time.sleep(0.2)
+    try:
+        source.max_batch_bytes = len(
+            json.dumps(source.node.blockchain.chain[1].to_dict()))
+        fresh.add_peer(source.host, source.port)
+        assert fresh.sync() is True
+        assert fresh.node.height == source.node.height
+        assert fresh.node.is_valid()
+    finally:
+        fresh.stop()
+        source.stop()
+
+
+# --- Постоянные соединения ---------------------------------------------------
+# Раньше на КАЖДОЕ сообщение открывался новый TCP-сокет: рукопожатие и полный
+# круг задержки до первого байта данных. Синхронизация делает к одному соседу
+# десятки запросов подряд (get_height + поиск развилки + пачки блоков), и все
+# они платили эту цену заново.
+from b_hydra.p2p import (INBOUND_TIMEOUT, MAX_POOLED_CONNECTIONS,
+                         MAX_POOLED_PER_PEER, POOL_IDLE_TIMEOUT)
+
+
+def _count_connections(node):
+    """Считает принятые соединения, не меняя обработку сообщений."""
+    counter = {"n": 0}
+    original = node._handle_conn
+
+    def counted(conn, host=None):
+        counter["n"] += 1
+        return original(conn, host)
+
+    node._handle_conn = counted
+    return counter
+
+
+def _pooled(node, host, port) -> int:
+    with node._pool_lock:
+        return len(node._pool.get((host, port), []))
+
+
+def test_repeated_requests_reuse_one_connection():
+    """Десять запросов к пиру идут по ОДНОМУ соединению."""
+    server = _lone_node()
+    accepted = _count_connections(server)
+    server.start()
+    time.sleep(0.2)
+    client = _lone_node()
+    try:
+        for _ in range(10):
+            assert client.send(server.host, server.port,
+                               {"type": "ping"})["type"] == "pong"
+        assert accepted["n"] == 1
+        assert _pooled(client, server.host, server.port) == 1
+    finally:
+        client.stop()
+        server.stop()
+
+
+def test_sync_uses_a_single_connection():
+    """Синхронизация с поиском развилки и пачками — одно соединение.
+
+    Это главный выигрыш: раньше здесь было по сокету на каждый запрос.
+    """
+    source = _chain_of(20, batch=5)
+    accepted = _count_connections(source)
+    fresh = P2PNode("127.0.0.1", _free_port(), BHydraNode(difficulty=1))
+    fresh.max_blocks_per_message = 5
+    try:
+        fresh.add_peer(source.host, source.port)
+        assert fresh.sync() is True
+        assert fresh.node.height == source.node.height
+        assert accepted["n"] == 1
+    finally:
+        fresh.stop()
+        source.stop()
+
+
+def test_pool_idle_timeout_is_derived_from_the_server_timeout():
+    """Срок жизни в пуле считается ОТ таймаута сервера, а не отдельным числом.
+
+    Держать сокет в пуле дольше, чем сосед готов молчать, бессмысленно: он его
+    уже закрыл, и каждое переиспользование стоило бы лишней попытки. Два
+    независимых числа неизбежно разъехались бы.
+    """
+    assert POOL_IDLE_TIMEOUT < INBOUND_TIMEOUT
+
+
+def test_stale_pooled_connection_is_not_reused():
+    """Залежавшийся сокет закрывается, а не переиспользуется."""
+    server = _lone_node()
+    server.start()
+    time.sleep(0.2)
+    client = _lone_node()
+    try:
+        client.send(server.host, server.port, {"type": "ping"})
+        key = (server.host, server.port)
+        with client._pool_lock:                 # состарим запись искусственно
+            sock, session, _ts = client._pool[key][0]
+            client._pool[key][0] = (sock, session,
+                                    time.time() - POOL_IDLE_TIMEOUT - 1)
+        assert client._checkout(*key) is None   # просрочен — не отдаётся
+        assert _pooled(client, *key) == 0
+    finally:
+        client.stop()
+        server.stop()
+
+
+def test_peer_that_closed_an_idle_connection_is_retried():
+    """Сосед закрыл соединение по своему таймауту — запрос всё равно проходит.
+
+    Без повтора штатное закрытие idle-сокета выглядело бы как «пир недоступен»,
+    и узел терял бы связь с честными соседями на ровном месте.
+    """
+    server = _lone_node()
+    server.inbound_timeout = 0.3            # закрывает молчащие соединения быстро
+    server.start()
+    time.sleep(0.2)
+    client = _lone_node()
+    try:
+        assert client.send(server.host, server.port,
+                           {"type": "ping"})["type"] == "pong"
+        time.sleep(0.6)                     # сервер уже закрыл соединение
+        assert _pooled(client, server.host, server.port) == 1   # а мы ещё держим
+        assert client.send(server.host, server.port,
+                           {"type": "ping"})["type"] == "pong"
+    finally:
+        client.stop()
+        server.stop()
+
+
+def test_parallel_requests_do_not_share_a_socket():
+    """32 потока к одному пиру: ответы не перепутаны.
+
+    Соединение выдаётся из пула ИСКЛЮЧИТЕЛЬНО одному вызывающему — два потока
+    в одном сокете смешали бы запросы и ответы.
+    """
+    server = _chain_of(3, batch=10)
+    client = _lone_node()
+    results, errors = [], []
+
+    def ask(kind):
+        try:
+            if kind:
+                results.append(client.send(server.host, server.port,
+                                           {"type": "ping"})["type"] == "pong")
+            else:
+                resp = client.send(server.host, server.port,
+                                   {"type": "get_height"})
+                results.append(resp["height"] == server.node.height)
+        except Exception as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=ask, args=(i % 2 == 0,)) for i in range(32)]
+    try:
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+        assert errors == []
+        assert results == [True] * 32
+    finally:
+        client.stop()
+        server.stop()
+
+
+def test_pool_is_capped_per_peer():
+    """На одного пира держим не больше MAX_POOLED_PER_PEER соединений."""
+    node = _lone_node()
+    socks = [socket.socket() for _ in range(MAX_POOLED_PER_PEER + 3)]
+    try:
+        for sock in socks:
+            node._checkin("10.0.0.1", 7000, sock)
+        assert _pooled(node, "10.0.0.1", 7000) == MAX_POOLED_PER_PEER
+    finally:
+        for sock in socks:
+            sock.close()
+
+
+def test_pool_is_capped_globally():
+    """Общий потолок пула не даёт израсходовать файловые дескрипторы."""
+    node = _lone_node()
+    socks = [socket.socket() for _ in range(MAX_POOLED_CONNECTIONS + 5)]
+    try:
+        for i, sock in enumerate(socks):
+            node._checkin("10.0.%d.1" % i, 7000, sock)   # по одному на пира
+        assert node._pooled == MAX_POOLED_CONNECTIONS
+    finally:
+        for sock in socks:
+            sock.close()
+
+
+def test_stop_closes_live_connections():
+    """После stop() узел не отвечает даже по УЖЕ открытому соединению.
+
+    Закрытия слушающего сокета мало: принятые соединения живут отдельно, и
+    «остановленный» узел продолжал бы обслуживать по ним запросы.
+    """
+    server = _lone_node()
+    server.start()
+    time.sleep(0.2)
+    client = _lone_node()
+    try:
+        assert client.send(server.host, server.port,
+                           {"type": "ping"})["type"] == "pong"
+        assert _pooled(client, server.host, server.port) == 1
+        server.stop()
+        time.sleep(0.3)
+        with pytest.raises(OSError):
+            client.send(server.host, server.port, {"type": "ping"})
+    finally:
+        client.stop()
+        server.stop()
+
+
+def test_ban_closes_pooled_connections():
+    """Бан рвёт постоянные соединения: разговор по открытому сокету — не бан."""
+    node = _lone_node()
+    sock = socket.socket()
+    try:
+        node._checkin(EXTERNAL, 7001, sock)
+        assert _pooled(node, EXTERNAL, 7001) == 1
+        node.ban_peer(EXTERNAL)
+        assert _pooled(node, EXTERNAL, 7001) == 0
+    finally:
+        sock.close()
+
+
+def test_pool_is_closed_on_stop():
+    """stop() не оставляет открытых сокетов в пуле."""
+    server = _lone_node()
+    server.start()
+    time.sleep(0.2)
+    client = _lone_node()
+    try:
+        client.send(server.host, server.port, {"type": "ping"})
+        assert client._pooled == 1
+        client.stop()
+        assert client._pooled == 0
+    finally:
+        server.stop()
+
+
+# --- Анонс транзакции (inv) вместо рассылки тела -----------------------------
+# Транзакция рассылалась ЦЕЛИКОМ каждому соседу, и в связной сети один и тот же
+# байт приходил столько раз, сколько у узла соседей: каждый пересылал тело
+# дальше, а получатель отбрасывал его по дедупу.
+from b_hydra.p2p import MAX_INFLIGHT_TX_FETCHES
+
+
+def _funded_node():
+    """Узел с намайненной наградой — есть что тратить."""
+    node = _lone_node()
+    miner = generate_wallet()
+    node.node.mine_pending(miner.address)
+    return node, miner
+
+
+def test_transaction_is_announced_by_txid_not_body():
+    node, miner = _funded_node()
+    sent = []
+    node._gossip = lambda message, **kw: sent.append(message)
+    tx = node.node.create_transaction(miner, generate_wallet().address, 5, fee=0.1)
+    assert node.submit_transaction(tx)
+    assert sent and sent[-1]["type"] == "inv"
+    assert sent[-1]["kind"] == "tx"
+    assert sent[-1]["hash"] == tx.txid
+    assert "transaction" not in sent[-1]           # тела в анонсе нет
+
+
+def test_get_tx_returns_the_body_by_txid():
+    node, miner = _funded_node()
+    node.start()
+    time.sleep(0.2)
+    try:
+        tx = node.node.create_transaction(miner, generate_wallet().address, 5)
+        assert node.node.add_transaction(tx)
+        resp = node.send(node.host, node.port,
+                         {"type": "get_tx", "txid": tx.txid})
+        assert resp["transaction"]["vout"] == [o.to_dict() for o in tx.vout]
+        missing = node.send(node.host, node.port,
+                            {"type": "get_tx", "txid": "ff" * 64})
+        assert missing["transaction"] is None
+    finally:
+        node.stop()
+
+
+def test_known_transaction_is_not_refetched():
+    """Анонс уже виденной транзакции не тянет тело заново."""
+    node, miner = _funded_node()
+    tx = node.node.create_transaction(miner, generate_wallet().address, 5)
+    with node._seen_lock:
+        node.seen_tx.add(tx.txid)
+    resp = json.loads(node._dispatch(node._json(
+        {"type": "inv", "kind": "tx", "hash": tx.txid,
+         "from": [node.host, node.port]}), "127.0.0.1").decode())
+    assert resp["wanted"] is False
+
+
+def test_peer_must_send_the_announced_transaction():
+    """Под видом анонсированного txid нельзя прислать другую транзакцию.
+
+    txid считается ОТ СОДЕРЖИМОГО, поэтому сверяется пересчитанный, а не поле
+    в присланном JSON.
+    """
+    node, miner = _funded_node()
+    tx = node.node.create_transaction(miner, generate_wallet().address, 5)
+    node.send = lambda host, port, message: {"transaction": tx.to_dict()}
+    assert node._fetch_tx(("127.0.0.1", 7000), "ab" * 64) is False
+    assert node.node.mempool.get(tx.txid) is None
+
+
+def test_transaction_fetches_are_bounded_separately_from_blocks():
+    """У транзакций свой потолок докачек — поток анонсов не вытесняет блоки."""
+    node = _lone_node()
+    reserved = [node._start_tx_fetch("%064x" % i)
+                for i in range(MAX_INFLIGHT_TX_FETCHES)]
+    assert all(reserved)
+    assert node._start_tx_fetch("ff" * 64) is False     # слоты транзакций кончились
+    assert node._start_fetch("ff" * 64) is True         # а блочные свободны
+    node._tx_fetch_slots.release()
+    assert node._start_tx_fetch("%064x" % 0) is False   # такой txid уже качаем
+
+
+def test_transaction_propagates_through_announcement(two_nodes):
+    """Сквозная проверка: сосед сам забирает тело транзакции по анонсу."""
+    a, b = two_nodes
+    miner = generate_wallet()
+    a.mine(miner.address)
+    assert _wait_until(lambda: b.node.height == a.node.height)
+    tx = a.node.create_transaction(miner, generate_wallet().address, 5, fee=0.1)
+    assert a.submit_transaction(tx)
+    assert _wait_until(lambda: b.node.mempool.get(tx.txid) is not None)
+    assert b.node.mempool.get(tx.txid).txid == tx.txid
+
+
+def test_mempool_finds_a_transaction_by_txid():
+    """Поиск по txid — O(1) по индексу, иначе get_tx перебирал бы 50 000 штук."""
+    node, miner = _funded_node()
+    tx = node.node.create_transaction(miner, generate_wallet().address, 5)
+    assert node.node.mempool.get(tx.txid) is None
+    assert node.node.add_transaction(tx)
+    assert node.node.mempool.get(tx.txid) is tx
+    node.node.mempool.transactions = []          # прямое присваивание чистит индекс
+    assert node.node.mempool.get(tx.txid) is None
+
+
+def test_one_host_cannot_occupy_every_inbound_slot():
+    """Доля одного хоста во входящих соединениях ограничена.
+
+    Пока соединение жило одно сообщение, слот освобождался сам. Постоянное
+    держится, пока пир его не отпустит, — поэтому один сосед иначе занял бы всю
+    таблицу слотов и не пускал никого больше, просто изредка пингуя.
+    """
+    from b_hydra.p2p import MAX_INBOUND_PER_HOST
+    node = _lone_node()
+    for i in range(MAX_INBOUND_PER_HOST):
+        assert node._claim_host_slot(EXTERNAL) is True, i
+    assert node._claim_host_slot(EXTERNAL) is False      # его доля исчерпана
+    assert node._claim_host_slot("198.51.100.4") is True  # другому хосту — можно
+    assert node.inbound_connections(EXTERNAL) == MAX_INBOUND_PER_HOST
+    node._release_host_slot(EXTERNAL)
+    assert node._claim_host_slot(EXTERNAL) is True        # слот освободился
+
+
+def test_loopback_is_not_limited_per_host():
+    """На 127.0.0.1 живут все локальные узлы — общий лимит запретил бы им
+    разговаривать друг с другом (та же причина, что и у ban_loopback)."""
+    from b_hydra.p2p import MAX_INBOUND_PER_HOST
+    node = _lone_node()
+    for _ in range(MAX_INBOUND_PER_HOST * 3):
+        assert node._claim_host_slot("127.0.0.1") is True
+
+
+# --- Шифрование канала между узлами ------------------------------------------
+# Трафик ходил открытым текстом: кто видел канал, видел адреса, транзакции и
+# соседей. Замер на прослушке настоящего соединения — в открытом канале
+# находились и адрес майнера, и txid, и тип сообщения.
+from b_hydra import secure
+from b_hydra.wallet import Wallet
+
+
+def _capture_wire(monkeypatch):
+    """Перехватывает ВСЁ, что уходит в сокеты: и кадры, и рукопожатие.
+
+    Оба модуля берут send_message себе в пространство имён, поэтому подменять
+    надо у каждого — иначе часть трафика мимо перехвата, и «не нашли открытый
+    текст» ничего не доказывает.
+    """
+    import b_hydra.p2p as p2p_module
+    captured = bytearray()
+
+    for module in (p2p_module, secure):
+        original = module.send_message
+
+        def tap(sock, data, _original=original):
+            captured.extend(data if isinstance(data, bytes) else data.encode())
+            return _original(sock, data)
+
+        monkeypatch.setattr(module, "send_message", tap)
+    return captured
+
+
+def test_traffic_between_nodes_is_encrypted(monkeypatch):
+    """В канале не должно быть ни адресов, ни типов сообщений открытым текстом."""
+    server = _lone_node()
+    server.start()
+    time.sleep(0.2)
+    client = _lone_node()
+    captured = _capture_wire(monkeypatch)
+    try:
+        miner = generate_wallet()
+        server.node.mine_pending(miner.address)
+        assert client.send(server.host, server.port,
+                           {"type": "get_height"})["height"] == 2
+        assert b"get_height" not in captured          # даже тип сообщения скрыт
+        assert miner.address.encode() not in captured
+        assert b'{"type"' not in captured
+        assert secure.MAGIC in captured               # рукопожатие видно — оно и должно
+    finally:
+        client.stop()
+        server.stop()
+
+
+def test_plaintext_traffic_really_leaks_without_encryption(monkeypatch):
+    """Контроль: с encrypt=False то же самое видно в канале открытым текстом.
+
+    Без этой пары тест выше ничего бы не доказывал — он мог бы «проходить»
+    просто потому, что перехват не работает.
+    """
+    server = _lone_node()
+    server.start()
+    time.sleep(0.2)
+    client = _lone_node(encrypt=False)
+    captured = _capture_wire(monkeypatch)
+    try:
+        assert client.send(server.host, server.port, {"type": "get_height"})
+        assert b"get_height" in captured
+    finally:
+        client.stop()
+        server.stop()
+
+
+def test_plaintext_peer_is_still_served_by_default():
+    """Сервер терпит открытого клиента: узел, намеренно запущенный без
+    шифрования, не должен оказаться отрезан от сети."""
+    server = _lone_node()
+    server.start()
+    time.sleep(0.2)
+    client = _lone_node(encrypt=False)
+    try:
+        assert client.send(server.host, server.port,
+                           {"type": "ping"})["type"] == "pong"
+    finally:
+        client.stop()
+        server.stop()
+
+
+def test_require_encryption_refuses_plaintext():
+    """С require_encryption открытого клиента не обслуживают вовсе."""
+    server = _lone_node(require_encryption=True)
+    server.start()
+    time.sleep(0.2)
+    plain = _lone_node(encrypt=False)
+    encrypted = _lone_node()
+    try:
+        assert plain.send(server.host, server.port, {"type": "ping"}) == {}
+        assert encrypted.send(server.host, server.port,
+                              {"type": "ping"})["type"] == "pong"
+    finally:
+        plain.stop()
+        encrypted.stop()
+        server.stop()
+
+
+def test_handshake_failure_does_not_fall_back_to_plaintext():
+    """Понижения версии нет: сорванное рукопожатие — отказ, а не открытый канал.
+
+    Молчаливый откат — ровно то, чего добивается активный атакующий: испортил
+    рукопожатие и читает дальше.
+    """
+    listener = socket.socket()
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", 0))
+    port = listener.getsockname()[1]
+    listener.listen(4)
+
+    def refuse():
+        while True:
+            try:
+                conn, _ = listener.accept()
+            except OSError:
+                return
+            with conn:
+                _recv(conn)
+                _send(conn, b"not a handshake at all")
+
+    threading.Thread(target=refuse, daemon=True).start()
+    node = _lone_node()
+    try:
+        with pytest.raises(OSError):          # HandshakeError — это OSError
+            node.send("127.0.0.1", port, {"type": "ping"})
+    finally:
+        node.stop()
+        listener.close()
+
+
+def test_peer_key_is_pinned_on_first_contact():
+    server = _lone_node()
+    server.start()
+    time.sleep(0.2)
+    client = _lone_node()
+    try:
+        assert client.pinned_key(server.host, server.port) is None
+        client.send(server.host, server.port, {"type": "ping"})
+        assert client.pinned_key(server.host, server.port) == server.node_key
+    finally:
+        client.stop()
+        server.stop()
+
+
+def test_impersonated_peer_is_refused_after_pinning():
+    """Другой узел на том же адресе — соединения не будет.
+
+    Это и есть смысл закрепления: со второго контакта подмена узла видна.
+    """
+    port = _free_port()
+    first = P2PNode("127.0.0.1", port, BHydraNode(difficulty=1))
+    first.start()
+    time.sleep(0.2)
+    client = _lone_node()
+    try:
+        client.send("127.0.0.1", port, {"type": "ping"})
+        pinned = client.pinned_key("127.0.0.1", port)
+        first.stop()
+        time.sleep(0.3)
+        # На том же адресе поднимается ДРУГОЙ узел (свой ключ).
+        impostor = P2PNode("127.0.0.1", port, BHydraNode(difficulty=1))
+        impostor.start()
+        time.sleep(0.2)
+        try:
+            assert impostor.node_key != pinned
+            with pytest.raises(OSError):
+                client.send("127.0.0.1", port, {"type": "ping"})
+        finally:
+            impostor.stop()
+    finally:
+        client.stop()
+        first.stop()
+
+
+def test_node_identity_survives_restart(tmp_path):
+    """Ключ узла обязан переживать перезапуск.
+
+    Новый ключ после каждого старта выглядел бы для соседей ровно как подмена
+    узла — все закрепления ломались бы на ровном месте.
+    """
+    path = str(tmp_path / "identity.json")
+    first = _lone_node(identity_file=path)
+    again = _lone_node(identity_file=path)
+    assert first.node_key == again.node_key
+    assert Wallet.from_private_hex(
+        json.loads(open(path, encoding="utf-8").read())["private_key"]
+    ).public_key_hex == first.node_key
+
+
+def test_corrupt_identity_file_is_replaced(tmp_path):
+    path = str(tmp_path / "identity.json")
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write("не json вовсе")
+    node = _lone_node(identity_file=path)
+    assert len(node.node_key) == 130            # 65 байт несжатой точки в hex
+
+
+def test_pins_are_saved_and_loaded(tmp_path):
+    """Закрепления сохраняются вместе с адресами соседей.
+
+    Иначе после перезапуска каждое соединение снова было бы «первым контактом»,
+    и подмена узла опять проходила бы незамеченной.
+    """
+    path = str(tmp_path / "peers.json")
+    node = _lone_node(peers_file=path)
+    node.add_peer("10.0.0.7", 5001)
+    node.pin_peer("10.0.0.7", 5001, "04" + "ab" * 64)
+    assert node.save_peers() is True
+    fresh = _lone_node(peers_file=path)
+    assert fresh.load_peers() == 1
+    assert fresh.pinned_key("10.0.0.7", 5001) == "04" + "ab" * 64
+
+
+def test_pin_is_not_overwritten_by_a_later_key():
+    """Первый ключ и есть доверенный — перезапись сделала бы закрепление
+    бессмысленным."""
+    node = _lone_node()
+    node.pin_peer("10.0.0.8", 5002, "04" + "11" * 64)
+    node.pin_peer("10.0.0.8", 5002, "04" + "22" * 64)
+    assert node.pinned_key("10.0.0.8", 5002) == "04" + "11" * 64
+
+
+def test_garbage_pins_in_the_file_are_ignored(tmp_path):
+    path = str(tmp_path / "peers.json")
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump({"peers": [["10.0.0.9", 5003]],
+                   "pins": {"без порта": "0411", "10.0.0.9:5003": "04ff"}}, handle)
+    node = _lone_node(peers_file=path)
+    assert node.load_peers() == 1
+    assert node.pinned_key("10.0.0.9", 5003) == "04ff"
+
+
+def test_encrypted_sync_and_gossip_work_end_to_end(two_nodes):
+    """Сквозная проверка: по шифрованному каналу работают и блоки, и sync."""
+    a, b = two_nodes
+    assert a.pinned_key(b.host, b.port) is None
+    a.mine(generate_wallet().address)
+    assert _wait_until(lambda: b.node.height == a.node.height)
+    # оба узла закрепили ключи друг друга, значит канал был шифрованным
+    assert a.pinned_key(b.host, b.port) == b.node_key
+    for _ in range(2):
+        a.node.mine_pending(generate_wallet().address)
+    assert b.sync() is True
+    assert b.node.height == a.node.height
+    assert b.node.is_valid()
+
+
+def test_encrypted_session_is_reused_from_the_pool():
+    """Рукопожатие стоит дорого (ECDH на чистом Python) — оно должно быть ОДНО
+    на соединение, а не на сообщение. Это и делает шифрование посильным."""
+    server = _lone_node()
+    accepted = _count_connections(server)
+    server.start()
+    time.sleep(0.2)
+    client = _lone_node()
+    try:
+        for _ in range(8):
+            assert client.send(server.host, server.port,
+                               {"type": "ping"})["type"] == "pong"
+        assert accepted["n"] == 1
+    finally:
+        client.stop()
+        server.stop()
