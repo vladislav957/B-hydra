@@ -64,6 +64,10 @@ from .wallet import is_valid_address, Wallet
 
 DEFAULT_STATE = "bhydra_chain.json"
 DEFAULT_DIFFICULTY = 3
+# Файлы сертификата для --tls. Ключ сертификата — НЕ ключ кошелька: его утечка
+# позволяет выдать себя за наш сервер, но не тронуть монеты.
+DEFAULT_CERT = "bhydra_cert.pem"
+DEFAULT_KEY = "bhydra_cert.key"
 MAX_BODY_SIZE = 16 * 1024 * 1024   # анти-DoS: предел размера тела запроса (16 МБ)
 # explorer.html и wallet.html лежат в корне репозитория (на уровень выше пакета).
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -81,9 +85,36 @@ class BHydraAPI(BaseHTTPRequestHandler):
     contracts = None        # общий ContractManager (эскроу и смарт-чеки)
     state_file = None
     contracts_file = None
+    tls = False             # поднят ли сервер по HTTPS
+    allow_key_endpoints = None   # None — решать по обстоятельствам
     lock = threading.Lock()
 
     # --- Вспомогательное -------------------------------------------------
+    def _client_is_local(self) -> bool:
+        host = (self.client_address or ("",))[0]
+        return host in ("127.0.0.1", "::1", "::ffff:127.0.0.1", "localhost")
+
+    def _keys_allowed(self) -> bool:
+        """Можно ли на этом соединении принимать приватный ключ.
+
+        `/api/send`, `/api/wallet` и контрактные POST принимают приватный ключ
+        целиком — это описано как «для СВОЕГО локального узла». Но описание в
+        документации ничего не запрещает: по открытому HTTP ключ уходил в сеть
+        открытым текстом, и его читал любой на пути. Теперь правило проверяется
+        кодом: по TLS — можно, без TLS — только с локального адреса, где
+        перехватывать нечего. Явный `allow_key_endpoints` перекрывает оба
+        случая (для тех, кто ставит свой обратный прокси с TLS).
+        """
+        if self.allow_key_endpoints is not None:
+            return bool(self.allow_key_endpoints)
+        return self.tls or self._client_is_local()
+
+    def _refuse_key_endpoint(self) -> None:
+        self._send(403, {"error": "приватный ключ по открытому каналу не "
+                                  "принимается: включите TLS (--tls) или "
+                                  "подписывайте транзакцию на устройстве "
+                                  "(POST /api/transaction)"})
+
     def _send(self, code, obj):
         body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
         self.send_response(code)
@@ -347,6 +378,9 @@ class BHydraAPI(BaseHTTPRequestHandler):
                 self._send(200 if accepted else 400,
                            {"accepted": accepted, "txid": tx.txid})
             elif parts == ["api", "wallet"]:
+                if not self._keys_allowed():
+                    self._refuse_key_endpoint()
+                    return
                 # По приватному ключу вернуть его АДРЕС + баланс/историю, чтобы
                 # кошелёк показал реальные данные после импорта ключа.
                 # (Ключ уходит на узел — как и в /api/send; для своего узла.)
@@ -366,6 +400,9 @@ class BHydraAPI(BaseHTTPRequestHandler):
                     "history": self.node.address_history(w.address),
                 })
             elif parts == ["api", "send"]:
+                if not self._keys_allowed():
+                    self._refuse_key_endpoint()
+                    return
                 # Перевод на другой адрес: узел подписывает транзакцию ключом
                 # отправителя и кладёт в мемпул. Возвращает ЧЁТКУЮ причину отказа
                 # (неверный адрес / сумма / нехватка средств), а не общий отказ.
@@ -421,6 +458,9 @@ class BHydraAPI(BaseHTTPRequestHandler):
                     "error": None if accepted else "транзакция отклонена (двойная трата?)",
                 })
             elif len(parts) >= 3 and parts[:2] == ["api", "contract"]:
+                if not self._keys_allowed():
+                    self._refuse_key_endpoint()   # все контрактные POST с ключом
+                    return
                 # Смарт-контракты: понятная ошибка (400) вместо общего отказа.
                 try:
                     self._handle_contract_post(parts[2:], data)
@@ -438,6 +478,9 @@ class BHydraAPI(BaseHTTPRequestHandler):
                 # Ключ (необязательный) подписывает заметку — как и /api/send,
                 # это путь ДЛЯ СВОЕГО узла: приватный ключ наружу не шлют.
                 key = data.get("private_key")
+                if key and not self._keys_allowed():
+                    self._refuse_key_endpoint()   # без ключа майнить можно
+                    return
                 with self.lock:
                     try:
                         wallet = Wallet.from_private_hex(key) if key else None
@@ -461,9 +504,33 @@ class BHydraAPI(BaseHTTPRequestHandler):
             self._send(500, {"error": str(exc)})
 
 
+def make_tls_context(certfile, keyfile):
+    """Контекст TLS для сервера: TLS 1.2+ и никакого старья.
+
+    Свой TLS мы НЕ пишем: для браузера нужен проверенный стек, и он есть в
+    стандартной библиотеке. Собственный протокол `secure.py` — для канала
+    узел↔узел, где обе стороны наши; браузеру он не годится.
+
+    Минимум TLS 1.2: TLS 1.0/1.1 сломаны и выключены везде, а оставленная
+    поддержка старой версии — это готовое понижение для активного атакующего.
+    """
+    import ssl
+
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    context.load_cert_chain(certfile, keyfile)
+    return context
+
+
 def make_server(host="0.0.0.0", port=8000, state_file=DEFAULT_STATE,
-                difficulty=DEFAULT_DIFFICULTY):
-    """Создаёт HTTP-сервер с загруженным (или новым) узлом B-hydra."""
+                difficulty=DEFAULT_DIFFICULTY, certfile=None, keyfile=None,
+                allow_key_endpoints=None):
+    """Создаёт сервер с загруженным (или новым) узлом B-hydra.
+
+    `certfile`/`keyfile` включают HTTPS. `allow_key_endpoints` разрешает
+    эндпоинты, принимающие приватный ключ, и по умолчанию выводится сам:
+    с TLS — да, без TLS — только для локальных клиентов.
+    """
     if state_file and os.path.exists(state_file):
         node = BHydraNode.load(state_file)
     else:
@@ -480,7 +547,13 @@ def make_server(host="0.0.0.0", port=8000, state_file=DEFAULT_STATE,
     BHydraAPI.contracts = contracts
     BHydraAPI.state_file = state_file
     BHydraAPI.contracts_file = contracts_file
-    return ThreadingHTTPServer((host, port), BHydraAPI)
+    BHydraAPI.tls = bool(certfile and keyfile)
+    BHydraAPI.allow_key_endpoints = allow_key_endpoints
+    server = ThreadingHTTPServer((host, port), BHydraAPI)
+    if certfile and keyfile:
+        server.socket = make_tls_context(certfile, keyfile).wrap_socket(
+            server.socket, server_side=True)
+    return server
 
 
 def main():
@@ -489,12 +562,39 @@ def main():
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--file", default=DEFAULT_STATE)
+    parser.add_argument("--tls", action="store_true",
+                        help="включить HTTPS (сертификат создаётся сам, если нет)")
+    parser.add_argument("--cert", default=DEFAULT_CERT,
+                        help="файл сертификата (PEM)")
+    parser.add_argument("--key", default=DEFAULT_KEY,
+                        help="файл приватного ключа сертификата (PEM)")
+    parser.add_argument("--allow-insecure-keys", action="store_true",
+                        help="принимать приватный ключ и без TLS (не надо так)")
     args = parser.parse_args()
 
-    server = make_server(args.host, args.port, args.file)
-    print(f"B-hydra обозреватель: http://{args.host}:{args.port}/")
-    print(f"REST API           : http://{args.host}:{args.port}/api/info")
+    certfile = keyfile = None
+    if args.tls:
+        from . import certgen
+
+        if certgen.ensure_files(args.cert, args.key):
+            print(f"Создан самоподписанный сертификат: {args.cert}")
+            print("  ⚠ браузер предупредит про неизвестный центр сертификации —")
+            print("    для публичного узла возьмите настоящий (Let's Encrypt).")
+        certfile, keyfile = args.cert, args.key
+
+    server = make_server(args.host, args.port, args.file, certfile=certfile,
+                         keyfile=keyfile,
+                         allow_key_endpoints=True if args.allow_insecure_keys
+                         else None)
+    scheme = "https" if certfile else "http"
+    print(f"B-hydra обозреватель: {scheme}://{args.host}:{args.port}/")
+    print(f"REST API           : {scheme}://{args.host}:{args.port}/api/info")
     print(f"Состояние цепочки  : {args.file}   (Ctrl+C — стоп)")
+    if not certfile:
+        # Молча оставлять открытый канал нельзя: пользователь должен знать, что
+        # приватный ключ по нему не примут (и почему).
+        print("Канал ОТКРЫТ (без TLS): эндпоинты с приватным ключом доступны "
+              "только с локального адреса. HTTPS — флаг --tls.")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
