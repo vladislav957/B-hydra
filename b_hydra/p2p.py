@@ -19,6 +19,7 @@ import time
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+from . import secure
 from .tcp import MAX_MESSAGE_SIZE, recv_message, send_message
 
 # Предел числа запомненных txid/хешей блоков для анти-петли gossip. Без него
@@ -108,6 +109,10 @@ MAX_INFLIGHT_TX_FETCHES = 32     # сколько тел транзакций к
 # первого запуска (файла ещё нет) есть seed-узлы — как DNS seeds в Bitcoin.
 DEFAULT_PEERS_FILE = "bhydra_peers.json"
 DEFAULT_SEEDS = ()               # адреса вида ("host", port); задаются сетью
+# Долговременный ключ УЗЛА (не кошелька!): им подписывается рукопожатие, по нему
+# соседи узнают нас после перезапуска. Утечка этого файла позволяет выдать себя
+# за наш узел, но НЕ тронуть монеты — это разные ключи.
+DEFAULT_IDENTITY_FILE = "bhydra_identity.json"
 
 # --- Репутация пиров --------------------------------------------------------
 # Лимиты выше ограничивают УЩЕРБ от плохого соседа, но не отсекают источник:
@@ -123,6 +128,10 @@ PENALTY_BAD_MESSAGE = 25         # неразбираемое или битое 
 PENALTY_INVALID_BLOCK = 50       # заведомо негодный блок (не «мы отстали»)
 PENALTY_FOREIGN_NETWORK = 20     # представился из чужой сети
 PENALTY_GARBAGE_PEERS = 10       # мусор вместо адресов в списке пиров
+
+
+# Маркер «открытый текст, но он запрещён» — отличается и от сессии, и от None.
+_REFUSED = object()
 
 
 class _BoundedSet:
@@ -173,9 +182,19 @@ class P2PNode:
 
     def __init__(self, host="127.0.0.1", port=5000, node=None,
                  seen_limit=SEEN_LIMIT, max_peers=MAX_PEERS,
-                 peers_file=None, seeds=None):
+                 peers_file=None, seeds=None, encrypt=True,
+                 require_encryption=False, identity=None, identity_file=None):
         self.host = host
         self.port = port
+        # Шифрование канала. `encrypt` управляет ИСХОДЯЩИМИ соединениями, сервер
+        # же принимает и шифрованные, и открытые — иначе узел, намеренно
+        # запущенный открытым, оказался бы отрезан от сети. Полностью закрыть
+        # приём открытого текста — `require_encryption=True`.
+        self.encrypt = bool(encrypt)
+        self.require_encryption = bool(require_encryption)
+        self.identity_file = identity_file
+        self.identity = identity or self._load_identity()
+        self._pins = {}                 # (host, port) → долговременный ключ пира
         self.node = node if node is not None else BHydraNode()
         self.peers = set()          # известные пиры: множество (host, port)
         self.max_peers = max(1, int(max_peers))
@@ -465,6 +484,16 @@ class P2PNode:
             threading.Thread(target=self._handle_conn, args=(conn, addr[0]),
                              daemon=True).start()
 
+    def _accept_session(self, conn, first_frame):
+        """Разбирает первый кадр: рукопожатие, открытый текст или отказ.
+
+        Возвращает Session (шифрованный клиент), None (открытый — терпим) или
+        _REFUSED, если открытый текст запрещён.
+        """
+        if secure.is_handshake(first_frame):
+            return secure.server_handshake(conn, first_frame, self.identity)
+        return _REFUSED if self.require_encryption else None
+
     def _claim_host_slot(self, host) -> bool:
         """Занимает слот входящего соединения под хост (или отказывает)."""
         if self._is_loopback(host):
@@ -507,12 +536,32 @@ class P2PNode:
                 with self._conns_lock:
                     self._conns.add(conn)
                 conn.settimeout(self.inbound_timeout)
+                first = recv_message(conn)
+                if not first:
+                    return
+                session = self._accept_session(conn, first)
+                if session is _REFUSED:
+                    return          # открытый текст при require_encryption
+                if session is not None:
+                    first = None    # первый кадр был рукопожатием, данных в нём нет
                 while self._running:
-                    raw = recv_message(conn)
-                    if not raw:
-                        break       # пир закрыл соединение, замолчал или прислал
+                    if first is None:
+                        frame = recv_message(conn)
+                        if not frame:
+                            break   # пир закрыл соединение, замолчал или прислал
                                     # кадр сверх лимита — поток дальше не разобрать
-                    send_message(conn, self._handle_message(raw, host))
+                        raw = session.decrypt(frame) if session else frame
+                    else:
+                        raw, first = first, None      # уже прочитанный кадр
+                    response = self._handle_message(raw, host)
+                    send_message(conn, session.encrypt(response) if session
+                                 else response)
+        except secure.DecryptError:
+            # Тег не сошёлся: кадр подделан или испорчен в пути. Соединение
+            # закрываем, но штраф НЕ начисляем — испортить кадр может кто-то НА
+            # ПУТИ, а не сам сосед, и наказание позволило бы такому атакующему
+            # ссорить нас с честными пирами и дробить сеть.
+            pass
         except OSError:
             pass                    # таймаут или разрыв — просто закрываем
         finally:
@@ -559,6 +608,59 @@ class P2PNode:
                 pass
             server.close()
 
+    # --- Долговременный ключ узла и закрепление ключей соседей -------------
+    def _load_identity(self):
+        """Ключ узла с диска, а если файла нет — новый (и сохраняем).
+
+        Ключ обязан переживать перезапуск: соседи закрепляют его за нашим
+        адресом, и новый ключ после каждого старта выглядел бы для них ровно
+        как подмена узла.
+        """
+        from .wallet import Wallet, generate_wallet
+
+        path = self.identity_file
+        if path:
+            try:
+                with open(path, encoding="utf-8") as handle:
+                    stored = json.load(handle)
+                return Wallet.from_private_hex(stored["private_key"])
+            except (OSError, ValueError, KeyError):
+                pass                      # нет файла или он испорчен — заведём новый
+        identity = generate_wallet()
+        if path:
+            self._save_identity(identity, path)
+        return identity
+
+    @staticmethod
+    def _save_identity(identity, path) -> bool:
+        """Пишет ключ узла атомарно и только для владельца (0600)."""
+        temporary = f"{path}.tmp"
+        try:
+            with open(temporary, "w", encoding="utf-8") as handle:
+                json.dump({"private_key": identity.private_key_hex}, handle)
+            os.chmod(temporary, 0o600)
+            os.replace(temporary, path)
+            return True
+        except OSError:
+            return False
+
+    @property
+    def node_key(self) -> str:
+        """Публичный ключ узла (hex) — то, что соседи закрепляют за нами."""
+        return self.identity.public_key_hex
+
+    def pinned_key(self, host, port):
+        """Ключ, закреплённый за пиром при первом успешном соединении."""
+        with self._pool_lock:
+            return self._pins.get((host, port))
+
+    def pin_peer(self, host, port, key) -> None:
+        """Запоминает ключ пира (TOFU). Первый ключ не перезаписывается."""
+        if not key:
+            return
+        with self._pool_lock:
+            self._pins.setdefault((host, port), key)
+
     # --- Клиент: пул постоянных соединений --------------------------------
     def _checkout(self, host, port):
         """Забирает из пула живое соединение к пиру (или None).
@@ -571,18 +673,18 @@ class P2PNode:
         with self._pool_lock:
             idle = self._pool.get((host, port))
             while idle:
-                sock, last_used = idle.pop()
+                sock, session, last_used = idle.pop()
                 if last_used < deadline:
                     self._close(sock)     # залежался — сосед его уже закрыл
                     self._pooled -= 1
                     continue
                 self._pooled -= 1
-                return sock
+                return sock, session
             self._pool.pop((host, port), None)
         return None
 
-    def _checkin(self, host, port, sock) -> None:
-        """Возвращает соединение в пул для следующего запроса."""
+    def _checkin(self, host, port, sock, session=None) -> None:
+        """Возвращает соединение (вместе с его сессией) в пул."""
         with self._pool_lock:
             if not self._pool_open or self._pooled >= MAX_POOLED_CONNECTIONS:
                 self._close(sock)         # пул полон — дешевле закрыть
@@ -591,7 +693,9 @@ class P2PNode:
             if len(idle) >= MAX_POOLED_PER_PEER:
                 self._close(sock)
                 return
-            idle.append((sock, time.time()))
+            # Сессия неотделима от сокета: у неё счётчики кадров и ключи именно
+            # этого соединения, к другому сокету её не приложить.
+            idle.append((sock, session, time.time()))
             self._pooled += 1
 
     @staticmethod
@@ -607,13 +711,13 @@ class P2PNode:
             keys = [k for k in self._pool if host is None or k[0] == host]
             closed = 0
             for key in keys:
-                for sock, _ts in self._pool.pop(key, []):
+                for sock, _session, _ts in self._pool.pop(key, []):
                     self._close(sock)
                     closed += 1
             self._pooled = max(0, self._pooled - closed)
         return closed
 
-    def _exchange(self, sock, payload: bytes):
+    def _exchange(self, sock, payload: bytes, session=None):
         """Один запрос-ответ по готовому соединению.
 
         Возвращает распарсенный ответ, None — если пир закрыл соединение, не
@@ -621,10 +725,12 @@ class P2PNode:
         своему таймауту, пока мы молчали).
         """
         sock.settimeout(self.peer_timeout)
-        send_message(sock, payload)
+        send_message(sock, session.encrypt(payload) if session else payload)
         raw = recv_message(sock)
         if not raw:
             return None
+        if session is not None:
+            raw = session.decrypt(raw)
         return json.loads(raw.decode("utf-8"))
 
     def send(self, host, port, message: dict) -> dict:
@@ -645,28 +751,45 @@ class P2PNode:
         payload = self._json(message)
         pooled = self._checkout(host, port)
         if pooled is not None:
+            sock, session = pooled
             try:
-                response = self._exchange(pooled, payload)
+                response = self._exchange(sock, payload, session)
             except (OSError, ValueError):
                 response = None
             if response is not None:
-                self._checkin(host, port, pooled)
+                self._checkin(host, port, sock, session)
                 return response
-            self._close(pooled)
+            self._close(sock)
 
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
             sock.settimeout(self.peer_timeout)
             sock.connect((host, port))
-            response = self._exchange(sock, payload)
+            session = self._start_session(sock, host, port)
+            response = self._exchange(sock, payload, session)
         except BaseException:
             self._close(sock)
             raise
         if response is None:
             self._close(sock)             # пир промолчал — сокет непригоден
             return {}
-        self._checkin(host, port, sock)
+        self._checkin(host, port, sock, session)
         return response
+
+    def _start_session(self, sock, host, port):
+        """Шифрует свежее соединение (или оставляет открытым, если encrypt=False).
+
+        Отката на открытый текст при неудаче НЕТ: молчаливое понижение — ровно
+        то, чего добивается активный атакующий (испортил рукопожатие и читает
+        дальше). Ошибка рукопожатия — это отказ соединения.
+        """
+        if not self.encrypt:
+            return None
+        session = secure.client_handshake(sock, expect_key=self.pinned_key(host, port))
+        # Доверие при первом контакте: первый ключ запоминаем, дальше требуем
+        # именно его (сверка — внутри рукопожатия, до вывода ключей сессии).
+        self.pin_peer(host, port, session.peer_key)
+        return session
 
     def peer_list(self):
         """Снимок таблицы пиров — безопасен при параллельных add_peer."""
@@ -762,7 +885,13 @@ class P2PNode:
         path = path or self.peers_file
         if not path:
             return False
-        payload = {"peers": [list(peer) for peer in self.peer_list()]}
+        # Закреплённые ключи соседей сохраняются вместе с адресами: иначе после
+        # перезапуска каждое соединение снова было бы «первым контактом», и
+        # подмена узла опять проходила бы незамеченной.
+        with self._pool_lock:
+            pins = {f"{h}:{p}": key for (h, p), key in self._pins.items()}
+        payload = {"peers": [list(peer) for peer in self.peer_list()],
+                   "pins": pins}
         temporary = f"{path}.tmp"
         try:
             with open(temporary, "w", encoding="utf-8") as handle:
@@ -795,6 +924,12 @@ class P2PNode:
                 continue
             if self.add_peer(host, port):
                 added += 1
+        for entry, key in (stored.get("pins") or {}).items():
+            host, _, port = str(entry).rpartition(":")
+            try:
+                self.pin_peer(host, int(port), str(key))
+            except (TypeError, ValueError):
+                continue                  # мусор в закреплениях просто пропускаем
         return added
 
     def bootstrap(self) -> int:
@@ -1356,6 +1491,12 @@ def main():
                         help="seed-узел для первого запуска (можно повторять)")
     parser.add_argument("--peers-file", default=DEFAULT_PEERS_FILE,
                         help="файл с соседями между запусками")
+    parser.add_argument("--identity-file", default=DEFAULT_IDENTITY_FILE,
+                        help="файл с долговременным ключом УЗЛА (не кошелька)")
+    parser.add_argument("--no-encrypt", action="store_true",
+                        help="не шифровать исходящие соединения")
+    parser.add_argument("--require-encryption", action="store_true",
+                        help="не обслуживать открытые (нешифрованные) соединения")
     parser.add_argument("--difficulty", type=int, default=3, help="базовая сложность")
     parser.add_argument("--demo", action="store_true", help="запустить демо из 3 узлов")
     args = parser.parse_args()
@@ -1375,15 +1516,20 @@ def main():
             seeds.append((host, int(port)))
 
     node = P2PNode("0.0.0.0", args.port, BHydraNode(difficulty=args.difficulty),
-                   peers_file=args.peers_file, seeds=seeds)
+                   peers_file=args.peers_file, seeds=seeds,
+                   encrypt=not args.no_encrypt,
+                   require_encryption=args.require_encryption,
+                   identity_file=args.identity_file)
     node.start()
     # Соседи с прошлого запуска + seed-узлы: узел находит сеть сам, без --peer.
     alive = node.bootstrap()
     if args.peer:
         host, _, port = args.peer.rpartition(":")
         node.connect(host, int(port))
+    channel = "шифрован" if node.encrypt else "ОТКРЫТ"
     print(f"P2P-узел B-hydra на :{args.port} | пиров: {len(node.peers)} "
           f"(живых при старте: {alive}) | высота: {node.node.height}"
+          f" | канал: {channel} | ключ узла: {node.node_key[:16]}…"
           f"  (Ctrl+C — стоп)")
     try:
         while True:                 # периодически подтягиваем цепочку у пиров

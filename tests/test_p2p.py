@@ -1312,8 +1312,9 @@ def test_stale_pooled_connection_is_not_reused():
         client.send(server.host, server.port, {"type": "ping"})
         key = (server.host, server.port)
         with client._pool_lock:                 # состарим запись искусственно
-            sock, _ts = client._pool[key][0]
-            client._pool[key][0] = (sock, time.time() - POOL_IDLE_TIMEOUT - 1)
+            sock, session, _ts = client._pool[key][0]
+            client._pool[key][0] = (sock, session,
+                                    time.time() - POOL_IDLE_TIMEOUT - 1)
         assert client._checkout(*key) is None   # просрочен — не отдаётся
         assert _pooled(client, *key) == 0
     finally:
@@ -1585,3 +1586,271 @@ def test_loopback_is_not_limited_per_host():
     node = _lone_node()
     for _ in range(MAX_INBOUND_PER_HOST * 3):
         assert node._claim_host_slot("127.0.0.1") is True
+
+
+# --- Шифрование канала между узлами ------------------------------------------
+# Трафик ходил открытым текстом: кто видел канал, видел адреса, транзакции и
+# соседей. Замер на прослушке настоящего соединения — в открытом канале
+# находились и адрес майнера, и txid, и тип сообщения.
+from b_hydra import secure
+from b_hydra.wallet import Wallet
+
+
+def _capture_wire(monkeypatch):
+    """Перехватывает ВСЁ, что уходит в сокеты: и кадры, и рукопожатие.
+
+    Оба модуля берут send_message себе в пространство имён, поэтому подменять
+    надо у каждого — иначе часть трафика мимо перехвата, и «не нашли открытый
+    текст» ничего не доказывает.
+    """
+    import b_hydra.p2p as p2p_module
+    captured = bytearray()
+
+    for module in (p2p_module, secure):
+        original = module.send_message
+
+        def tap(sock, data, _original=original):
+            captured.extend(data if isinstance(data, bytes) else data.encode())
+            return _original(sock, data)
+
+        monkeypatch.setattr(module, "send_message", tap)
+    return captured
+
+
+def test_traffic_between_nodes_is_encrypted(monkeypatch):
+    """В канале не должно быть ни адресов, ни типов сообщений открытым текстом."""
+    server = _lone_node()
+    server.start()
+    time.sleep(0.2)
+    client = _lone_node()
+    captured = _capture_wire(monkeypatch)
+    try:
+        miner = generate_wallet()
+        server.node.mine_pending(miner.address)
+        assert client.send(server.host, server.port,
+                           {"type": "get_height"})["height"] == 2
+        assert b"get_height" not in captured          # даже тип сообщения скрыт
+        assert miner.address.encode() not in captured
+        assert b'{"type"' not in captured
+        assert secure.MAGIC in captured               # рукопожатие видно — оно и должно
+    finally:
+        client.stop()
+        server.stop()
+
+
+def test_plaintext_traffic_really_leaks_without_encryption(monkeypatch):
+    """Контроль: с encrypt=False то же самое видно в канале открытым текстом.
+
+    Без этой пары тест выше ничего бы не доказывал — он мог бы «проходить»
+    просто потому, что перехват не работает.
+    """
+    server = _lone_node()
+    server.start()
+    time.sleep(0.2)
+    client = _lone_node(encrypt=False)
+    captured = _capture_wire(monkeypatch)
+    try:
+        assert client.send(server.host, server.port, {"type": "get_height"})
+        assert b"get_height" in captured
+    finally:
+        client.stop()
+        server.stop()
+
+
+def test_plaintext_peer_is_still_served_by_default():
+    """Сервер терпит открытого клиента: узел, намеренно запущенный без
+    шифрования, не должен оказаться отрезан от сети."""
+    server = _lone_node()
+    server.start()
+    time.sleep(0.2)
+    client = _lone_node(encrypt=False)
+    try:
+        assert client.send(server.host, server.port,
+                           {"type": "ping"})["type"] == "pong"
+    finally:
+        client.stop()
+        server.stop()
+
+
+def test_require_encryption_refuses_plaintext():
+    """С require_encryption открытого клиента не обслуживают вовсе."""
+    server = _lone_node(require_encryption=True)
+    server.start()
+    time.sleep(0.2)
+    plain = _lone_node(encrypt=False)
+    encrypted = _lone_node()
+    try:
+        assert plain.send(server.host, server.port, {"type": "ping"}) == {}
+        assert encrypted.send(server.host, server.port,
+                              {"type": "ping"})["type"] == "pong"
+    finally:
+        plain.stop()
+        encrypted.stop()
+        server.stop()
+
+
+def test_handshake_failure_does_not_fall_back_to_plaintext():
+    """Понижения версии нет: сорванное рукопожатие — отказ, а не открытый канал.
+
+    Молчаливый откат — ровно то, чего добивается активный атакующий: испортил
+    рукопожатие и читает дальше.
+    """
+    listener = socket.socket()
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", 0))
+    port = listener.getsockname()[1]
+    listener.listen(4)
+
+    def refuse():
+        while True:
+            try:
+                conn, _ = listener.accept()
+            except OSError:
+                return
+            with conn:
+                _recv(conn)
+                _send(conn, b"not a handshake at all")
+
+    threading.Thread(target=refuse, daemon=True).start()
+    node = _lone_node()
+    try:
+        with pytest.raises(OSError):          # HandshakeError — это OSError
+            node.send("127.0.0.1", port, {"type": "ping"})
+    finally:
+        node.stop()
+        listener.close()
+
+
+def test_peer_key_is_pinned_on_first_contact():
+    server = _lone_node()
+    server.start()
+    time.sleep(0.2)
+    client = _lone_node()
+    try:
+        assert client.pinned_key(server.host, server.port) is None
+        client.send(server.host, server.port, {"type": "ping"})
+        assert client.pinned_key(server.host, server.port) == server.node_key
+    finally:
+        client.stop()
+        server.stop()
+
+
+def test_impersonated_peer_is_refused_after_pinning():
+    """Другой узел на том же адресе — соединения не будет.
+
+    Это и есть смысл закрепления: со второго контакта подмена узла видна.
+    """
+    port = _free_port()
+    first = P2PNode("127.0.0.1", port, BHydraNode(difficulty=1))
+    first.start()
+    time.sleep(0.2)
+    client = _lone_node()
+    try:
+        client.send("127.0.0.1", port, {"type": "ping"})
+        pinned = client.pinned_key("127.0.0.1", port)
+        first.stop()
+        time.sleep(0.3)
+        # На том же адресе поднимается ДРУГОЙ узел (свой ключ).
+        impostor = P2PNode("127.0.0.1", port, BHydraNode(difficulty=1))
+        impostor.start()
+        time.sleep(0.2)
+        try:
+            assert impostor.node_key != pinned
+            with pytest.raises(OSError):
+                client.send("127.0.0.1", port, {"type": "ping"})
+        finally:
+            impostor.stop()
+    finally:
+        client.stop()
+        first.stop()
+
+
+def test_node_identity_survives_restart(tmp_path):
+    """Ключ узла обязан переживать перезапуск.
+
+    Новый ключ после каждого старта выглядел бы для соседей ровно как подмена
+    узла — все закрепления ломались бы на ровном месте.
+    """
+    path = str(tmp_path / "identity.json")
+    first = _lone_node(identity_file=path)
+    again = _lone_node(identity_file=path)
+    assert first.node_key == again.node_key
+    assert Wallet.from_private_hex(
+        json.loads(open(path, encoding="utf-8").read())["private_key"]
+    ).public_key_hex == first.node_key
+
+
+def test_corrupt_identity_file_is_replaced(tmp_path):
+    path = str(tmp_path / "identity.json")
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write("не json вовсе")
+    node = _lone_node(identity_file=path)
+    assert len(node.node_key) == 130            # 65 байт несжатой точки в hex
+
+
+def test_pins_are_saved_and_loaded(tmp_path):
+    """Закрепления сохраняются вместе с адресами соседей.
+
+    Иначе после перезапуска каждое соединение снова было бы «первым контактом»,
+    и подмена узла опять проходила бы незамеченной.
+    """
+    path = str(tmp_path / "peers.json")
+    node = _lone_node(peers_file=path)
+    node.add_peer("10.0.0.7", 5001)
+    node.pin_peer("10.0.0.7", 5001, "04" + "ab" * 64)
+    assert node.save_peers() is True
+    fresh = _lone_node(peers_file=path)
+    assert fresh.load_peers() == 1
+    assert fresh.pinned_key("10.0.0.7", 5001) == "04" + "ab" * 64
+
+
+def test_pin_is_not_overwritten_by_a_later_key():
+    """Первый ключ и есть доверенный — перезапись сделала бы закрепление
+    бессмысленным."""
+    node = _lone_node()
+    node.pin_peer("10.0.0.8", 5002, "04" + "11" * 64)
+    node.pin_peer("10.0.0.8", 5002, "04" + "22" * 64)
+    assert node.pinned_key("10.0.0.8", 5002) == "04" + "11" * 64
+
+
+def test_garbage_pins_in_the_file_are_ignored(tmp_path):
+    path = str(tmp_path / "peers.json")
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump({"peers": [["10.0.0.9", 5003]],
+                   "pins": {"без порта": "0411", "10.0.0.9:5003": "04ff"}}, handle)
+    node = _lone_node(peers_file=path)
+    assert node.load_peers() == 1
+    assert node.pinned_key("10.0.0.9", 5003) == "04ff"
+
+
+def test_encrypted_sync_and_gossip_work_end_to_end(two_nodes):
+    """Сквозная проверка: по шифрованному каналу работают и блоки, и sync."""
+    a, b = two_nodes
+    assert a.pinned_key(b.host, b.port) is None
+    a.mine(generate_wallet().address)
+    assert _wait_until(lambda: b.node.height == a.node.height)
+    # оба узла закрепили ключи друг друга, значит канал был шифрованным
+    assert a.pinned_key(b.host, b.port) == b.node_key
+    for _ in range(2):
+        a.node.mine_pending(generate_wallet().address)
+    assert b.sync() is True
+    assert b.node.height == a.node.height
+    assert b.node.is_valid()
+
+
+def test_encrypted_session_is_reused_from_the_pool():
+    """Рукопожатие стоит дорого (ECDH на чистом Python) — оно должно быть ОДНО
+    на соединение, а не на сообщение. Это и делает шифрование посильным."""
+    server = _lone_node()
+    accepted = _count_connections(server)
+    server.start()
+    time.sleep(0.2)
+    client = _lone_node()
+    try:
+        for _ in range(8):
+            assert client.send(server.host, server.port,
+                               {"type": "ping"})["type"] == "pong"
+        assert accepted["n"] == 1
+    finally:
+        client.stop()
+        server.stop()
