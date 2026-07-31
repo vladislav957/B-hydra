@@ -30,14 +30,17 @@ SDK. Поэтому в манифесте не должно быть ссыло�
 
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
 import urllib.request
 import xml.etree.ElementTree as ET
 import zipfile
+import zlib
 
 if __name__ == "__main__" and __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -162,6 +165,62 @@ def build(out_path: str, cache: str = None, keystore: str = None,
     return out_path
 
 
+def _uleb128(data: bytes, offset: int):
+    """LEB128 без знака — так DEX хранит длины строк."""
+    result = shift = 0
+    while True:
+        byte = data[offset]
+        offset += 1
+        result |= (byte & 0x7F) << shift
+        shift += 7
+        if not byte & 0x80:
+            return result, offset
+
+
+def dex_references(dex: bytes) -> dict:
+    """Разбирает таблицы DEX: строки, типы и ССЫЛКИ НА МЕТОДЫ.
+
+    Читаем формат сами, а не глазами дексера: `dx` сообщает об успехе, даже
+    если из исходника пропал вызов, и «собралось» ничего не говорит о том, ЧТО
+    собралось. Здесь видно ровно то, что окажется на телефоне: например,
+    `WebSettings->setDomStorageEnabled` — без него кошелёк терял бы приватный
+    ключ при каждом закрытии, а сборка проходила бы как ни в чём не бывало.
+    """
+    if dex[:4] != b"dex\n":
+        raise ValueError("это не DEX")
+
+    def u32(offset):
+        return struct.unpack_from("<I", dex, offset)[0]
+
+    string_count, string_off = u32(56), u32(60)
+    type_count, type_off = u32(64), u32(68)
+    method_count, method_off = u32(88), u32(92)
+
+    strings = []
+    for i in range(string_count):
+        start = u32(string_off + 4 * i)
+        _length, start = _uleb128(dex, start)
+        strings.append(dex[start:dex.index(b"\0", start)].decode("utf-8", "replace"))
+    types = [strings[u32(type_off + 4 * i)] for i in range(type_count)]
+
+    methods = set()
+    for i in range(method_count):
+        class_idx, _proto = struct.unpack_from("<HH", dex, method_off + 8 * i)
+        name = strings[u32(method_off + 8 * i + 4)]
+        methods.add(f"{types[class_idx]}->{name}")
+    return {"strings": strings, "types": types, "methods": methods}
+
+
+#: Вызовы, без которых оболочка перестаёт быть кошельком (см. dex_references).
+REQUIRED_CALLS = (
+    "Landroid/webkit/WebSettings;->setJavaScriptEnabled",   # без JS страницы нет
+    "Landroid/webkit/WebSettings;->setDomStorageEnabled",   # в localStorage ключ
+    "Landroid/webkit/WebView;->loadUrl",                    # чем открывается кошелёк
+    "Landroid/content/SharedPreferences;->getString",       # свой адрес узла
+    "Landroid/content/SharedPreferences$Editor;->putString",
+)
+
+
 def verify(apk_path: str) -> dict:
     """Проверяет собранный APK тем, что есть под рукой."""
     report = {}
@@ -172,7 +231,14 @@ def verify(apk_path: str) -> dict:
         report["has_dex"] = "classes.dex" in names
         report["signed"] = any(n.startswith("META-INF/") and
                                n.endswith((".RSA", ".DSA", ".EC")) for n in names)
-        report["dex_magic"] = apk.read("classes.dex")[:8] == b"dex\n035\x00"
+        dex = apk.read("classes.dex")
+        report["dex_magic"] = dex[:8] == b"dex\n035\x00"
+        report["dex_adler32"] = zlib.adler32(dex[12:]) == struct.unpack_from("<I", dex, 8)[0]
+        report["dex_sha1"] = hashlib.sha1(dex[32:]).digest() == dex[12:32]
+        refs = dex_references(dex)
+        report["missing_calls"] = [call for call in REQUIRED_CALLS
+                                   if call not in refs["methods"]]
+        report["calls_ok"] = not report["missing_calls"]
     check = subprocess.run([_tool("jarsigner"), "-verify", apk_path],
                            capture_output=True, text=True)
     report["jarsigner"] = check.stdout.strip().splitlines()[0] if check.stdout else ""
@@ -196,7 +262,9 @@ def main():
     report = verify(path)
     print(f"\nГотово: {path} ({report['size']} байт)")
     print(f"  содержимое : {', '.join(report['entries'][:6])}")
-    print(f"  DEX         : {'да' if report['dex_magic'] else 'НЕТ'}")
+    print(f"  DEX         : {'да' if report['dex_magic'] else 'НЕТ'}"
+          f", свои суммы {'сходятся' if report['dex_adler32'] and report['dex_sha1'] else 'НЕ СХОДЯТСЯ'}")
+    print(f"  вызовы      : {'все на месте' if report['calls_ok'] else 'ПОТЕРЯНЫ: ' + ', '.join(report['missing_calls'])}")
     print(f"  подпись     : {'да' if report['signed'] else 'НЕТ'} "
           f"({report['jarsigner']})")
     if not args.keystore:

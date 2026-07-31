@@ -215,6 +215,50 @@ def test_built_apk_is_read_by_an_independent_parser(tmp_path):
     assert apk.is_signed_v1() is True
 
 
+@pytest.mark.skipif(_tools_ready() is None,
+                    reason="нет JDK или не скачаны android.jar/dx.jar")
+def test_built_dex_really_contains_the_wallet_shell_calls(tmp_path):
+    """В байт-коде обязаны быть вызовы, без которых оболочка не кошелёк.
+
+    «Собралось» ничего не доказывает: пропади из исходника
+    `setDomStorageEnabled`, javac и dx отработают молча, APK установится — и
+    приложение будет ТЕРЯТЬ приватный ключ при каждом закрытии, потому что он
+    живёт в localStorage. Поэтому читаем таблицы самого DEX.
+    """
+    out = str(tmp_path / "wallet.apk")
+    apkbuild.build(out, cache=_tools_ready())
+    refs = apkbuild.dex_references(zipfile.ZipFile(out).read("classes.dex"))
+
+    for call in apkbuild.REQUIRED_CALLS:
+        assert call in refs["methods"], call
+    # Тот же вывод должен давать и verify() — им пользуется сборщик.
+    assert apkbuild.verify(out)["calls_ok"]
+    # Негативный контроль: набор не «содержит что угодно».
+    assert "Landroid/webkit/WebSettings;->setДомStorage" not in refs["methods"]
+
+
+@pytest.mark.skipif(_tools_ready() is None,
+                    reason="нет JDK или не скачаны android.jar/dx.jar")
+def test_built_dex_has_no_androidx_and_no_invokedynamic(tmp_path):
+    """Запрет androidx и лямбд проверяем по РЕЗУЛЬТАТУ, а не по тексту.
+
+    Исходник читает соседний тест, но он смотрит на один файл; сюда попадает
+    всё, что реально сдексовано, включая случайно затянутые зависимости.
+    """
+    out = str(tmp_path / "wallet.apk")
+    apkbuild.build(out, cache=_tools_ready())
+    types = apkbuild.dex_references(zipfile.ZipFile(out).read("classes.dex"))["types"]
+    assert not [t for t in types if t.startswith("Landroidx/")]
+    # invokedynamic из Java 8 dx не понимает — его следы это Landroid/lang/invoke.
+    assert not [t for t in types if t.startswith("Ljava/lang/invoke/")]
+    assert "Lio/bhydra/wallet/MainActivity;" in types
+
+
+def test_dex_references_refuses_something_that_is_not_a_dex():
+    with pytest.raises(ValueError, match="DEX"):
+        apkbuild.dex_references(b"PK\x03\x04" + b"\0" * 200)
+
+
 def test_android_sources_avoid_androidx_and_resources():
     """Оболочка обязана оставаться собираемой БЕЗ Android SDK.
 

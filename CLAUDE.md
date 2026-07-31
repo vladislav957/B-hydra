@@ -12,7 +12,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 pip install pytest                            # единственная dev-зависимость
-python -m pytest -q                           # 488 тестов — держать зелёными
+python -m pytest -q                           # 491 тест — держать зелёными
 python -m pytest tests/test_node.py -q        # один файл
 python -m pytest tests/test_node.py -k mempool -q   # один тест по имени
 
@@ -87,7 +87,7 @@ RIPEMD-160, base58, secp256k1, RFC 6979 и сериализация «как в 
 
 Корневые `*.py` (`cli.py`, `api.py`, `P2P.py`, `cache.py`, `IP.py`, …) — тонкие
 запускалки/шимы поверх пакета; править логику нужно в `b_hydra/`. Тесты —
-`tests/` (28 файлов, 488 тестов, `pytest`). Полная карта слоёв — `ARCHITECTURE.md`,
+`tests/` (28 файлов, 491 тест, `pytest`). Полная карта слоёв — `ARCHITECTURE.md`,
 схема REST-подписи — `API.md`.
 
 ## REST API (`b_hydra/api.py`)
@@ -384,7 +384,16 @@ TLS — можно, без TLS — только с локального адре
   закреплено тестом.
   ⚠️ APK на живом телефоне НЕ запускался: здесь нет ни устройства, ни эмулятора.
   Проверено другое — структура архива, разбор чужим парсером, контрольные суммы
-  DEX (Adler-32 и SHA-1) и `jarsigner -verify`.
+  DEX (Adler-32 и SHA-1), `jarsigner -verify` и СОДЕРЖИМОЕ байт-кода:
+  `apkbuild.dex_references` читает таблицы строк/типов/методов DEX напрямую и
+  сверяет `REQUIRED_CALLS` с тем, что реально попало в `classes.dex`.
+  «Собралось» ничего не доказывает: пропади из исходника
+  `setDomStorageEnabled`, javac и `dx` промолчат, APK установится — и кошелёк
+  будет терять приватный ключ при каждом закрытии (он живёт в `localStorage`).
+  Оттуда же видно, что в байт-коде нет ни `Landroidx/`, ни `Ljava/lang/invoke/`.
+  ⚠️ `jarsigner -verify` печатает «Invalid certificate chain» — так и должно
+  быть: подпись самоподписанная, центра у неё нет. Android проверяет не доверие,
+  а неизменность подписи между обновлениями.
 - **Кошелёк синхронизируется с СЕТЬЮ, а не с одним узлом** (`bhydra-net.js`):
   спрашивает `/api/info` у всех известных узлов параллельно и берёт цепочку с
   наибольшей `total_work` — ТО ЖЕ правило, что у `replace_chain`. По высоте
@@ -489,7 +498,7 @@ TLS — можно, без TLS — только с локального адре
   `mine_pending` / `_validate_block_transactions` / `_validate_chain`).
   Квант ломает лишь ECDSA — монеты на гибридном адресе недоступны. Обычные
   ECDSA-кошельки (`0x1f`) работают как раньше (обратная совместимость).
-- **Перед push — `python -m pytest -q` должно быть зелёным** (488/488; без скачанных android.jar/dx.jar 3 теста сборки APK пропускаются).
+- **Перед push — `python -m pytest -q` должно быть зелёным** (491/491; без скачанных android.jar/dx.jar 5 тестов сборки APK пропускаются).
 - Коммиты по-русски, осмысленные; заканчиваются трейлерами
   `Co-Authored-By:` и `Claude-Session:`.
 - Не хардкодить идентификатор модели в коде/коммитах/артефактах.
