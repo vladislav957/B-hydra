@@ -253,6 +253,62 @@ def test_rest_server_shares_the_chain_of_the_network_node(pair):
         server.shutdown()
 
 
+def test_mining_through_rest_reaches_the_network(pair):
+    """Блок, добытый через веб-кошелёк, обязан уйти соседям.
+
+    `POST /api/mine` звал `node.mine_pending` напрямую, мимо P2P: блок оставался
+    у этого узла, и второй компьютер про него не знал. Со стороны это выглядит
+    как «сеть не работает», хотя соединение в порядке — нашлось на снимке
+    экрана телефона, где кошелёк показывал «отстают: 1».
+    """
+    from b_hydra.wallet import generate_wallet
+
+    a, b = pair
+    server = _serve(a.api_port, p2p=a)
+    try:
+        assert b.connect("127.0.0.1", a.port) is True
+        before = b.node.height
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{a.api_port}/api/mine",
+            data=json.dumps({"miner": generate_wallet().address}).encode(),
+            headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(request, timeout=60) as response:
+            assert json.load(response)["index"] > 0
+        # Распространение асинхронное: анонс уходит сразу, тело сосед качает сам.
+        assert _wait_until(lambda: b.node.height > before, timeout=10)
+        assert b.node.blockchain.last_block.hash == \
+            a.node.blockchain.last_block.hash
+    finally:
+        server.shutdown()
+
+
+def test_transaction_through_rest_reaches_the_network(pair):
+    """То же для транзакции: иначе она не дойдёт до майнеров и никогда не
+    попадёт в блок."""
+    from b_hydra.wallet import generate_wallet
+
+    a, b = pair
+    server = _serve(a.api_port, p2p=a)
+    try:
+        assert b.connect("127.0.0.1", a.port) is True
+        sender = generate_wallet()
+        # Через сеть, а не mine_pending: иначе у B нет этого блока, и он честно
+        # отвергнет транзакцию, тратящую неизвестный ему выход.
+        a.mine(sender.address)
+        assert _wait_until(lambda: b.node.height == a.node.height, timeout=10)
+        tx = a.node.create_transaction(sender, generate_wallet().address, 1, 0.1)
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{a.api_port}/api/transaction",
+            data=json.dumps(tx.to_dict()).encode(),
+            headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(request, timeout=30) as response:
+            assert json.load(response)["accepted"] is True
+        assert _wait_until(lambda: b.node.mempool.get(tx.txid) is not None,
+                           timeout=10)
+    finally:
+        server.shutdown()
+
+
 # --- Разбор seed-адресов ------------------------------------------------------
 def test_parse_seeds_keeps_only_valid_pairs():
     assert parse_seeds(["10.0.0.1:5000", "", "мусор", "host:порт",
@@ -386,6 +442,101 @@ def test_wallet_discovers_two_real_nodes(tmp_path, pair):
         assert f"http://127.0.0.1:{b.api_port}" in result["nodes"]
     finally:
         server.shutdown()
+
+
+# --- Настоящий кошелёк в настоящем браузере ----------------------------------
+def _browser_path():
+    for candidate in ("/opt/pw-browsers/chromium-1194/chrome-linux/chrome",
+                      "/opt/pw-browsers/chromium/chrome-linux/chrome"):
+        if os.path.exists(candidate):
+            return candidate
+    return None
+
+
+def _launch_node(tmp_path, name, api_port, p2p_port, seed=None):
+    """Поднимает настоящий `python -m b_hydra.api --p2p` отдельным процессом.
+
+    Именно процессом, а не сервером в этом же: `BHydraAPI` хранит узел в
+    АТРИБУТЕ КЛАССА, поэтому два сервера в одном процессе — это один и тот же
+    узел, и «сеть из двух» оказалась бы подделкой. Заодно проверяется тот самый
+    способ запуска, который описан в README.
+    """
+    state = tmp_path / f"{name}.json"
+    # Готовая цепочка вместо генезиса на лету: майнить его на каждый запуск —
+    # это секунды PoW, а проверяем мы не PoW.
+    BHydraNode(difficulty=1).save(str(state))
+    command = [os.sys.executable, "-u", "-m", "b_hydra.api",
+               "--host", "0.0.0.0", "--port", str(api_port),
+               "--p2p", "--p2p-port", str(p2p_port), "--no-discovery",
+               "--file", str(state),
+               "--peers-file", str(tmp_path / f"{name}-peers.json")]
+    if seed:
+        command += ["--seed", seed]
+    environment = dict(os.environ, BHYDRA_PURE_SHA="0", PYTHONPATH=ROOT)
+    process = subprocess.Popen(command, cwd=ROOT, env=environment,
+                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                               text=True)
+    ready = _wait_until(lambda: _alive(api_port), timeout=30)
+    if not ready:
+        process.kill()
+        raise AssertionError(f"узел {name} не поднялся: {process.stdout.read()}")
+    return process
+
+
+def _alive(port):
+    try:
+        _get(f"http://127.0.0.1:{port}/api/info")
+        return True
+    except (OSError, urllib.error.URLError, ValueError):
+        return False
+
+
+@pytest.mark.skipif(_browser_path() is None, reason="нет браузера для playwright")
+def test_phone_wallet_finds_the_whole_network_from_one_address(tmp_path):
+    """То, что произойдёт на телефоне: вошли по одному адресу — видим сеть.
+
+    Внутри APK — Chromium (`WebView`), поэтому проверка в Chromium с эмуляцией
+    телефона показывает ровно то же поведение. Не проверяет она одного: что
+    Android действительно поставит и запустит APK — для этого нужен телефон.
+    """
+    playwright = pytest.importorskip("playwright.sync_api",
+                                     reason="playwright не установлен")
+    ports = [_free_port() for _ in range(4)]
+    first = _launch_node(tmp_path, "a", ports[0], ports[1])
+    second = _launch_node(tmp_path, "b", ports[2], ports[3],
+                          seed=f"127.0.0.1:{ports[1]}")
+    try:
+        # Второй вошёл через seed — теперь первый знает, где у него кошелёк.
+        assert _wait_until(
+            lambda: len(_get(f"http://127.0.0.1:{ports[0]}/api/nodes")["nodes"]) == 2,
+            timeout=20)
+
+        with playwright.sync_playwright() as pw:
+            browser = pw.chromium.launch(executable_path=_browser_path())
+            context = browser.new_context(**pw.devices["Pixel 5"])
+            page = context.new_page()
+            errors = []
+            page.on("pageerror", lambda event: errors.append(str(event)))
+            # Телефон знает ОДИН адрес — тот, что открыли.
+            page.goto(f"http://127.0.0.1:{ports[0]}/wallet",
+                      wait_until="networkidle")
+            assert errors == []
+
+            report = page.evaluate("async () => await syncNetwork()")
+            known = page.evaluate("() => NET.nodes")
+            # Второй узел кошелёк нашёл сам, руками его никто не вписывал.
+            assert any(f":{ports[2]}" in url for url in known), known
+            # Два УЗЛА, хотя адресов больше: первый известен и как 127.0.0.1,
+            # и по адресу в сети — это один и тот же узел.
+            assert report["reachable"] == 2
+            assert len(known) > 2
+            # И он виден на экране, а не только в памяти.
+            assert str(ports[2]) in page.inner_text("#nodeList")
+            browser.close()
+    finally:
+        for process in (first, second):
+            process.kill()
+            process.wait(timeout=10)
 
 
 @pytest.mark.skipif(NODE is None, reason="нет node")

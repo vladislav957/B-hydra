@@ -47,6 +47,7 @@ api.py — REST API узла B-hydra (для мобильных кошелько
 import json
 import os
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, unquote
 
@@ -101,6 +102,22 @@ class BHydraAPI(BaseHTTPRequestHandler):
     def _client_is_local(self) -> bool:
         host = (self.client_address or ("",))[0]
         return host in ("127.0.0.1", "::1", "::ffff:127.0.0.1", "localhost")
+
+    # --- Мост в сеть ------------------------------------------------------
+    # Узел в сети обязан РАССЫЛАТЬ то, что сделал сам. Раньше здесь звался
+    # `node.mine_pending`/`node.add_transaction` напрямую, минуя P2P: блок,
+    # добытый через веб-кошелёк или обозреватель, оставался только у этого
+    # узла, а транзакция не доходила до майнеров. Со стороны это выглядело как
+    # «сеть не работает», хотя соединение было в порядке.
+    def _accept_tx(self, tx) -> bool:
+        if self.p2p is not None:
+            return self.p2p.submit_transaction(tx)      # + анонс соседям
+        return self.node.add_transaction(tx)
+
+    def _mine(self, miner, message=None, wallet=None):
+        if self.p2p is not None:
+            return self.p2p.mine(miner, message=message, wallet=wallet)
+        return self.node.mine_pending(miner, message=message, wallet=wallet)
 
     def _keys_allowed(self) -> bool:
         """Можно ли на этом соединении принимать приватный ключ.
@@ -462,7 +479,7 @@ class BHydraAPI(BaseHTTPRequestHandler):
             if parts == ["api", "transaction"]:
                 tx = Transaction.from_dict(data)
                 with self.lock:
-                    accepted = self.node.add_transaction(tx)
+                    accepted = self._accept_tx(tx)
                     if accepted:
                         self._save()
                 self._send(200 if accepted else 400,
@@ -534,7 +551,7 @@ class BHydraAPI(BaseHTTPRequestHandler):
                     if tx is None:
                         self._send(400, {"error": "не удалось собрать транзакцию из UTXO"})
                         return
-                    accepted = self.node.add_transaction(tx)
+                    accepted = self._accept_tx(tx)
                     if accepted:
                         self._save()
                 self._send(200 if accepted else 400, {
@@ -574,8 +591,7 @@ class BHydraAPI(BaseHTTPRequestHandler):
                 with self.lock:
                     try:
                         wallet = Wallet.from_private_hex(key) if key else None
-                        block = self.node.mine_pending(miner, message=note,
-                                                       wallet=wallet)
+                        block = self._mine(miner, message=note, wallet=wallet)
                     except ValueError as err:
                         self._send(400, {"error": str(err)})
                         return
@@ -732,6 +748,23 @@ def main():
         if not args.seed and not alive:
             print("  ⚠ соседей нет. В локальной сети они найдутся сами по "
                   "UDP-маяку; через интернет нужен --seed host:5000")
+
+        def _maintain(interval=15):
+            """Периодически: новые соседи + догнать цепочку.
+
+            Анонсы приносят только то, что произошло ПРИ НАС. Узел, который
+            стоял выключенным, без этого так и остался бы на своей высоте:
+            никто не станет пересылать ему старые блоки по собственной воле.
+            """
+            while True:
+                time.sleep(interval)
+                try:
+                    p2p.discover_peers()
+                    p2p.sync()
+                except Exception:      # сеть отвалилась — не роняем сервер
+                    pass
+
+        threading.Thread(target=_maintain, daemon=True).start()
     if not certfile:
         # Молча оставлять открытый канал нельзя: пользователь должен знать, что
         # приватный ключ по нему не примут (и почему).
