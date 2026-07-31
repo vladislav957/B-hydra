@@ -131,6 +131,39 @@ def test_project_manifest_encodes():
     assert len(encode(text)) > 200
 
 
+def test_attribute_ids_match_the_platform_table():
+    """Каждый ресурсный id — из ЧУЖОЙ таблицы, а не из нашей памяти.
+
+    Неверный id Android ошибкой не считает: он молча игнорирует атрибут.
+    Соседний тест (`test_resource_map_is_parallel_to_the_string_pool`) сверял
+    карту ресурсов с ATTRIBUTE_IDS, то есть таблицу саму с собой, — и потому
+    пропустил `usesCleartextTraffic` с чужим id. Приложение собиралось,
+    ставилось, запускалось и падало на первой странице:
+    ERR_CLEARTEXT_NOT_PERMITTED, потому что разрешение открытого HTTP до
+    системы не доходило.
+
+    Эталон — public.xml платформы, он идёт внутри pyaxmlparser. Ids
+    зафиксированы навсегда: по ним читают уже собранные приложения.
+    """
+    import xml.etree.ElementTree as ET
+
+    parser = pytest.importorskip("pyaxmlparser", reason="нет pyaxmlparser")
+    table = os.path.join(os.path.dirname(parser.__file__), "resources", "public.xml")
+    if not os.path.exists(table):
+        pytest.skip("в pyaxmlparser нет public.xml")
+
+    truth = {entry.get("name"): int(entry.get("id"), 16)
+             for entry in ET.parse(table).getroot().iter("public")
+             if entry.get("type") == "attr"}
+    # Контроль самого эталона: значения, известные независимо от него.
+    assert truth["name"] == 0x01010003 and truth["label"] == 0x01010001
+    assert truth["targetSdkVersion"] == 0x01010270
+
+    wrong = {name: (our, truth.get(name))
+             for name, our in ATTRIBUTE_IDS.items() if truth.get(name) != our}
+    assert not wrong, f"id не совпали с public.xml: {wrong}"
+
+
 # --- Обратный разбор независимым парсером -------------------------------------
 def test_independent_parser_reads_our_manifest():
     """Наш AXML читается ЧУЖИМ разборщиком — и читается верно.

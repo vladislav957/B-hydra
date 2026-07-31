@@ -57,6 +57,17 @@ NO_ENTRY = 0xFFFFFFFF
 
 # Ресурсные id атрибутов android:*. Значения — из public.xml платформы; они
 # зафиксированы навсегда, потому что по ним читают уже собранные приложения.
+#
+# ⚠️ Каждое значение обязано совпасть с ЧУЖОЙ таблицей — это проверяет
+# test_attribute_ids_match_the_platform_table. Своей памяти здесь верить
+# нельзя: неверный id Android не считает ошибкой, он молча игнорирует
+# атрибут. Так и вышло с usesCleartextTraffic (стояло 0x0101076E вместо
+# 0x010104EC): манифест разбирался, приложение ставилось и запускалось — и
+# падало на первой же странице с ERR_CLEARTEXT_NOT_PERMITTED, потому что
+# для targetSdk ≥ 28 открытый HTTP запрещён по умолчанию, а разрешение до
+# системы не доходило. Атрибута, которого нельзя сверить, здесь быть не
+# должно: лучше ошибка сборки «неизвестный атрибут», чем тихо потерянная
+# настройка.
 ATTRIBUTE_IDS = {
     "theme": 0x01010000,
     "label": 0x01010001,
@@ -79,12 +90,9 @@ ATTRIBUTE_IDS = {
     "required": 0x0101028E,
     "hardwareAccelerated": 0x010102D3,
     "supportsRtl": 0x010103AF,
-    "compileSdkVersion": 0x01010572,
-    "compileSdkVersionCodename": 0x01010573,
-    "usesCleartextTraffic": 0x0101076E,
-    "networkSecurityConfig": 0x0101081F,
+    "usesCleartextTraffic": 0x010104EC,
+    "networkSecurityConfig": 0x01010527,
     "roundIcon": 0x0101052C,
-    "appComponentFactory": 0x0101057A,
 }
 
 
