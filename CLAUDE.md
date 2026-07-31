@@ -12,7 +12,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 pip install pytest                            # единственная dev-зависимость
-python -m pytest -q                           # 492 теста — держать зелёными
+python -m pytest -q                           # 518 тестов — держать зелёными
 python -m pytest tests/test_node.py -q        # один файл
 python -m pytest tests/test_node.py -k mempool -q   # один тест по имени
 
@@ -22,6 +22,8 @@ python -m b_hydra.cli send <ключ> <адрес> 10 --fee 0.5
 python -m b_hydra.cli balance BHY<адрес>      # состояние CLI — bhydra_chain.json
 python -m b_hydra.api                         # веб-сервер: http://0.0.0.0:8000
 python -m b_hydra.api --tls                   # HTTPS (сертификат создаётся сам)
+python -m b_hydra.api --p2p --seed host:5000  # REST + УЗЕЛ СЕТИ в одном процессе
+                                              # (без --p2p узел живёт сам по себе)
 python bhydra_gui.py                          # десктоп-клиент (tkinter)
 python P2P.py --demo                          # демо-сеть из трёх узлов
 python P2P.py --port 5000 --seed host:port    # узел в сети (канал шифруется)
@@ -87,14 +89,14 @@ RIPEMD-160, base58, secp256k1, RFC 6979 и сериализация «как в 
 
 Корневые `*.py` (`cli.py`, `api.py`, `P2P.py`, `cache.py`, `IP.py`, …) — тонкие
 запускалки/шимы поверх пакета; править логику нужно в `b_hydra/`. Тесты —
-`tests/` (28 файлов, 492 теста, `pytest`). Полная карта слоёв — `ARCHITECTURE.md`,
+`tests/` (29 файлов, 518 тестов, `pytest`). Полная карта слоёв — `ARCHITECTURE.md`,
 схема REST-подписи — `API.md`.
 
 ## REST API (`b_hydra/api.py`)
 
-`GET /api/info | /api/chain | /api/block/<i> | /api/tx/<txid> | /api/proof/<txid>`
-`| /api/address/<a> | /api/addresses?limit=N (rich list) | /api/balance/<a>`
-`| /api/utxos/<a> | /api/mempool`
+`GET /api/info | /api/nodes | /api/chain | /api/block/<i> | /api/tx/<txid>`
+`| /api/proof/<txid> | /api/address/<a> | /api/addresses?limit=N (rich list)`
+`| /api/balance/<a> | /api/utxos/<a> | /api/mempool`
 `POST /api/mine {miner} | /api/transaction {подписанная tx} | /api/send`
 `{private_key,to,amount,fee} | /api/wallet {private_key}→адрес+баланс`.
 
@@ -406,6 +408,27 @@ TLS — можно, без TLS — только с локального адре
   ⚠️ `jarsigner -verify` печатает «Invalid certificate chain» — так и должно
   быть: подпись самоподписанная, центра у неё нет. Android проверяет не доверие,
   а неизменность подписи между обновлениями.
+- **Seed-подключение для КОШЕЛЬКОВ** (`/api/nodes`, `Network.discover`): seed-узлы
+  у нас были всегда, но только между УЗЛАМИ (`--seed`, `bootstrap`). Кошелёк
+  узлом не является и не станет: в браузере и WebView нет сырых TCP-сокетов,
+  нашим кадровым протоколом оттуда не заговорить. Поэтому узел объявляет свой
+  REST-адрес соседям (`api`/`api_tls` в `hello` и `peer_api` в ответе `peers`,
+  `remember_api`/`api_nodes`), а `GET /api/nodes` отдаёт список кошельку. Телефон
+  вводит ОДИН адрес и дальше переживает падение любого узла. Адрес хранится
+  рядом с адресами пиров (`peers_file`), поэтому переживает и перезапуск.
+  ⚠️ Хост берётся из АДРЕСА ПИРА, а не из тела сообщения, и `peer_api` слушается
+  только про тех, кто уже в таблице: иначе один узел уводил бы кошельки на любой
+  адрес — то же отравление, от которого закрыт список пиров.
+  ⚠️ Свой адрес НИКОГДА не отдаётся как `127.0.0.1` (подставляется `local_ip()`):
+  на телефоне loopback — это сам телефон, а в GUI такой хост стоит по умолчанию.
+  ⚠️ ОДИН узел под ДВУМЯ адресами (`localhost` и IP в сети) кошелёк считает
+  одним: `/api/info` отдаёт `node_id`, `survey()` помечает дубли и исключает их
+  из `order()`. Иначе `confirmAcross` врал бы в самую опасную сторону —
+  «подтвердили двое», когда узел один, а на числе НЕЗАВИСИМЫХ узлов держится SPV.
+  ⚠️ `api.py --p2p` поднимает REST и узел сети в ОДНОМ процессе поверх одной
+  цепочки. Без этого REST-узел отвечал бы про свою изолированную копию: телефон
+  видел бы одну цепочку, компьютеры — другую. В GUI то же самое — кнопка
+  «Кошелёк для телефона» на вкладке «Сеть».
 - **Кошелёк синхронизируется с СЕТЬЮ, а не с одним узлом** (`bhydra-net.js`):
   спрашивает `/api/info` у всех известных узлов параллельно и берёт цепочку с
   наибольшей `total_work` — ТО ЖЕ правило, что у `replace_chain`. По высоте
@@ -510,7 +533,7 @@ TLS — можно, без TLS — только с локального адре
   `mine_pending` / `_validate_block_transactions` / `_validate_chain`).
   Квант ломает лишь ECDSA — монеты на гибридном адресе недоступны. Обычные
   ECDSA-кошельки (`0x1f`) работают как раньше (обратная совместимость).
-- **Перед push — `python -m pytest -q` должно быть зелёным** (492/492; без скачанных android.jar/dx.jar 5 тестов сборки APK пропускаются).
+- **Перед push — `python -m pytest -q` должно быть зелёным** (518/518; без скачанных android.jar/dx.jar 5 тестов сборки APK пропускаются).
 - Коммиты по-русски, осмысленные; заканчиваются трейлерами
   `Co-Authored-By:` и `Claude-Session:`.
 - Не хардкодить идентификатор модели в коде/коммитах/артефактах.

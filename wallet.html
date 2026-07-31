@@ -730,7 +730,15 @@ const NET = new BHydraNet.Network({
 });
 
 async function syncNetwork(){
-  const report = await NET.survey();
+  let report = await NET.survey();
+  // Узел, до которого достучались, знает остальных — спросим и добавим их.
+  // Это «seed» кошелька: владелец вписывает ОДИН адрес, а дальше список живёт
+  // сам, и падение того самого узла больше не оставляет кошелёк слепым.
+  if(report.reachable > 0){
+    try{
+      if(await NET.discover()) report = await NET.survey();
+    }catch(e){ /* узел постарше — эндпоинта просто нет, не беда */ }
+  }
   LIVE = report.reachable > 0;
   setBadge(LIVE);
   renderNodes(report);

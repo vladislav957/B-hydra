@@ -89,6 +89,7 @@ class BHydraAPI(BaseHTTPRequestHandler):
     """Обработчик REST-запросов к узлу B-hydra."""
 
     node = None             # общий BHydraNode (устанавливается в make_server)
+    p2p = None              # P2PNode, если узел ещё и участник сети
     contracts = None        # общий ContractManager (эскроу и смарт-чеки)
     state_file = None
     contracts_file = None
@@ -367,6 +368,10 @@ class BHydraAPI(BaseHTTPRequestHandler):
                     "total_work": bc.total_work,
                     "genesis": bc.chain[0].hash,
                     "chain_id": CHAIN_ID,
+                    # Кто отвечает. Нужно кошельку, чтобы не счесть ОДИН узел,
+                    # доступный по двум адресам (localhost и IP в сети), за два
+                    # независимых: на числе независимых узлов держится SPV.
+                    "node_id": getattr(self.p2p, "_node_id", None),
                     "difficulty": bc.last_block.difficulty,
                     "block_work": bc.last_block.work,
                     "target_block_time_min": round(TARGET_BLOCK_TIME / 60, 1),
@@ -376,6 +381,28 @@ class BHydraAPI(BaseHTTPRequestHandler):
                     "mining_end_year": round(mining_end_year()),
                     "hash_algorithm": "SHA-512",
                     "model": "UTXO",
+                })
+            elif parts == ["api", "nodes"]:
+                # Список REST-адресов сети — «seed» для кошелька. Телефон
+                # вводит ОДИН адрес, отсюда узнаёт остальные и дальше переживает
+                # падение любого узла. Отпечаток сети рядом: клиент обязан
+                # убедиться, что список пришёл из ЕГО сети, иначе он подцепит
+                # чужую цепочку.
+                bc = self.node.blockchain
+                p2p = getattr(self, "p2p", None)
+                if p2p is not None:
+                    nodes = p2p.api_nodes()
+                    peers = len(p2p.peer_list())
+                else:
+                    nodes, peers = [], None
+                self._send(200, {
+                    "nodes": nodes,
+                    # Сколько соседей у САМОГО узла: ноль здесь означает, что
+                    # он в сети один, и список из одного адреса — не ошибка.
+                    "peers": peers,
+                    "p2p": None if p2p is None else f"{p2p.host}:{p2p.port}",
+                    "genesis": bc.chain[0].hash,
+                    "chain_id": CHAIN_ID,
                 })
             elif len(parts) == 3 and parts[:2] == ["api", "balance"]:
                 addr = parts[2]
@@ -587,14 +614,25 @@ def make_tls_context(certfile, keyfile):
 
 def make_server(host="0.0.0.0", port=8000, state_file=DEFAULT_STATE,
                 difficulty=DEFAULT_DIFFICULTY, certfile=None, keyfile=None,
-                allow_key_endpoints=None):
+                allow_key_endpoints=None, p2p=None, node=None):
     """Создаёт сервер с загруженным (или новым) узлом B-hydra.
 
     `certfile`/`keyfile` включают HTTPS. `allow_key_endpoints` разрешает
     эндпоинты, принимающие приватный ключ, и по умолчанию выводится сам:
     с TLS — да, без TLS — только для локальных клиентов.
+
+    `p2p` — уже созданный `P2PNode` поверх ТОГО ЖЕ узла: тогда REST-сервер не
+    просто отвечает про свою цепочку, а является участником сети, и кошелёк,
+    подключённый к нему, видит общую цепочку, а не изолированную копию.
+    `node` — готовый узел (так его отдаёт GUI, где цепочка уже в памяти).
     """
-    if state_file and os.path.exists(state_file):
+    if p2p is not None:
+        # Узел уже создан снаружи и живёт в сети — берём ЕГО цепочку, иначе
+        # REST отвечал бы про свою копию, а сеть жила бы отдельно.
+        node = p2p.node
+    elif node is not None:
+        pass                        # цепочку дали снаружи — ничего не грузим
+    elif state_file and os.path.exists(state_file):
         node = BHydraNode.load(state_file)
     else:
         node = BHydraNode(difficulty=difficulty)
@@ -607,6 +645,7 @@ def make_server(host="0.0.0.0", port=8000, state_file=DEFAULT_STATE,
     else:
         contracts = ContractManager(node)
     BHydraAPI.node = node
+    BHydraAPI.p2p = p2p
     BHydraAPI.contracts = contracts
     BHydraAPI.state_file = state_file
     BHydraAPI.contracts_file = contracts_file
@@ -633,6 +672,16 @@ def main():
                         help="файл приватного ключа сертификата (PEM)")
     parser.add_argument("--allow-insecure-keys", action="store_true",
                         help="принимать приватный ключ и без TLS (не надо так)")
+    parser.add_argument("--p2p", action="store_true",
+                        help="войти в сеть B-hydra (иначе узел живёт сам по себе)")
+    parser.add_argument("--p2p-port", type=int, default=5000,
+                        help="порт узла в сети (по умолчанию 5000)")
+    parser.add_argument("--seed", action="append", default=[],
+                        help="seed-узел host:port (можно повторять)")
+    parser.add_argument("--peers-file", default="bhydra_peers.json",
+                        help="где хранить соседей между запусками")
+    parser.add_argument("--no-discovery", action="store_true",
+                        help="не искать соседей UDP-маяком в локальной сети")
     args = parser.parse_args()
 
     certfile = keyfile = None
@@ -645,14 +694,44 @@ def main():
             print("    для публичного узла возьмите настоящий (Let's Encrypt).")
         certfile, keyfile = args.cert, args.key
 
+    p2p = None
+    if args.p2p:
+        from .p2p import P2PNode, local_ip, parse_seeds
+        from .node import BHydraNode
+
+        if args.file and os.path.exists(args.file):
+            chain_node = BHydraNode.load(args.file)
+        else:
+            chain_node = BHydraNode()
+        # Адрес для представления — тот, по которому нас достанут ДРУГИЕ
+        # машины. 127.0.0.1 виден только этому компьютеру, и узел с таким
+        # адресом в сети бесполезен: соседи не смогут подключиться обратно.
+        p2p = P2PNode(local_ip(), args.p2p_port, node=chain_node,
+                      peers_file=args.peers_file,
+                      seeds=parse_seeds(args.seed) + parse_seeds(
+                          os.environ.get("BHYDRA_SEEDS", "").split(",")),
+                      api_port=args.port, api_tls=bool(certfile))
+
     server = make_server(args.host, args.port, args.file, certfile=certfile,
                          keyfile=keyfile,
                          allow_key_endpoints=True if args.allow_insecure_keys
-                         else None)
+                         else None, p2p=p2p)
     scheme = "https" if certfile else "http"
     print(f"B-hydra обозреватель: {scheme}://{args.host}:{args.port}/")
     print(f"REST API           : {scheme}://{args.host}:{args.port}/api/info")
     print(f"Состояние цепочки  : {args.file}   (Ctrl+C — стоп)")
+    if p2p is not None:
+        p2p.start()
+        if not args.no_discovery:
+            p2p.start_discovery()
+        alive = p2p.bootstrap()
+        print(f"Узел в сети        : {p2p.host}:{p2p.port}  "
+              f"(соседей на старте: {alive})")
+        print(f"Кошелькам дайте    : {scheme}://{p2p.host}:{args.port}"
+              f"   — остальные узлы они узнают сами (/api/nodes)")
+        if not args.seed and not alive:
+            print("  ⚠ соседей нет. В локальной сети они найдутся сами по "
+                  "UDP-маяку; через интернет нужен --seed host:5000")
     if not certfile:
         # Молча оставлять открытый канал нельзя: пользователь должен знать, что
         # приватный ключ по нему не примут (и почему).
@@ -663,6 +742,9 @@ def main():
     except KeyboardInterrupt:
         print("\nОстановка сервера…")
         server.shutdown()
+    finally:
+        if p2p is not None:
+            p2p.stop()          # заодно сохранит соседей и их REST-адреса
 
 
 if __name__ == "__main__":

@@ -129,6 +129,7 @@
                   work: Number(info.total_work) || 0,
                   genesis: info.genesis || null,
                   chainId: info.chain_id || null,
+                  nodeId: info.node_id || null,
                   info};
         } catch (error) {
           return {url, ok: false, latency: Date.now() - started,
@@ -139,13 +140,23 @@
       // Своя сеть — та, что у большинства ответивших узлов. Иначе один
       // подставной узел с чужим генезисом переопределил бы «свою» сеть.
       if (!this.genesis) this.genesis = majorityGenesis(results);
+      // Один и тот же узел бывает доступен по двум адресам сразу — «localhost»
+      // и IP в сети. Считать их двумя независимыми нельзя: на числе НЕЗАВИСИМЫХ
+      // узлов держится SPV (confirmAcross), и такой счёт врал бы в самую
+      // опасную сторону — «подтвердили двое», когда узел один.
+      const seenNodes = new Set();
       for (const item of results) {
         item.foreign = !!(item.ok && this.genesis && item.genesis &&
                           item.genesis !== this.genesis);
+        item.duplicate = false;
+        if (item.ok && !item.foreign && item.nodeId) {
+          item.duplicate = seenNodes.has(item.nodeId);
+          seenNodes.add(item.nodeId);
+        }
         this.status.set(item.url, item);
       }
 
-      const usable = results.filter((r) => r.ok && !r.foreign);
+      const usable = results.filter((r) => r.ok && !r.foreign && !r.duplicate);
       usable.sort((a, b) => (b.work - a.work) || (b.height - a.height) ||
                             (a.latency - b.latency));
       this.chosen = usable.length ? usable[0].url : null;
@@ -157,10 +168,46 @@
               reachable: usable.length, total: this.nodes.length};
     }
 
+    /** Узнаёт остальные узлы сети у тех, кто уже известен («seed»).
+     *
+     *  Смысл ровно тот же, что у seed-узлов в самой сети: владелец вводит ОДИН
+     *  адрес, а список поддерживает себя сам. Без этого кошелёк на телефоне
+     *  навсегда оставался бы привязан к одному узлу — упал он, и кошелёк слеп,
+     *  хотя сеть работает.
+     *
+     *  Чужую сеть не берём: узел обязан назвать НАШ генезис. Иначе достаточно
+     *  подсунуть один адрес, чтобы затащить кошелёк в другую цепочку.
+     */
+    async discover(options) {
+      const limit = (options && options.limit) || 16;
+      const asked = (options && options.from) || this.order();
+      let added = 0;
+      for (const url of asked) {
+        let answer;
+        try {
+          answer = await this._fetch(url + "/api/nodes");
+        } catch (error) { continue; }          // не ответил — спросим следующий
+        if (!answer.ok) continue;
+        const body = answer.body || {};
+        // Старый узел эндпоинта не знает — это не ошибка, просто нечего взять.
+        if (!Array.isArray(body.nodes)) continue;
+        if (this.genesis && body.genesis && body.genesis !== this.genesis) continue;
+        for (const candidate of body.nodes.slice(0, limit)) {
+          if (this.nodes.length >= limit) break;
+          if (this.add(candidate)) added += 1;
+        }
+        if (added) break;      // хватит одного щедрого узла за раз
+      }
+      return added;
+    }
+
     /** Порядок обхода: сначала выбранный, потом остальные живые. */
     order() {
       const rest = this.nodes.filter((url) => url !== this.chosen &&
-        !(this.status.get(url) || {}).foreign);
+        !(this.status.get(url) || {}).foreign &&
+        // Второй адрес того же узла в обходе не нужен: он не добавляет ни
+        // отказоустойчивости, ни независимого подтверждения.
+        !(this.status.get(url) || {}).duplicate);
       return (this.chosen ? [this.chosen] : []).concat(rest);
     }
 

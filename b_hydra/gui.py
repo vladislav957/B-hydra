@@ -79,6 +79,7 @@ class BHydraApp(tk.Tk):
             self.contracts = ContractManager(self.node)
         self.wallet: Wallet | None = None
         self.p2p: P2PNode | None = None
+        self._api_server = None          # REST для телефона (кнопка на вкладке «Сеть»)
         self._mining = False             # PoW прямо сейчас идёт в фоне
         self._mining_on = False          # майнер включён (кнопкой)
         self._auto_after_id = None       # id таймера темпа сети (раз в секунду)
@@ -393,6 +394,20 @@ class BHydraApp(tk.Tk):
             side="left", fill="x", expand=True, padx=4)
         ttk.Button(seedrow, text="Сохранить", command=self._save_seeds).pack(
             side="left")
+
+        # Кошелёк на телефоне — HTTP-клиент, а не узел сети: в браузере и в
+        # WebView нет сырых сокетов, нашим P2P-протоколом оттуда не заговорить.
+        # Поэтому телефону нужен REST рядом с узлом; дальше он сам узнаёт
+        # остальные узлы через /api/nodes, и один адрес работает как seed.
+        wrow = ttk.Frame(tab)
+        wrow.pack(fill="x", pady=(0, 6))
+        ttk.Label(wrow, text="Кошелёк для телефона — порт:").pack(side="left")
+        self.api_port_var = tk.StringVar(value="8000")
+        ttk.Entry(wrow, textvariable=self.api_port_var, width=7).pack(
+            side="left", padx=4)
+        self.api_btn = ttk.Button(wrow, text="Включить",
+                                  command=self._toggle_api)
+        self.api_btn.pack(side="left", padx=4)
 
         self.net_log = tk.Text(tab, height=14, state="disabled")
         self.net_log.pack(fill="both", expand=True)
@@ -1549,15 +1564,8 @@ class BHydraApp(tk.Tk):
     @staticmethod
     def _local_ip() -> str:
         """IP компьютера в локальной сети (для связи с другими машинами)."""
-        import socket
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        try:
-            s.connect(("8.8.8.8", 80))      # коннект не шлёт пакетов, лишь даёт IP
-            return s.getsockname()[0]
-        except OSError:
-            return "127.0.0.1"
-        finally:
-            s.close()
+        from .p2p import local_ip
+        return local_ip()
 
     @staticmethod
     def _load_seeds() -> str:
@@ -1634,7 +1642,16 @@ class BHydraApp(tk.Tk):
             self._log(self.net_log, "Узел остановлен.")
         else:
             host, port = self.host_var.get(), int(self.port_var.get())
-            self.p2p = P2PNode(host, port, node=self.node)
+            # Если кошелёк для телефона уже поднят, узел сразу объявляет его
+            # адрес соседям — иначе телефоны узнали бы о нём только после
+            # перезапуска узла.
+            api_port = None
+            if self._api_server is not None:
+                try:
+                    api_port = int(self.api_port_var.get())
+                except ValueError:
+                    api_port = None
+            self.p2p = P2PNode(host, port, node=self.node, api_port=api_port)
             self.p2p.start()
             self.node_btn.config(text="Остановить узел")
             self._log(self.net_log, f"Узел запущен на {host}:{port}")
@@ -1656,6 +1673,46 @@ class BHydraApp(tk.Tk):
                 self._log(self.net_log,
                           "🛰 Авто-поиск в сети включён — узлы найдутся сами.")
             self._net_autosync()             # начать периодически подтягивать цепочку
+        self._refresh_status()
+
+    # --- Кошелёк для телефона (REST рядом с узлом) ------------------------
+    def _toggle_api(self) -> None:
+        """Поднимает/останавливает REST-сервер для телефонов и браузеров."""
+        if self._api_server is not None:
+            self._api_server.shutdown()
+            self._api_server = None
+            if self.p2p:
+                self.p2p.api_port = None       # больше не объявляем адрес сети
+            self.api_btn.config(text="Включить")
+            self._log(self.net_log, "Кошелёк для телефона выключен.")
+            return self._refresh_status()
+
+        try:
+            port = int(self.api_port_var.get())
+        except ValueError:
+            return messagebox.showwarning("Кошелёк", "Порт — это число.")
+
+        from .api import make_server
+
+        try:
+            # Слушаем на всех интерфейсах: иначе телефон не достучится.
+            server = make_server("0.0.0.0", port, state_file=None,
+                                 p2p=self.p2p, node=self.node)
+        except OSError as error:
+            return messagebox.showerror("Кошелёк", f"Порт занят? {error}")
+        self._api_server = server
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        if self.p2p:
+            # Теперь соседи узнают, где у нас кошелёк, и разнесут адрес дальше.
+            self.p2p.api_port = port
+        address = self.host_var.get()
+        if address in ("127.0.0.1", "localhost"):
+            address = self._local_ip()
+        self.api_btn.config(text="Выключить")
+        self._log(self.net_log, f"📱 Кошелёк для телефона: http://{address}:{port}/wallet")
+        self._log(self.net_log,
+                  "   Откройте этот адрес на телефоне (одна сеть Wi-Fi). "
+                  "Остальные узлы кошелёк найдёт сам.")
         self._refresh_status()
 
     def _net_autosync(self) -> None:

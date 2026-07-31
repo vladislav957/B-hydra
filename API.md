@@ -18,6 +18,7 @@ python api.py --port 8000        # http://<IP-компьютера>:8000
 | Метод | Путь | Описание |
 |------|------|----------|
 | GET  | `/api/info` | параметры сети, высота, награда за следующий блок |
+| GET  | `/api/nodes` | адреса ДРУГИХ узлов сети — «seed» для кошелька |
 | GET  | `/api/balance/<address>` | баланс адреса (сумма его UTXO) |
 | GET  | `/api/utxos/<address>` | непотраченные выходы адреса (для построения входов) |
 | GET  | `/api/chain` | вся цепочка блоков |
@@ -29,6 +30,7 @@ python api.py --port 8000        # http://<IP-компьютера>:8000
 
 ```bash
 curl http://IP:8000/api/info
+curl http://IP:8000/api/nodes      # → {"nodes": ["http://192.168.0.10:8000", …]}
 curl http://IP:8000/api/balance/BHY...
 curl http://IP:8000/api/utxos/BHY...
 curl -X POST http://IP:8000/api/mine -d '{"miner":"BHY..."}'
