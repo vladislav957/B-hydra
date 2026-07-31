@@ -126,6 +126,19 @@
   .hide{display:none !important;}
   .bar.install{background:rgba(46,230,192,.09); color:var(--teal);}
   .bar.offline{background:rgba(255,207,92,.10); color:var(--gold); border-color:rgba(255,207,92,.35);}
+  .bar.sync{background:rgba(139,108,255,.09); color:var(--muted);}
+  .bar.sync b{color:var(--text);}
+  .nodes{display:flex; flex-direction:column; gap:8px;}
+  .node{display:grid; grid-template-columns:1fr auto auto; gap:10px; align-items:center;
+    padding:9px 11px; border-radius:10px; background:rgba(10,18,32,.55);
+    border:1px solid var(--line); font-family:var(--mono); font-size:11.5px;}
+  .node .u{overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+  .node .st{white-space:nowrap;}
+  .node.best{border-color:var(--teal);}
+  .node.best .st{color:var(--teal);}
+  .node.dead .st{color:var(--coral);}
+  .node.foreign .st{color:var(--gold);}
+  .spv{font-size:10.5px; font-family:var(--mono); color:var(--teal);}
   .bar b{font-weight:750;}
   .bar button{margin-left:auto; white-space:nowrap;}
   .scan{position:fixed; inset:0; z-index:60; background:rgba(4,8,16,.96);
@@ -183,6 +196,9 @@
 <!-- Настоящий QR-код адреса, считается на устройстве (порт qrcode_gen.py).
      Нужен именно локальный: «принять деньги» обязано работать без сети. -->
 <script src="bhydra-qr.js"></script>
+<!-- Сеть: несколько узлов, выбор лучшего по работе цепочки, отказоустойчивость
+     и SPV-проверка включения транзакции в блок. -->
+<script src="bhydra-net.js"></script>
 </head>
 <body>
 <div class="wrap">
@@ -201,6 +217,21 @@
   </div>
   <div class="bar offline hide" id="offlineBar">
     <span>⚡ <b>Нет связи с узлом.</b> Адрес и QR работают, отправка — нет</span>
+  </div>
+  <div class="bar sync" id="syncBar">
+    <span id="syncTxt">Опрашиваю сеть…</span>
+    <button class="tiny ghost" onclick="toggleNodes()">Узлы</button>
+  </div>
+  <div class="panel hide" id="nodesPanel" style="margin-bottom:14px">
+    <h3><span class="ic">◇</span> Узлы сети</h3>
+    <div class="nodes" id="nodeList"></div>
+    <div class="row" style="grid-template-columns:1fr auto; gap:8px; margin-top:10px">
+      <input id="nodeUrl" class="mono" placeholder="192.168.0.10:8000"
+             autocomplete="off" autocapitalize="off" spellcheck="false">
+      <button class="ghost tiny" onclick="addNode()">Добавить</button>
+    </div>
+    <div class="warn">Кошелёк спрашивает все узлы и берёт цепочку с наибольшей
+      работой — то же правило, по которому узлы выбирают главную цепь.</div>
   </div>
 
   <!-- Карта кошелька -->
@@ -224,6 +255,7 @@
     <div class="actions">
       <button onclick="newWallet()">✨ Новый кошелёк</button>
       <button class="ghost" onclick="importWallet()">📥 Импорт ключа</button>
+      <button class="ghost" onclick="forgetWallet()">🗑 Забыть ключ</button>
       <button class="ghost" onclick="toggleKey()">🔑 Показать ключ</button>
       <button class="ghost" onclick="refresh()">⟳ Обновить</button>
     </div>
@@ -301,12 +333,32 @@ const rstr=(n,al)=>Array.from({length:n},()=>pick(al)).join('');
 let wallet={address:'',key:'',balance:0,utxos:0,history:[]};
 
 function newWallet(){
-  wallet={address:"BHY"+rstr(34,B58), key:rstr(64,HEX),
+  // Адрес ВЫВОДИТСЯ ИЗ КЛЮЧА. Раньше здесь генерировались две независимые
+  // случайные строки — адрес отдельно, ключ отдельно. Деньги, присланные на
+  // такой адрес, нельзя было потратить никогда: ключа от него ни у кого нет.
+  const key=randomKey();
+  let address=null;
+  if(window.BHydra){
+    try{ address=BHydra.walletFromPrivateKey(key).address; }catch(e){}
+  }
+  const demo=!address;              // скрипт подписи не загрузился — только показ
+  wallet={address: address || ("BHY"+rstr(34,B58)), key,
     balance: LIVE?0: +(50).toFixed(4), utxos: LIVE?0:1,
     history: LIVE?[]:[{dir:'in',amount:50,txid:rstr(64,HEX),block:1,label:'награда за блок'}]};
   $('keyBox').classList.remove('show');
-  render(); drawQR(); toast('Кошелёк создан');
+  if(!demo) saveWallet();           // ключ обязан пережить закрытие приложения
+  render(); drawQR();
+  toast(demo?'Кошелёк создан (демо: нет bhydra-sign.js)':'Кошелёк создан');
   if(LIVE) refresh();
+}
+
+/** Приватный ключ из криптостойкого генератора браузера.
+ *  Math.random() для ключа недопустим: он предсказуем, и предсказуемый ключ —
+ *  это чужие деньги. */
+function randomKey(){
+  const bytes=new Uint8Array(32);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, b=>b.toString(16).padStart(2,'0')).join('');
 }
 async function importWallet(){
   const k=prompt('Введите приватный ключ (64 hex) или адрес BHY…');
@@ -319,7 +371,8 @@ async function importWallet(){
     if(window.BHydra){
       try{
         wallet.address=BHydra.walletFromPrivateKey(wallet.key).address;
-        try{ LIVE=(await fetch('/api/info',{cache:'no-store'})).ok; }catch(e){ LIVE=false; }
+        saveWallet();
+        LIVE=(await NET.get('/api/info')).ok;
         setBadge(LIVE);
         render(); drawQR(); if(LIVE) refresh();
         toast('Ключ импортирован (адрес получен локально)'); return;
@@ -327,7 +380,7 @@ async function importWallet(){
     }
     // Скрипт подписи не загрузился — как раньше, адрес выводит узел.
     try{
-      const r=await fetch('/api/wallet',{method:'POST',headers:{'Content-Type':'application/json'},
+      const r=await netPost('/api/wallet',{method:'POST',headers:{'Content-Type':'application/json'},
         body:JSON.stringify({private_key:wallet.key})});
       const j=await r.json();
       if(r.ok && j.address){
@@ -367,6 +420,11 @@ function renderHist(){
       <div class="mid">
         <div class="t1">${h.dir==='in'?'Получено':'Отправлено'}${h.label?` · <span style="color:var(--muted)">${esc(h.label)}</span>`:''}</div>
         <div class="t2">${esc(short(h.txid,12))}${h.block!=null?` · блок #${esc(h.block)}`:' · в мемпуле'}</div>
+        ${h.block==null?'':h.spv===true
+          ? `<div class="spv">✔ включение доказано (Меркл)${h.conf?` · ${h.conf} подтв.`:''}</div>`
+          : h.spv===false
+            ? '<div class="spv" style="color:var(--coral)">✕ доказательство не сошлось</div>'
+            : '<div class="spv" style="color:var(--dim)">проверяю…</div>'}
       </div>
       <div class="amt">${h.dir==='in'?'+':'−'}${fmt(h.amount)}</div>
     </div>`).join('');
@@ -390,12 +448,12 @@ async function send(){
   if(hasKey && window.BHydra){
     m.innerHTML='<span class="go">Подпись на устройстве…</span>';
     try{
-      const u=await (await fetch('/api/utxos/'+encodeURIComponent(wallet.address),
+      const u=await (await netGet('/api/utxos/'+encodeURIComponent(wallet.address),
         {cache:'no-store'})).json();
       const utxos=(u.utxos||[]).map(x=>({txid:x.txid,index:x.index,amount:x.amount}));
       const signed=BHydra.buildSignedTransaction(
         {privateKey:wallet.key,to,amount:a,fee:f,utxos});
-      const r=await fetch('/api/transaction',{method:'POST',
+      const r=await netPost('/api/transaction',{method:'POST',
         headers:{'Content-Type':'application/json'},body:JSON.stringify(signed)});
       const j=await r.json();
       if(!r.ok||j.error||j.accepted===false){
@@ -416,7 +474,7 @@ async function send(){
   if(hasKey){
     m.innerHTML='<span class="go">Отправка через узел…</span>';
     try{
-      const r=await fetch('/api/send',{method:'POST',headers:{'Content-Type':'application/json'},
+      const r=await netPost('/api/send',{method:'POST',headers:{'Content-Type':'application/json'},
         body:JSON.stringify({private_key:wallet.key,to,amount:a,fee:f})});
       const j=await r.json();
       if(!r.ok||j.error){ m.innerHTML=`<span class="bad">${esc(j.error||'Ошибка отправки')}</span>`; return; }
@@ -440,20 +498,36 @@ async function send(){
 /* ── Живой баланс с узла (если запущен) ── */
 async function refresh(){
   if(!wallet.address) return;
-  try{
-    const r=await fetch('/api/address/'+encodeURIComponent(wallet.address),{cache:'no-store'});
-    if(!r.ok) throw 0;
-    const d=await r.json();
-    LIVE=true; setBadge(true);
-    wallet.balance=+Number(d.balance||0).toFixed(4);
-    wallet.history=(d.history||[]).map(h=>({
-      dir:h.received?'in':'out', amount:h.received||h.sent||0,
-      txid:h.txid, block:h.block_index,
-    }));
-    try{ const u=await (await fetch('/api/utxos/'+encodeURIComponent(wallet.address))).json();
-      wallet.utxos=(u.utxos||[]).length; }catch(e){}
-    render();
-  }catch(e){ LIVE=false; setBadge(false); }
+  const answer=await NET.get('/api/address/'+encodeURIComponent(wallet.address));
+  if(!answer.ok){ LIVE=false; setBadge(false); return; }
+  const d=answer.body||{};
+  LIVE=true; setBadge(true);
+  wallet.balance=+Number(d.balance||0).toFixed(4);
+  wallet.history=(d.history||[]).map(h=>({
+    dir:h.received?'in':'out', amount:h.received||h.sent||0,
+    txid:h.txid, block:h.block_index, spv:null,
+  }));
+  const utxos=await NET.get('/api/utxos/'+encodeURIComponent(wallet.address));
+  if(utxos.ok) wallet.utxos=((utxos.body||{}).utxos||[]).length;
+  render();
+  verifyHistory();          // подтверждения считаем отдельно, не задерживая показ
+}
+
+/* ── SPV: подтверждаем свои транзакции доказательством Меркла ───────────
+   Узел может соврать про баланс, но подделать путь Меркла к настоящему корню
+   блока — нет. Корень берём из ЗАГОЛОВКА блока, а не из самого доказательства:
+   иначе узел прислал бы согласованную пару, и проверка подтверждала бы себя. */
+async function verifyHistory(){
+  const height=(NET.status.get(NET.chosen)||{}).height||0;
+  for(const item of wallet.history){
+    if(item.block==null || item.spv!==null) continue;
+    try{
+      const result=await NET.confirm(item.txid);
+      item.spv=result.ok;
+      item.conf=result.ok?Math.max(0,height-item.block):0;
+    }catch(e){ item.spv=false; }
+  }
+  render();
 }
 function setBadge(live){
   const b=$('netBadge');
@@ -467,10 +541,21 @@ function setBadge(live){
 
 /* Проверка связи с узлом (для события online). */
 async function ping(){
-  try{ LIVE=(await fetch('/api/info',{cache:'no-store'})).ok; }
-  catch(e){ LIVE=false; }
-  setBadge(LIVE);
-  return LIVE;
+  const report=await syncNetwork();
+  return report.reachable > 0;
+}
+
+/* Совместимость со старыми участками кода: те ждут Response-подобный объект
+   (r.ok, r.json()). Оборачиваем ответ сети, чтобы не переписывать их целиком. */
+function wrap(answer){
+  return {ok: answer.ok, status: answer.status,
+          json: async () => answer.body || {}};
+}
+async function netGet(path){ return wrap(await NET.get(path)); }
+async function netPost(path, init){
+  let body={};
+  try{ body=JSON.parse((init||{}).body||'{}'); }catch(e){}
+  return wrap(await NET.post(path, body));
 }
 
 /* ── QR адреса ──────────────────────────────────────────────────────────
@@ -607,6 +692,82 @@ let tt;
 function toast(msg){ const e=$('toast'); e.textContent=msg; e.classList.add('show');
   clearTimeout(tt); tt=setTimeout(()=>e.classList.remove('show'),1800); }
 
+/* ── Сеть: несколько узлов ──────────────────────────────────────────────
+   Кошелёк ходил в ОДИН узел — тот, что отдал страницу. Узел выключили —
+   кошелёк ослеп; узел отстал — кошелёк молча показывал его версию мира. */
+const NET = new BHydraNet.Network({
+  nodes: [location.origin],
+  storage: (()=>{ try{ return window.localStorage; }catch(e){ return null; } })(),
+});
+
+async function syncNetwork(){
+  const report = await NET.survey();
+  LIVE = report.reachable > 0;
+  setBadge(LIVE);
+  renderNodes(report);
+  const bar=$('syncTxt');
+  if(!report.reachable){
+    bar.innerHTML='Сеть недоступна: <b>0</b> из '+report.total+' узлов';
+  } else {
+    const behind = report.behind ? `, отстают: ${report.behind}` : '';
+    bar.innerHTML=`Высота <b>${report.height}</b> · узлов на связи `+
+      `<b>${report.reachable}</b> из ${report.total}${behind}`;
+  }
+  return report;
+}
+
+function renderNodes(report){
+  const box=$('nodeList');
+  box.innerHTML=(report.nodes||[]).map(item=>{
+    const cls = !item.ok ? 'dead' : item.foreign ? 'foreign'
+              : (item.url===report.best ? 'best' : '');
+    const state = !item.ok ? 'недоступен'
+                : item.foreign ? 'чужая сеть'
+                : `высота ${item.height} · ${item.latency} мс`;
+    return `<div class="node ${cls}"><span class="u">${esc(item.url)}</span>`+
+      `<span class="st">${esc(state)}</span>`+
+      `<button class="ghost tiny" data-url="${esc(item.url)}">✕</button></div>`;
+  }).join('') || '<div class="empty">узлов нет</div>';
+  box.querySelectorAll('button[data-url]').forEach(b=>{
+    b.onclick=()=>{ NET.remove(b.dataset.url); syncNetwork(); };
+  });
+}
+
+function toggleNodes(){ $('nodesPanel').classList.toggle('hide'); }
+
+async function addNode(){
+  const value=$('nodeUrl').value.trim();
+  if(!value) return;
+  if(!NET.add(value)){ toast('Такой узел уже есть'); return; }
+  $('nodeUrl').value='';
+  await syncNetwork();
+  toast('Узел добавлен');
+}
+
+/* ── Сохранение кошелька на устройстве ──────────────────────────────────
+   Раньше ключ жил только в памяти страницы: закрыл приложение — потерял
+   деньги. Для кошелька на телефоне это не мелочь, а главное свойство.
+   ⚠️ Ключ лежит в localStorage открытым: у того, кто получил разблокированный
+   телефон, он есть. Шифрование под PIN — следующий шаг. */
+const KEY_STORE='bhydra.wallet';
+function saveWallet(){
+  try{ localStorage.setItem(KEY_STORE, JSON.stringify(
+    {key:wallet.key, address:wallet.address})); }catch(e){}
+}
+function loadWallet(){
+  try{
+    const saved=JSON.parse(localStorage.getItem(KEY_STORE)||'null');
+    if(saved && /^[0-9a-f]{64}$/i.test(saved.key||'')) return saved;
+  }catch(e){}
+  return null;
+}
+function forgetWallet(){
+  if(!confirm('Удалить ключ с этого устройства? Без копии деньги будут потеряны.')) return;
+  try{ localStorage.removeItem(KEY_STORE); }catch(e){}
+  newWallet();
+  toast('Ключ удалён с устройства');
+}
+
 /* ── Офлайн-индикатор ── */
 window.addEventListener('online', ()=>{ ping().then(live=>{ if(live) refresh(); }); });
 window.addEventListener('offline', ()=>setBadge(false));
@@ -627,10 +788,21 @@ if('serviceWorker' in navigator && location.protocol.startsWith('http')){
    отвечал на том же адресе. */
 (async function start(){
   aura();
-  await ping();
-  newWallet();
+  await syncNetwork();              // опрашиваем ВСЕ узлы до создания кошелька
+  const saved=loadWallet();
+  if(saved){
+    // Кошелёк уже есть на этом устройстве — адрес выводим из ключа локально.
+    wallet={address:saved.address, key:saved.key, balance:0, utxos:0, history:[]};
+    if(window.BHydra){
+      try{ wallet.address=BHydra.walletFromPrivateKey(saved.key).address; }catch(e){}
+    }
+    render(); drawQR();
+    if(LIVE) refresh();
+  } else {
+    newWallet();
+  }
   if(scanSupported()) $('scanBtn').classList.remove('hide');
-  setInterval(()=>{ if(LIVE) refresh(); }, 8000);
+  setInterval(()=>{ if(LIVE){ syncNetwork(); refresh(); } }, 8000);
 })();
 </script>
 </body>

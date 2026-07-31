@@ -56,7 +56,7 @@ if __name__ == "__main__" and __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     __package__ = "b_hydra"
 
-from .blockchain import MAX_SUPPLY
+from .blockchain import CHAIN_ID, MAX_SUPPLY
 from . import icon
 from .contract import ContractManager
 from .node import BHydraNode
@@ -80,6 +80,7 @@ _SIGN_JS = os.path.join(_ROOT, "bhydra-sign.js")
 # Кошелёк ставится на телефон как приложение (PWA): манифест, сервис-воркер и
 # иконки. Иконки не хранятся в репозитории — их рисует b_hydra/icon.py.
 _QR_JS = os.path.join(_ROOT, "bhydra-qr.js")
+_NET_JS = os.path.join(_ROOT, "bhydra-net.js")
 _MANIFEST = os.path.join(_ROOT, "manifest.webmanifest")
 _SERVICE_WORKER = os.path.join(_ROOT, "sw.js")
 
@@ -292,6 +293,13 @@ class BHydraAPI(BaseHTTPRequestHandler):
                 except OSError:
                     self._send_script(404, "// bhydra-qr.js not found")
                 return
+            if parts == ["bhydra-net.js"]:
+                try:
+                    with open(_NET_JS, encoding="utf-8") as fh:
+                        self._send_script(200, fh.read())
+                except OSError:
+                    self._send_script(404, "// bhydra-net.js not found")
+                return
             if parts == ["manifest.webmanifest"]:
                 self._send_file(_MANIFEST, "application/manifest+json")
                 return
@@ -352,6 +360,13 @@ class BHydraAPI(BaseHTTPRequestHandler):
                 self._send(200, {
                     "network": "B-hydra",
                     "height": len(bc.chain),
+                    # Суммарная работа и генезис — чтобы клиент мог выбрать
+                    # лучший узел ПО ТОМУ ЖЕ правилу, что и сами узлы
+                    # (replace_chain сравнивает работу, а не высоту), и не
+                    # принять за свою сеть чужую с другим генезисом.
+                    "total_work": bc.total_work,
+                    "genesis": bc.chain[0].hash,
+                    "chain_id": CHAIN_ID,
                     "difficulty": bc.last_block.difficulty,
                     "block_work": bc.last_block.work,
                     "target_block_time_min": round(TARGET_BLOCK_TIME / 60, 1),

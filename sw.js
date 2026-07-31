@@ -16,11 +16,12 @@
  */
 "use strict";
 
-const VERSION = "bhydra-v1";
+const VERSION = "bhydra-v2";
 const SHELL = [
   "/wallet",
   "/bhydra-sign.js",
   "/bhydra-qr.js",
+  "/bhydra-net.js",
   "/manifest.webmanifest",
   "/icon-192.png",
   "/icon-512.png",

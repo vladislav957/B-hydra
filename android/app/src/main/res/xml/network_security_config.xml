@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Узел B-hydra обычно стоит в домашней сети и отвечает по обычному HTTP.
+  Android с 9-й версии открытый HTTP запрещает, поэтому он разрешён явно —
+  и ТОЛЬКО для частных диапазонов. Разрешать открытый HTTP куда угодно
+  нельзя: по нему ходят балансы и адреса.
+
+  Для узла с настоящим доменом и сертификатом (python -m b_hydra.api --tls)
+  этот файл не нужен вовсе.
+-->
+<network-security-config>
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="true">10.0.2.2</domain>      <!-- эмулятор -->
+        <domain includeSubdomains="true">localhost</domain>
+        <domain includeSubdomains="true">127.0.0.1</domain>
+        <domain includeSubdomains="true">192.168.0.0</domain>
+        <domain includeSubdomains="true">192.168.1.0</domain>
+    </domain-config>
+</network-security-config>
