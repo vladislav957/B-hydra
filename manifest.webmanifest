@@ -1,0 +1,24 @@
+{
+  "id": "/wallet",
+  "name": "B-hydra Wallet",
+  "short_name": "B-hydra",
+  "description": "Кошелёк B-hydra: ключ и подпись остаются на телефоне",
+  "lang": "ru",
+  "dir": "ltr",
+  "start_url": "/wallet",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "theme_color": "#0a1222",
+  "background_color": "#060a14",
+  "categories": ["finance", "utilities"],
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ],
+  "shortcuts": [
+    { "name": "Принять", "url": "/wallet#receive" },
+    { "name": "Отправить", "url": "/wallet#send" }
+  ]
+}

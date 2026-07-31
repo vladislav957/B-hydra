@@ -57,6 +57,7 @@ if __name__ == "__main__" and __package__ in (None, ""):
     __package__ = "b_hydra"
 
 from .blockchain import MAX_SUPPLY
+from . import icon
 from .contract import ContractManager
 from .node import BHydraNode
 from .transaction import Transaction
@@ -76,6 +77,11 @@ _WALLET_HTML = os.path.join(_ROOT, "wallet.html")
 # Подпись транзакций в браузере: кошелёк грузит этот файл и подписывает сам,
 # поэтому приватный ключ не уходит на узел.
 _SIGN_JS = os.path.join(_ROOT, "bhydra-sign.js")
+# Кошелёк ставится на телефон как приложение (PWA): манифест, сервис-воркер и
+# иконки. Иконки не хранятся в репозитории — их рисует b_hydra/icon.py.
+_QR_JS = os.path.join(_ROOT, "bhydra-qr.js")
+_MANIFEST = os.path.join(_ROOT, "manifest.webmanifest")
+_SERVICE_WORKER = os.path.join(_ROOT, "sw.js")
 
 
 class BHydraAPI(BaseHTTPRequestHandler):
@@ -137,6 +143,24 @@ class BHydraAPI(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _send_file(self, path, content_type, no_store=False):
+        """Отдаёт файл с диска. 404, если его нет."""
+        try:
+            with open(path, "rb") as handle:
+                body = handle.read()
+        except OSError:
+            self._send(404, {"error": f"{os.path.basename(path)} не найден"})
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        if no_store:
+            # Сервис-воркер кэшировать нельзя: иначе обновление кошелька
+            # застрянет у пользователя навсегда.
+            self.send_header("Cache-Control", "no-cache")
         self.end_headers()
         self.wfile.write(body)
 
@@ -260,6 +284,30 @@ class BHydraAPI(BaseHTTPRequestHandler):
                         self._send_script(200, fh.read())
                 except OSError:
                     self._send_script(404, "// bhydra-sign.js not found")
+                return
+            if parts == ["bhydra-qr.js"]:
+                try:
+                    with open(_QR_JS, encoding="utf-8") as fh:
+                        self._send_script(200, fh.read())
+                except OSError:
+                    self._send_script(404, "// bhydra-qr.js not found")
+                return
+            if parts == ["manifest.webmanifest"]:
+                self._send_file(_MANIFEST, "application/manifest+json")
+                return
+            if parts == ["sw.js"]:
+                # Сервис-воркер обязан отдаваться из КОРНЯ: его область
+                # действия не может быть шире каталога, из которого он отдан,
+                # а кошелёк лежит на /wallet.
+                self._send_file(_SERVICE_WORKER,
+                                "application/javascript; charset=utf-8",
+                                no_store=True)
+                return
+            if len(parts) == 1 and parts[0] in ("icon-192.png", "icon-512.png"):
+                # Иконки не лежат в репозитории — они СЧИТАЮТСЯ (b_hydra/icon.py)
+                # и создаются при первом запросе рядом с остальными ресурсами.
+                icon.ensure_files(_ROOT)
+                self._send_file(os.path.join(_ROOT, parts[0]), "image/png")
                 return
             if parts == ["api", "block"] or (len(parts) == 3 and parts[:2] == ["api", "block"]):
                 index = int(parts[2]) if len(parts) == 3 else -1

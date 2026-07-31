@@ -2,8 +2,17 @@
 <html lang="ru">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>B-hydra Core — кошелёк</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>B-hydra Wallet</title>
+<!-- Кошелёк ставится на телефон как приложение: манифест + иконки + тема. -->
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png">
+<link rel="apple-touch-icon" href="/icon-192.png">
+<meta name="theme-color" content="#0a1222">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="B-hydra">
 <style>
   :root{
     --abyss:#060a14; --abyss2:#0a1222;
@@ -103,11 +112,38 @@
   .msg .ok{color:var(--venom);} .msg .bad{color:var(--coral);} .msg .go{color:var(--teal);}
 
   /* ── Приём / QR ── */
+  .row{display:grid; align-items:center;}
   .qr-box{display:flex; flex-direction:column; align-items:center; gap:14px;}
-  #qr{border-radius:14px; background:#040810; padding:12px; border:1px solid var(--line);
-    box-shadow:0 0 34px rgba(46,230,192,.18);}
+  #qr{border-radius:14px; background:#fff; padding:10px; border:1px solid var(--line);
+    box-shadow:0 0 34px rgba(46,230,192,.18); line-height:0; width:200px; height:200px;}
+  #qr svg{width:100%; height:100%; display:block; border-radius:6px;}
   .qr-addr{font-family:var(--mono); font-size:12px; word-break:break-all; text-align:center;
     color:var(--muted);}
+
+  /* ── Телефон: установка, офлайн, сканер ── */
+  .bar{display:flex; align-items:center; gap:10px; padding:10px 14px; border-radius:12px;
+    margin-bottom:14px; font-size:13px; border:1px solid var(--line2);}
+  .hide{display:none !important;}
+  .bar.install{background:rgba(46,230,192,.09); color:var(--teal);}
+  .bar.offline{background:rgba(255,207,92,.10); color:var(--gold); border-color:rgba(255,207,92,.35);}
+  .bar b{font-weight:750;}
+  .bar button{margin-left:auto; white-space:nowrap;}
+  .scan{position:fixed; inset:0; z-index:60; background:rgba(4,8,16,.96);
+    display:none; flex-direction:column; align-items:center; justify-content:center; gap:16px;
+    padding:calc(20px + env(safe-area-inset-top)) 20px calc(20px + env(safe-area-inset-bottom));}
+  .scan.show{display:flex;}
+  .scan video{width:min(88vw,420px); aspect-ratio:1; object-fit:cover; border-radius:18px;
+    border:1px solid var(--line2); background:#000;}
+  .scan .hint{font-family:var(--mono); font-size:12.5px; color:var(--muted); text-align:center;}
+
+  /* ── Узкий экран: крупные цели нажатия и безопасные отступы ── */
+  @media(max-width:560px){
+    .wrap{padding:calc(14px + env(safe-area-inset-top)) 14px
+          calc(40px + env(safe-area-inset-bottom));}
+    button{padding:12px 16px; font-size:14.5px;}      /* палец, а не курсор */
+    button.tiny{padding:9px 13px; font-size:12.5px;}
+    input,select{font-size:16px;}   /* < 16px iOS зумит страницу при фокусе */
+  }
 
   /* ── История ── */
   .hist{display:flex; flex-direction:column; gap:9px;}
@@ -144,6 +180,9 @@
      Путь относительный — работает и на /wallet, и при открытии файла с диска.
      Если скрипт не загрузился, кошелёк откатывается на подпись через узел. -->
 <script src="bhydra-sign.js"></script>
+<!-- Настоящий QR-код адреса, считается на устройстве (порт qrcode_gen.py).
+     Нужен именно локальный: «принять деньги» обязано работать без сети. -->
+<script src="bhydra-qr.js"></script>
 </head>
 <body>
 <div class="wrap">
@@ -154,6 +193,15 @@
     </div>
     <div class="net-badge" id="netBadge"><i></i><span id="netTxt">демо</span></div>
   </header>
+
+  <!-- Установка на телефон: браузер сам решает, когда предложить. -->
+  <div class="bar install hide" id="installBar">
+    <span>📱 <b>Поставить на телефон</b> — откроется как приложение, работает без сети</span>
+    <button class="tiny" onclick="installApp()">Установить</button>
+  </div>
+  <div class="bar offline hide" id="offlineBar">
+    <span>⚡ <b>Нет связи с узлом.</b> Адрес и QR работают, отправка — нет</span>
+  </div>
 
   <!-- Карта кошелька -->
   <section class="wallet">
@@ -187,7 +235,11 @@
     <div class="panel">
       <h3><span class="ic">↑</span> Отправить BHY</h3>
       <label for="to">Адрес получателя</label>
-      <input id="to" class="mono" placeholder="BHY…" autocomplete="off">
+      <div class="row" style="grid-template-columns:1fr auto; gap:8px; align-items:center">
+        <input id="to" class="mono" placeholder="BHY…" autocomplete="off"
+               inputmode="text" autocapitalize="off" autocorrect="off" spellcheck="false">
+        <button class="ghost tiny hide" id="scanBtn" onclick="startScan()">📷 Скан</button>
+      </div>
       <label for="amt">Сумма</label>
       <div class="amt-wrap">
         <input id="amt" type="number" min="0" step="0.0001" placeholder="0.0000">
@@ -209,9 +261,12 @@
     <div class="panel">
       <h3><span class="ic">↓</span> Принять</h3>
       <div class="qr-box">
-        <canvas id="qr" width="180" height="180"></canvas>
+        <div id="qr"></div>
         <div class="qr-addr" id="qrAddr">—</div>
-        <button class="ghost tiny" onclick="copyAddr()">Скопировать адрес</button>
+        <div class="row" style="grid-template-columns:1fr 1fr; gap:8px; width:100%">
+          <button class="ghost tiny" onclick="copyAddr()">Скопировать</button>
+          <button class="ghost tiny" onclick="shareAddr()">Поделиться</button>
+        </div>
       </div>
     </div>
   </div>
@@ -220,6 +275,13 @@
     <h3><span class="ic">≋</span> История операций</h3>
     <div class="hist" id="hist"></div>
   </div>
+</div>
+<!-- Сканер QR: камера + встроенный в Android Chrome BarcodeDetector.
+     Своего декодера здесь нет — на телефоне он уже есть в браузере. -->
+<div class="scan" id="scanBox">
+  <video id="scanVideo" playsinline muted></video>
+  <div class="hint" id="scanHint">Наведите на QR-код адреса</div>
+  <button class="ghost" onclick="stopScan()">Отмена</button>
 </div>
 <div class="toast" id="toast"></div>
 
@@ -397,29 +459,122 @@ function setBadge(live){
   const b=$('netBadge');
   b.classList.toggle('live',live);
   $('netTxt').textContent=live?'узел онлайн':'демо';
+  // Полоса «нет связи» следует за тем же признаком: два независимых
+  // индикатора состояния рано или поздно разъехались бы.
+  const bar=$('offlineBar');
+  if(bar) bar.classList.toggle('hide', !!live);
 }
 
-/* ── QR адреса (лёгкий детерминированный код, для наглядности) ── */
+/* Проверка связи с узлом (для события online). */
+async function ping(){
+  try{ LIVE=(await fetch('/api/info',{cache:'no-store'})).ok; }
+  catch(e){ LIVE=false; }
+  setBadge(LIVE);
+  return LIVE;
+}
+
+/* ── QR адреса ──────────────────────────────────────────────────────────
+   Раньше здесь рисовался ПОХОЖИЙ НА QR узор из псевдослучайных модулей: он
+   выглядел как код, но не сканировался ничем. Это хуже, чем ничего — человек
+   наводит камеру и не понимает, почему не работает. Теперь настоящий QR,
+   считается на устройстве (bhydra-qr.js, порт qrcode_gen.py модуль в модуль). */
 function drawQR(){
-  const c=$('qr'), x=c.getContext('2d'), N=25, S=c.width, cell=Math.floor((S-24)/N), off=(S-cell*N)/2;
-  x.clearRect(0,0,S,S);
-  const s=wallet.address||'BHY';
-  // детерминированная матрица из хеша строки
-  let seed=0; for(let i=0;i<s.length;i++) seed=(seed*131+s.charCodeAt(i))>>>0;
-  const rnd=()=>{seed=(seed*1103515245+12345)>>>0; return (seed>>>16)/65536;};
-  for(let i=0;i<N;i++)for(let j=0;j<N;j++){
-    const finder=(i<7&&j<7)||(i<7&&j>=N-7)||(i>=N-7&&j<7);
-    let on = finder ? ((i===0||i===6||j===0||j===6||(i>=2&&i<=4&&j>=2&&j<=4)) ) : rnd()>.55;
-    if(finder){ // рамки-искатели как у QR
-      const bi=i>=N-7?i-(N-7):i, bj=j>=N-7?j-(N-7):j;
-      on=(bi===0||bi===6||bj===0||bj===6||(bi>=2&&bi<=4&&bj>=2&&bj<=4));
-    }
-    if(on){
-      const t=(i+j)/(2*N);
-      x.fillStyle=`rgb(${46+t*140},${230-t*40},${192+t*30})`;
-      x.fillRect(off+j*cell, off+i*cell, cell-1, cell-1);
-    }
+  const box=$('qr'), address=wallet.address||'';
+  if(!box) return;
+  if(!address || typeof BHydraQR==='undefined'){ box.innerHTML=''; return; }
+  try{
+    box.innerHTML=BHydraQR.toSvg(BHydraQR.matrix(address),
+                                 {size:200, quiet:2, dark:'#060a14', light:'#ffffff'});
+  }catch(e){ box.innerHTML=''; }
+}
+
+/* ── Поделиться адресом (системное меню телефона) ── */
+async function shareAddr(){
+  const address=wallet.address||'';
+  if(!address) return;
+  if(navigator.share){
+    try{ await navigator.share({title:'Мой адрес B-hydra', text:address}); return; }
+    catch(e){ if(e && e.name==='AbortError') return; }
   }
+  copyAddr();
+}
+
+/* ── Установка на телефон ──────────────────────────────────────────────
+   Браузер сам решает, когда предложить установку, и даёт событие только если
+   всё на месте: манифест, иконки, сервис-воркер и защищённый источник. */
+let installPrompt=null;
+window.addEventListener('beforeinstallprompt',(e)=>{
+  e.preventDefault();
+  installPrompt=e;
+  $('installBar').classList.remove('hide');
+});
+window.addEventListener('appinstalled',()=>{
+  installPrompt=null;
+  $('installBar').classList.add('hide');
+  toast('Кошелёк установлен');
+});
+async function installApp(){
+  if(!installPrompt){ toast('Меню браузера → «Добавить на главный экран»'); return; }
+  installPrompt.prompt();
+  await installPrompt.userChoice;
+  installPrompt=null;
+  $('installBar').classList.add('hide');
+}
+
+/* ── Сканирование QR камерой ───────────────────────────────────────────
+   Декодер не пишем: в Android Chrome он уже есть (BarcodeDetector). Где его
+   нет — честно говорим об этом, а не показываем неработающую кнопку. */
+let scanStream=null, scanTimer=null;
+function scanSupported(){ return 'BarcodeDetector' in window &&
+  navigator.mediaDevices && navigator.mediaDevices.getUserMedia; }
+
+async function startScan(){
+  if(!scanSupported()){ toast('Сканер недоступен в этом браузере'); return; }
+  const video=$('scanVideo');
+  try{
+    scanStream=await navigator.mediaDevices.getUserMedia(
+      {video:{facingMode:'environment'}, audio:false});
+  }catch(e){ toast('Нет доступа к камере'); return; }
+  video.srcObject=scanStream;
+  await video.play().catch(()=>{});
+  $('scanBox').classList.add('show');
+  const detector=new BarcodeDetector({formats:['qr_code']});
+  scanTimer=setInterval(async()=>{
+    try{
+      const found=await detector.detect(video);
+      if(found && found.length){ applyScan(found[0].rawValue||''); }
+    }catch(e){ /* кадр не готов — просто ждём следующий */ }
+  },300);
+}
+
+function stopScan(){
+  clearInterval(scanTimer); scanTimer=null;
+  if(scanStream){ scanStream.getTracks().forEach(t=>t.stop()); scanStream=null; }
+  $('scanBox').classList.remove('show');
+}
+
+/* Из QR может прийти как голый адрес, так и ссылка bhydra:<адрес>?amount=… */
+function applyScan(raw){
+  const parsed=parsePaymentUri(raw);
+  if(!parsed.address){ $('scanHint').textContent='Это не адрес B-hydra'; return; }
+  stopScan();
+  $('to').value=parsed.address;
+  if(parsed.amount) $('amt').value=parsed.amount;
+  updTotal();
+  toast('Адрес распознан');
+}
+
+function parsePaymentUri(raw){
+  const text=String(raw||'').trim();
+  const body=text.replace(/^bhydra:/i,'');
+  const [addr,query]=body.split('?');
+  const address=/^BHY[1-9A-HJ-NP-Za-km-z]{20,60}$/.test(addr) ? addr : '';
+  let amount='';
+  if(query){
+    const found=new URLSearchParams(query).get('amount');
+    if(found && isFinite(Number(found))) amount=found;
+  }
+  return {address, amount};
 }
 
 /* ── Живая аура за балансом ── */
@@ -452,10 +607,31 @@ let tt;
 function toast(msg){ const e=$('toast'); e.textContent=msg; e.classList.add('show');
   clearTimeout(tt); tt=setTimeout(()=>e.classList.remove('show'),1800); }
 
-/* ── Старт ── */
-aura();
-newWallet();
-setInterval(()=>{ if(LIVE) refresh(); }, 8000);
+/* ── Офлайн-индикатор ── */
+window.addEventListener('online', ()=>{ ping().then(live=>{ if(live) refresh(); }); });
+window.addEventListener('offline', ()=>setBadge(false));
+
+/* ── Сервис-воркер: кошелёк открывается без сети ──────────────────────
+   Регистрируем только с сервера (file:// его не поддерживает) и не мешаем
+   работе, если браузер откажет: приложение и без воркера рабочее. */
+if('serviceWorker' in navigator && location.protocol.startsWith('http')){
+  window.addEventListener('load',()=>{
+    navigator.serviceWorker.register('/sw.js').catch(()=>{});
+  });
+}
+
+/* ── Старт ──────────────────────────────────────────────────────────────
+   Связь с узлом проверяется ДО создания кошелька. Раньше LIVE включался
+   только внутри refresh(), а refresh() вызывался только «если LIVE» — круг
+   замыкался, и страница навсегда оставалась в демо-режиме, даже когда узел
+   отвечал на том же адресе. */
+(async function start(){
+  aura();
+  await ping();
+  newWallet();
+  if(scanSupported()) $('scanBtn').classList.remove('hide');
+  setInterval(()=>{ if(LIVE) refresh(); }, 8000);
+})();
 </script>
 </body>
 </html>
