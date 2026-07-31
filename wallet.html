@@ -127,6 +127,8 @@
   .bar.install{background:rgba(46,230,192,.09); color:var(--teal);}
   .bar.offline{background:rgba(255,207,92,.10); color:var(--gold); border-color:rgba(255,207,92,.35);}
   .bar.sync{background:rgba(139,108,255,.09); color:var(--muted);}
+  .bar.warn-bar{background:rgba(255,207,92,.10); color:var(--gold);
+    border-color:rgba(255,207,92,.35);}
   .bar.sync b{color:var(--text);}
   .nodes{display:flex; flex-direction:column; gap:8px;}
   .node{display:grid; grid-template-columns:1fr auto auto; gap:10px; align-items:center;
@@ -212,8 +214,14 @@
 
   <!-- Установка на телефон: браузер сам решает, когда предложить. -->
   <div class="bar install hide" id="installBar">
-    <span>📱 <b>Поставить на телефон</b> — откроется как приложение, работает без сети</span>
-    <button class="tiny" onclick="installApp()">Установить</button>
+    <span id="installTxt">📱 <b>Поставить на телефон</b> — откроется как
+      приложение, работает без сети</span>
+    <button class="tiny" id="installBtn" onclick="installApp()">Установить</button>
+  </div>
+  <div class="bar warn-bar hide" id="backupBar">
+    <span>🔑 <b>Сохраните ключ.</b> Он есть только на этом устройстве —
+      потеряете его, потеряете деньги</span>
+    <button class="tiny ghost" onclick="exportKey()">Сохранить</button>
   </div>
   <div class="bar offline hide" id="offlineBar">
     <span>⚡ <b>Нет связи с узлом.</b> Адрес и QR работают, отправка — нет</span>
@@ -255,7 +263,11 @@
     <div class="actions">
       <button onclick="newWallet()">✨ Новый кошелёк</button>
       <button class="ghost" onclick="importWallet()">📥 Импорт ключа</button>
+      <button class="ghost" onclick="exportKey()">💾 Сохранить ключ</button>
+      <button class="ghost" onclick="$('backupFile').click()">📂 Восстановить</button>
       <button class="ghost" onclick="forgetWallet()">🗑 Забыть ключ</button>
+      <input type="file" id="backupFile" accept="application/json,.json"
+             class="hide" onchange="if(this.files[0]) importBackup(this.files[0])">
       <button class="ghost" onclick="toggleKey()">🔑 Показать ключ</button>
       <button class="ghost" onclick="refresh()">⟳ Обновить</button>
     </div>
@@ -347,7 +359,7 @@ function newWallet(){
     history: LIVE?[]:[{dir:'in',amount:50,txid:rstr(64,HEX),block:1,label:'награда за блок'}]};
   $('keyBox').classList.remove('show');
   if(!demo) saveWallet();           // ключ обязан пережить закрытие приложения
-  render(); drawQR();
+  render(); drawQR(); updateBackupBar();
   toast(demo?'Кошелёк создан (демо: нет bhydra-sign.js)':'Кошелёк создан');
   if(LIVE) refresh();
 }
@@ -588,6 +600,22 @@ async function shareAddr(){
    Браузер сам решает, когда предложить установку, и даёт событие только если
    всё на месте: манифест, иконки, сервис-воркер и защищённый источник. */
 let installPrompt=null;
+
+/** iPhone/iPad: Safari НЕ шлёт beforeinstallprompt и не даёт установить
+ *  приложение кнопкой — только вручную через «Поделиться». Без отдельной
+ *  подсказки владелец iPhone не видел вообще ничего: полоса установки
+ *  показывается по событию, которого на iOS не бывает. */
+function isIOS(){
+  const ua=navigator.userAgent||'';
+  // iPad с iPadOS 13+ представляется «Macintosh», отличаем по тач-экрану.
+  return /iPad|iPhone|iPod/.test(ua) ||
+         (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1);
+}
+function isStandalone(){
+  return window.matchMedia('(display-mode: standalone)').matches ||
+         navigator.standalone === true;
+}
+
 window.addEventListener('beforeinstallprompt',(e)=>{
   e.preventDefault();
   installPrompt=e;
@@ -599,6 +627,7 @@ window.addEventListener('appinstalled',()=>{
   toast('Кошелёк установлен');
 });
 async function installApp(){
+  if(isIOS()){ toast('Поделиться → «На экран «Домой»»'); return; }
   if(!installPrompt){ toast('Меню браузера → «Добавить на главный экран»'); return; }
   installPrompt.prompt();
   await installPrompt.userChoice;
@@ -768,6 +797,66 @@ function forgetWallet(){
   toast('Ключ удалён с устройства');
 }
 
+/* ── Резервная копия ключа ─────────────────────────────────────────────
+   На iPhone это не роскошь, а необходимость: Safari чистит хранилище сайта
+   после ~7 дней без визитов (ITP). У приложения, добавленного на главный
+   экран, срок не действует — но пока кошелёк открыт «просто вкладкой», ключ
+   может исчезнуть сам, и вместе с ним деньги. */
+function exportKey(){
+  if(!wallet.key){ toast('Кошелька ещё нет'); return; }
+  const payload=JSON.stringify({
+    network:'B-hydra', address:wallet.address, private_key:wallet.key,
+    saved:new Date().toISOString(),
+  }, null, 2);
+  const name=`bhydra-${(wallet.address||'wallet').slice(3,11)}.json`;
+  try{
+    const blob=new Blob([payload], {type:'application/json'});
+    const link=document.createElement('a');
+    link.href=URL.createObjectURL(blob);
+    link.download=name;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(()=>URL.revokeObjectURL(link.href), 4000);
+    toast('Файл с ключом сохранён');
+  }catch(e){
+    // На iOS скачивание из standalone-приложения может не сработать —
+    // тогда показываем ключ, чтобы его можно было переписать или скопировать.
+    showKey();
+    toast('Скопируйте ключ вручную');
+  }
+  markBackedUp();
+}
+
+const BACKUP_FLAG='bhydra.backed-up';
+function markBackedUp(){
+  try{ localStorage.setItem(BACKUP_FLAG, wallet.key.slice(0,16)); }catch(e){}
+  $('backupBar').classList.add('hide');
+}
+function needsBackup(){
+  if(!wallet.key) return false;
+  try{ return localStorage.getItem(BACKUP_FLAG) !== wallet.key.slice(0,16); }
+  catch(e){ return true; }
+}
+function updateBackupBar(){
+  $('backupBar').classList.toggle('hide', !needsBackup());
+}
+
+/* Восстановление из сохранённого файла. */
+async function importBackup(file){
+  try{
+    const data=JSON.parse(await file.text());
+    const key=String(data.private_key||'').trim();
+    if(!/^[0-9a-f]{64}$/i.test(key)) throw new Error('в файле нет ключа');
+    wallet.key=key.toLowerCase();
+    wallet.address=BHydra.walletFromPrivateKey(wallet.key).address;
+    saveWallet(); markBackedUp();
+    render(); drawQR();
+    if(LIVE) refresh();
+    toast('Кошелёк восстановлен');
+  }catch(e){ toast('Не похоже на копию ключа: '+e.message); }
+}
+
 /* ── Офлайн-индикатор ── */
 window.addEventListener('online', ()=>{ ping().then(live=>{ if(live) refresh(); }); });
 window.addEventListener('offline', ()=>setBadge(false));
@@ -802,6 +891,15 @@ if('serviceWorker' in navigator && location.protocol.startsWith('http')){
     newWallet();
   }
   if(scanSupported()) $('scanBtn').classList.remove('hide');
+  updateBackupBar();
+  // На iOS полосу установки показываем сами: события beforeinstallprompt
+  // там не бывает, и иначе владелец iPhone не узнает про установку вовсе.
+  if(isIOS() && !isStandalone()){
+    $('installTxt').innerHTML='📱 <b>Поставить на телефон:</b> «Поделиться» → '+
+      '«На экран «Домой»». Так кошелёк работает без сети и не теряет ключ';
+    $('installBtn').classList.add('hide');
+    $('installBar').classList.remove('hide');
+  }
   setInterval(()=>{ if(LIVE){ syncNetwork(); refresh(); } }, 8000);
 })();
 </script>

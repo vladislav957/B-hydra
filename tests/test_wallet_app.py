@@ -293,3 +293,61 @@ def test_wallet_runs_on_a_phone_screen(tmp_path):
             browser.close()
     finally:
         server.shutdown()
+
+
+# --- iPhone: то, чего в Safari нет ---------------------------------------------
+# Safari не шлёт beforeinstallprompt, поэтому полоса установки, завязанная на
+# это событие, на iPhone не показывалась НИКОГДА — владелец iPhone не узнавал
+# про установку вовсе.
+IOS_PLIST = os.path.join(ROOT, "ios", "BHydraWallet", "Info.plist")
+
+
+def test_wallet_detects_ios_and_shows_its_own_install_hint():
+    page = open(WALLET_HTML, encoding="utf-8").read()
+    assert "function isIOS" in page
+    # iPadOS 13+ представляется «Macintosh» — без проверки тач-экрана планшет
+    # считался бы настольным браузером.
+    assert "maxTouchPoints" in page
+    assert "На экран «Домой»" in page
+    assert "function isStandalone" in page
+
+
+def test_wallet_can_back_up_and_restore_the_key():
+    """Safari чистит хранилище сайта после ~7 дней без визитов (ITP).
+
+    Для кошелька это потеря денег, поэтому нужны и выгрузка ключа, и загрузка
+    обратно, и напоминание, пока копия не сделана.
+    """
+    page = open(WALLET_HTML, encoding="utf-8").read()
+    assert "function exportKey" in page and "function importBackup" in page
+    assert "function needsBackup" in page and "backupBar" in page
+    # Восстановление обязано выводить адрес ИЗ КЛЮЧА, а не брать из файла:
+    # иначе подменённый файл дал бы адрес, к которому нет ключа.
+    assert "BHydra.walletFromPrivateKey(wallet.key).address" in page
+
+
+def test_ios_plist_is_valid_and_has_what_ios_requires():
+    """Info.plist разбирается и содержит то, без чего приложение не работает."""
+    import plistlib
+
+    with open(IOS_PLIST, "rb") as handle:
+        plist = plistlib.load(handle)
+    assert plist["CFBundleIdentifier"] == "io.bhydra.wallet"
+    # Без описания камеры iOS не отказывает в доступе, а РОНЯЕТ приложение.
+    assert plist["NSCameraUsageDescription"]
+    # Узел в домашней сети отвечает по открытому HTTP, iOS его запрещает.
+    assert plist["NSAppTransportSecurity"]["NSAllowsLocalNetworking"] is True
+    schemes = plist["CFBundleURLTypes"][0]["CFBundleURLSchemes"]
+    assert "bhydra" in schemes
+
+
+def test_ios_sources_keep_the_crypto_in_the_page():
+    """В нативном коде не должно появиться своей подписи: это был бы четвёртый
+    независимый код для одного формата."""
+    folder = os.path.join(ROOT, "ios", "BHydraWallet")
+    swift = "\n".join(open(os.path.join(folder, name), encoding="utf-8").read()
+                      for name in os.listdir(folder) if name.endswith(".swift"))
+    for forbidden in ("secp256k1", "SHA512", "sha512", "privateKey", "signPayload"):
+        assert forbidden not in swift, forbidden
+    # Зато хранилище должно быть постоянным — в нём живёт ключ.
+    assert "websiteDataStore = .default()" in swift

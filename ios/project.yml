@@ -1,0 +1,26 @@
+# Описание проекта для XcodeGen (`brew install xcodegen && xcodegen`).
+# Так .xcodeproj не приходится держать в репозитории: он генерируется, а
+# сгенерированный файл — это тысячи строк с идентификаторами, которые
+# невозможно осмысленно читать в diff.
+name: BHydraWallet
+options:
+  bundleIdPrefix: io.bhydra
+  deploymentTarget:
+    iOS: "15.0"          # SwiftUI с .toolbar и NavigationView-стеком
+targets:
+  BHydraWallet:
+    type: application
+    platform: iOS
+    sources:
+      - path: BHydraWallet
+    info:
+      path: BHydraWallet/Info.plist
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.bhydra.wallet
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        # Подпись настраивается в Xcode: без учётной записи Apple собранное
+        # приложение всё равно не запустится (см. README.md).
+        CODE_SIGN_STYLE: Automatic
+        TARGETED_DEVICE_FAMILY: "1,2"
