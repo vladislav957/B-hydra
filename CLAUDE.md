@@ -12,7 +12,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 pip install pytest                            # единственная dev-зависимость
-python -m pytest -q                           # 471 тест — держать зелёными
+python -m pytest -q                           # 484 теста — держать зелёными
 python -m pytest tests/test_node.py -q        # один файл
 python -m pytest tests/test_node.py -k mempool -q   # один тест по имени
 
@@ -26,6 +26,7 @@ python bhydra_gui.py                          # десктоп-клиент (tki
 python P2P.py --demo                          # демо-сеть из трёх узлов
 python P2P.py --port 5000 --seed host:port    # узел в сети (канал шифруется)
 python -m b_hydra.secure                      # демо рукопожатия и кадров
+python -m b_hydra.apkbuild --out wallet.apk   # APK для Android без SDK (нужен JDK)
 
 g++ -O2 -std=c++17 -pthread -I cpp -o bhydra_bridge cpp/bhydra_bridge.cpp
 ./bhydra_bridge selftest                      # нативный транспорт: свои векторы
@@ -44,8 +45,8 @@ g++ -O2 -std=c++17 -pthread -I cpp -o bhydra_bridge cpp/bhydra_bridge.cpp
 (оболочка кэшируется, `/api/…` — НИКОГДА) + иконки из `icon.py`. Ставится на
 главный экран, открывается без сети, QR адреса считается на устройстве
 (`bhydra-qr.js`), сканирование — встроенным `BarcodeDetector`, где он есть.
-Оболочка для Android (`android/`, WebView без крипты) — НЕ собиралась здесь:
-нет Android SDK, см. `android/README.md`.
+**APK собирается БЕЗ Android SDK**: `python -m b_hydra.apkbuild`. Оболочка —
+`android/` (WebView, крипты внутри нет). Подробности — `android/README.md`.
 
 ## Архитектура (пакет `b_hydra/`)
 
@@ -66,6 +67,7 @@ g++ -O2 -std=c++17 -pthread -I cpp -o bhydra_bridge cpp/bhydra_bridge.cpp
 | `secure.py` | шифрование канала: эфемерный ECDH secp256k1, SHAKE-256-поток, HMAC, TOFU-закрепление ключа узла |
 | `certgen.py` | самоподписанный сертификат X.509 для HTTPS: ASN.1/DER, ключ P-256, подпись SHA-256 |
 | `icon.py` | иконка приложения: PNG (zlib+CRC32) рисуется по геометрии, в репозитории не хранится |
+| `axml.py`, `apkbuild.py` | двоичный AndroidManifest (AXML) с нуля и сборка APK БЕЗ Android SDK |
 | `api.py`, `cli.py`, `gui.py`, `mobile_client.py` | REST/HTTP, CLI, tkinter-GUI, моб. клиент |
 
 Не на Python три места, и все — вторые реализации существующих форматов, без
@@ -80,7 +82,7 @@ RIPEMD-160, base58, secp256k1, RFC 6979 и сериализация «как в 
 
 Корневые `*.py` (`cli.py`, `api.py`, `P2P.py`, `cache.py`, `IP.py`, …) — тонкие
 запускалки/шимы поверх пакета; править логику нужно в `b_hydra/`. Тесты —
-`tests/` (27 файлов, 471 тест, `pytest`). Полная карта слоёв — `ARCHITECTURE.md`,
+`tests/` (28 файлов, 484 теста, `pytest`). Полная карта слоёв — `ARCHITECTURE.md`,
 схема REST-подписи — `API.md`.
 
 ## REST API (`b_hydra/api.py`)
@@ -347,6 +349,27 @@ TLS — можно, без TLS — только с локального адре
   ⚠️ Установку предлагает БРАУЗЕР (`beforeinstallprompt`), и только если всё
   на месте: манифест, иконки, воркер и защищённый источник. На HTTP без
   localhost воркер не зарегистрируется — нужен `--tls`.
+- **APK собирается БЕЗ Android SDK** (`apkbuild.py`): APK — это ZIP из четырёх
+  частей, и каждая делается доступным средством. Двоичный `AndroidManifest.xml`
+  (AXML) — свой кодировщик `axml.py`; `classes.dex` — официальный `dx` с Maven
+  Central; подпись — `jarsigner` из JDK; архив — `zipfile`. SDK нужен был ровно
+  ради AXML, поэтому он и написан.
+  ⚠️ Атрибуты `android:*` опознаются НЕ по имени, а по 32-битному ресурсному id
+  из карты ресурсов. Неверный id — атрибут молча игнорируется (например,
+  приложение остаётся без интернета). Поэтому неизвестный атрибут — ОШИБКА
+  сборки, а результат читается обратно ЧУЖИМ разборщиком (`pyaxmlparser`), а не
+  нашим же кодом.
+  ⚠️ Карта ресурсов параллельна НАЧАЛУ строкового пула: имена атрибутов обязаны
+  идти первыми и в том же порядке, иначе каждый получит чужой id.
+  ⚠️ `targetSdk=29` намеренно: с 30 Android требует подпись v2, а её делает
+  `apksigner` из SDK. Ресурсов (`resources.arsc`) нет — их собирает `aapt2`,
+  поэтому ссылки `@mipmap/...` из манифеста выбрасываются (иконка системная).
+  ⚠️ В `MainActivity.java` не должно быть ни androidx (он на Google Maven), ни
+  своих `R.*`, ни лямбд (`dx` не понимает invokedynamic из Java 8) — это
+  закреплено тестом.
+  ⚠️ APK на живом телефоне НЕ запускался: здесь нет ни устройства, ни эмулятора.
+  Проверено другое — структура архива, разбор чужим парсером, контрольные суммы
+  DEX (Adler-32 и SHA-1) и `jarsigner -verify`.
 - **Кошелёк синхронизируется с СЕТЬЮ, а не с одним узлом** (`bhydra-net.js`):
   спрашивает `/api/info` у всех известных узлов параллельно и берёт цепочку с
   наибольшей `total_work` — ТО ЖЕ правило, что у `replace_chain`. По высоте
@@ -451,7 +474,7 @@ TLS — можно, без TLS — только с локального адре
   `mine_pending` / `_validate_block_transactions` / `_validate_chain`).
   Квант ломает лишь ECDSA — монеты на гибридном адресе недоступны. Обычные
   ECDSA-кошельки (`0x1f`) работают как раньше (обратная совместимость).
-- **Перед push — `python -m pytest -q` должно быть зелёным** (471/471).
+- **Перед push — `python -m pytest -q` должно быть зелёным** (484/484; без скачанных android.jar/dx.jar 3 теста сборки APK пропускаются).
 - Коммиты по-русски, осмысленные; заканчиваются трейлерами
   `Co-Authored-By:` и `Claude-Session:`.
 - Не хардкодить идентификатор модели в коде/коммитах/артефактах.

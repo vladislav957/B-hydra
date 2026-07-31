@@ -1,6 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<resources>
-    <string name="app_name">B-hydra Wallet</string>
-    <string name="menu_node">Адрес узла</string>
-    <string name="menu_reload">Обновить</string>
-</resources>

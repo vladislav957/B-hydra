@@ -1,24 +1,30 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="io.bhydra.wallet">
+    package="io.bhydra.wallet"
+    android:versionCode="1"
+    android:versionName="1.0">
+
+    <!-- targetSdk 29, а не 34, намеренно: с 30-й версии Android требует
+         подпись схемы v2, а её делает apksigner из Android SDK. С 29 хватает
+         подписи JAR (v1) из обычного JDK, и APK собирается без SDK вовсе.
+         Сборка через Gradle (у неё SDK есть) может поднять это значение. -->
+    <uses-sdk android:minSdkVersion="24" android:targetSdkVersion="29" />
 
     <uses-permission android:name="android.permission.INTERNET" />
-    <!-- Камера нужна только для сканирования QR получателя. -->
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
 
     <application
+        android:label="B-hydra Wallet"
         android:allowBackup="false"
-        android:icon="@mipmap/ic_launcher"
-        android:label="@string/app_name"
+        android:hardwareAccelerated="true"
         android:supportsRtl="true"
-        android:theme="@style/Theme.AppCompat.DayNight.NoActionBar"
-        android:usesCleartextTraffic="true"
-        android:networkSecurityConfig="@xml/network_security_config">
+        android:icon="@mipmap/ic_launcher"
+        android:usesCleartextTraffic="true">
         <activity
-            android:name=".MainActivity"
+            android:name="io.bhydra.wallet.MainActivity"
             android:exported="true"
-            android:configChanges="orientation|screenSize|keyboardHidden">
+            android:configChanges="0x4a0">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />

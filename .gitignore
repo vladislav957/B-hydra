@@ -44,6 +44,13 @@ build/
 dist/
 *.spec
 
+# Собранный APK и инструменты сборки (скачиваются с Maven Central)
+*.apk
+*.jks
+*.keystore
+android/app/build/
+android/.gradle/
+
 # Сборка нативного транспорта (cpp/)
 bhydra_bridge
 *.o
