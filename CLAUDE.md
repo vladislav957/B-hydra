@@ -12,7 +12,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 pip install pytest                            # единственная dev-зависимость
-python -m pytest -q                           # 521 тест — держать зелёными
+python -m pytest -q                           # 525 тестов — держать зелёными
 python -m pytest tests/test_node.py -q        # один файл
 python -m pytest tests/test_node.py -k mempool -q   # один тест по имени
 
@@ -89,7 +89,7 @@ RIPEMD-160, base58, secp256k1, RFC 6979 и сериализация «как в 
 
 Корневые `*.py` (`cli.py`, `api.py`, `P2P.py`, `cache.py`, `IP.py`, …) — тонкие
 запускалки/шимы поверх пакета; править логику нужно в `b_hydra/`. Тесты —
-`tests/` (29 файлов, 521 тест, `pytest`). Полная карта слоёв — `ARCHITECTURE.md`,
+`tests/` (29 файлов, 525 тестов, `pytest`). Полная карта слоёв — `ARCHITECTURE.md`,
 схема REST-подписи — `API.md`.
 
 ## REST API (`b_hydra/api.py`)
@@ -130,7 +130,11 @@ TLS — можно, без TLS — только с локального адре
   CPython (`pythonFloatRepr`), а `tests/test_browser_signing.py` сверяет
   результат с настоящим Python байт-в-байт.
 - **Консенсус**: PoW (SHA-512, хеш ≤ target), выбор цепочки по `total_work`
-  (не длине), halving каждые 310 000 блоков (50 → 25 → …),
+  (не длине), halving каждые 310 000 блоков ПО ВЫСОТЕ (50 → 25 → …; при
+  целевом времени блока это ≈29 лет — `economics.halving_years()`, но это
+  СЛЕДСТВИЕ, а не правило: по календарю награда зависела бы от часов на
+  машине. В белой книге стояло «каждые 4 года» — цифра Bitcoin. Готовый
+  раздел для книги, сверенный с кодом тестом, — `ECONOMICS.md`),
   `MAX_SUPPLY=31_000_000`, `chain_id` — защита от replay. Это **линейная
   цепочка**, не DAG.
 - **Сложность — LWMA, пересчёт на КАЖДОМ блоке** по скользящему окну
@@ -543,7 +547,7 @@ TLS — можно, без TLS — только с локального адре
   `mine_pending` / `_validate_block_transactions` / `_validate_chain`).
   Квант ломает лишь ECDSA — монеты на гибридном адресе недоступны. Обычные
   ECDSA-кошельки (`0x1f`) работают как раньше (обратная совместимость).
-- **Перед push — `python -m pytest -q` должно быть зелёным** (521/521; без скачанных android.jar/dx.jar 5 тестов сборки APK пропускаются).
+- **Перед push — `python -m pytest -q` должно быть зелёным** (525/525; без скачанных android.jar/dx.jar 5 тестов сборки APK пропускаются).
 - Коммиты по-русски, осмысленные; заканчиваются трейлерами
   `Co-Authored-By:` и `Claude-Session:`.
 - Не хардкодить идентификатор модели в коде/коммитах/артефактах.
