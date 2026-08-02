@@ -21,6 +21,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from . import secure
 from .tcp import MAX_MESSAGE_SIZE, recv_message, send_message
+from .transport import TCPTransport
 
 # Предел числа запомненных txid/хешей блоков для анти-петли gossip. Без него
 # множества seen_* росли бы без границ (утечка памяти и мягкий DoS: атакующий
@@ -212,9 +213,14 @@ class P2PNode:
                  seen_limit=SEEN_LIMIT, max_peers=MAX_PEERS,
                  peers_file=None, seeds=None, encrypt=True,
                  require_encryption=False, identity=None, identity_file=None,
-                 api_port=None, api_tls=False):
+                 api_port=None, api_tls=False, transport=None):
         self.host = host
         self.port = port
+        # Чем дотягиваемся до соседей. По умолчанию TCP/IP — как было всегда.
+        # Протокол выше сокета транспорта не знает (см. transport.py), поэтому
+        # подменой этого объекта сеть переносится на любой байтовый поток:
+        # Bluetooth RFCOMM, Unix-сокет, что угодно.
+        self.transport = transport or TCPTransport()
         # Адрес REST-API этого узла. Он объявляется соседям рядом с P2P-адресом
         # и нужен КОШЕЛЬКАМ: телефон и браузер не умеют говорить нашим TCP-
         # протоколом (сырых сокетов там нет вовсе), им нужна HTTP-точка входа.
@@ -585,14 +591,11 @@ class P2PNode:
         # прямо под ногами у этого потока — тот падал с AttributeError, а сокет
         # оставался открытым. Узел, остановленный сразу после старта, — обычное
         # дело в тестах и при ошибке настройки.
-        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        # Слушаем на ВСЕХ интерфейсах (0.0.0.0): тогда узел доступен и по
-        # localhost, и по IP в локальной сети — другой компьютер сможет
-        # подключиться. self.host остаётся «адресом для представления» (его
-        # узел сообщает пирам, чтобы они могли подключиться обратно).
-        server.bind(("0.0.0.0", self.port))
-        server.listen(8)
+        # Сокет открывает ТРАНСПОРТ: здесь не должно быть ни AF_INET, ни
+        # «0.0.0.0» — иначе узел навсегда привязан к TCP/IP (см. transport.py).
+        # self.host остаётся «адресом для представления» (его узел сообщает
+        # пирам, чтобы они могли подключиться обратно).
+        server = self.transport.listen(self.port)
         if self._stopping:
             server.close()          # нас уже остановили — слушать некому
             return
@@ -600,12 +603,12 @@ class P2PNode:
         self._running = True
         while self._running:
             try:
-                conn, addr = server.accept()
+                conn, host = self.transport.accept(server)
             except OSError:
                 break
             # Забаненного не обслуживаем вовсе — дешевле всего отказать сразу,
             # не тратя ни потока, ни разбора сообщения.
-            if self.is_banned(addr[0]):
+            if self.is_banned(host):
                 conn.close()
                 continue
             # Каждое соединение обслуживаем в отдельном потоке, чтобы узел мог
@@ -617,11 +620,11 @@ class P2PNode:
                 continue
             # Доля одного хоста ограничена: постоянное соединение держится
             # долго, и без этого один сосед занял бы всю таблицу слотов.
-            if not self._claim_host_slot(addr[0]):
+            if not self._claim_host_slot(host):
                 self._inbound.release()
                 conn.close()
                 continue
-            threading.Thread(target=self._handle_conn, args=(conn, addr[0]),
+            threading.Thread(target=self._handle_conn, args=(conn, host),
                              daemon=True).start()
 
     def _accept_session(self, conn, first_frame):
@@ -741,14 +744,11 @@ class P2PNode:
         self.close_pool()
         server, self._server = self._server, None
         if server is not None:
-            # Одного close() мало: поток, висящий в accept(), от него не
-            # просыпается, и «остановленный» узел продолжает отвечать на
-            # запросы. shutdown() прерывает accept и по-настоящему гасит узел.
-            try:
-                server.shutdown(socket.SHUT_RDWR)
-            except OSError:
-                pass
-            server.close()
+            # Разбудить поток, висящий в accept(), умеет только сам транспорт:
+            # у TCP для этого нужен shutdown(), у других — своё. Одного close()
+            # не хватает, и «остановленный» узел продолжал бы отвечать всем,
+            # кто успеет соединиться.
+            self.transport.close_listener(server)
 
     # --- Долговременный ключ узла и закрепление ключей соседей -------------
     def _load_identity(self):
@@ -903,10 +903,8 @@ class P2PNode:
                 return response
             self._close(sock)
 
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock = self.transport.connect(host, port, self.peer_timeout)
         try:
-            sock.settimeout(self.peer_timeout)
-            sock.connect((host, port))
             session = self._start_session(sock, host, port)
             response = self._exchange(sock, payload, session)
         except BaseException:
@@ -1216,13 +1214,23 @@ class P2PNode:
 
     # --- Авто-поиск в локальной сети (UDP-маяки, WiFi/LAN без интернета) ---
     def start_discovery(self, interval: int = 5):
-        """Запустить рассылку и приём UDP-маяков для авто-поиска узлов в сети."""
+        """Запустить рассылку и приём UDP-маяков для авто-поиска узлов в сети.
+
+        Маяки — свойство IP-сети, а не протокола B-hydra: широковещания нет ни
+        у Bluetooth, ни у соединения «точка-точка». Транспорт, который так не
+        умеет, честно отвечает отказом вместо того, чтобы поднимать потоки,
+        которые всё равно ничего не найдут (у него для поиска соседей свои
+        средства — например, обзор устройств Bluetooth).
+        """
+        if not self.transport.supports_discovery:
+            return False
         if self._discovery_running:
-            return
+            return False
         self._discovery_running = True
         threading.Thread(target=self._discovery_listen, daemon=True).start()
         threading.Thread(target=self._discovery_announce, args=(interval,),
                          daemon=True).start()
+        return True
 
     def stop_discovery(self):
         self._discovery_running = False

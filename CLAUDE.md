@@ -12,7 +12,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 pip install pytest                            # единственная dev-зависимость
-python -m pytest -q                           # 525 тестов — держать зелёными
+python -m pytest -q                           # 538 тестов — держать зелёными
 python -m pytest tests/test_node.py -q        # один файл
 python -m pytest tests/test_node.py -k mempool -q   # один тест по имени
 
@@ -70,6 +70,7 @@ g++ -O2 -std=c++17 -pthread -I cpp -o bhydra_bridge cpp/bhydra_bridge.cpp
 | `node.py` | узел: блокчейн + мемпул + инкрементальные кэши UTXO/tx-индекса, майнинг, переводы |
 | `blockdag.py` | blockDAG (GHOSTDAG-lite) + гибрид «DAG→PoW→линейная цепь» (экспериментально) |
 | `p2p.py`, `tcp.py` | gossip-сеть, обмен пирами, фрейминг сообщений, лимиты против недружелюбного пира |
+| `transport.py` | чем дотягиваемся до соседей: TCP по умолчанию, подменяется на любой байтовый поток |
 | `secure.py` | шифрование канала: эфемерный ECDH secp256k1, SHAKE-256-поток, HMAC, TOFU-закрепление ключа узла |
 | `certgen.py` | самоподписанный сертификат X.509 для HTTPS: ASN.1/DER, ключ P-256, подпись SHA-256 |
 | `icon.py` | иконка приложения: PNG (zlib+CRC32) рисуется по геометрии, в репозитории не хранится |
@@ -89,7 +90,7 @@ RIPEMD-160, base58, secp256k1, RFC 6979 и сериализация «как в 
 
 Корневые `*.py` (`cli.py`, `api.py`, `P2P.py`, `cache.py`, `IP.py`, …) — тонкие
 запускалки/шимы поверх пакета; править логику нужно в `b_hydra/`. Тесты —
-`tests/` (29 файлов, 525 тестов, `pytest`). Полная карта слоёв — `ARCHITECTURE.md`,
+`tests/` (30 файлов, 538 тестов, `pytest`). Полная карта слоёв — `ARCHITECTURE.md`,
 схема REST-подписи — `API.md`.
 
 ## REST API (`b_hydra/api.py`)
@@ -412,6 +413,28 @@ TLS — можно, без TLS — только с локального адре
   ⚠️ `jarsigner -verify` печатает «Invalid certificate chain» — так и должно
   быть: подпись самоподписанная, центра у неё нет. Android проверяет не доверие,
   а неизменность подписи между обновлениями.
+- **Транспорт подменяем** (`transport.py`): протокол выше сокета про TCP не
+  знает — `tcp.py` пользуется только `sendall`/`recv`, `secure.py` ими же плюс
+  таймаутами. Поэтому сеть переносится на любой БАЙТОВЫЙ ПОТОК подменой одного
+  объекта: `P2PNode(..., transport=...)`. Интерфейс из четырёх методов:
+  `listen`/`accept`/`connect`/`close_listener`. Адрес везде пара «хост + номер»
+  (TCP: IP и порт; Bluetooth RFCOMM: MAC и канал), поэтому `send(host, port)`
+  не менялся. Сделано под D2D — Bluetooth-сокеты уже есть в stdlib
+  (`AF_BLUETOOTH`/`BTPROTO_RFCOMM`, Linux), а на Android их API только в Java,
+  так что C++ там ничего не даёт.
+  ⚠️ `close_listener` — отдельный метод, а не `server.close()`: у TCP закрытия
+  мало, поток в `accept()` от него не просыпается (та же причина, что у
+  `stop()`). Как будить — знает только транспорт.
+  ⚠️ Маяки (UDP-широковещание) в интерфейс НЕ входят: широковещания нет ни у
+  Bluetooth, ни у «точки-точки». Флаг `supports_discovery`, и `start_discovery()`
+  честно возвращает False вместо потоков, которые ничего не найдут.
+  ⚠️ Что абстракция настоящая, доказывает `PairTransport` (`socket.socketpair()`,
+  AF_UNIX): в `tests/test_transport.py` поверх него идут рукопожатие, шифрование,
+  анонсы, майнинг и синхронизация — БЕЗ IP вообще. Замер: накладных расходов
+  нет (ping 0,19 → 0,17 мс).
+  ⚠️ Bluetooth здесь ПРОВЕРИТЬ НЕЛЬЗЯ: адаптера в контейнере нет
+  (`AF_BLUETOOTH` → «Address family not supported»). Проверено только то, что
+  радиоканал подставляется, ничего не ломая.
 - **Seed-подключение для КОШЕЛЬКОВ** (`/api/nodes`, `Network.discover`): seed-узлы
   у нас были всегда, но только между УЗЛАМИ (`--seed`, `bootstrap`). Кошелёк
   узлом не является и не станет: в браузере и WebView нет сырых TCP-сокетов,
@@ -547,7 +570,7 @@ TLS — можно, без TLS — только с локального адре
   `mine_pending` / `_validate_block_transactions` / `_validate_chain`).
   Квант ломает лишь ECDSA — монеты на гибридном адресе недоступны. Обычные
   ECDSA-кошельки (`0x1f`) работают как раньше (обратная совместимость).
-- **Перед push — `python -m pytest -q` должно быть зелёным** (525/525; без скачанных android.jar/dx.jar 5 тестов сборки APK пропускаются).
+- **Перед push — `python -m pytest -q` должно быть зелёным** (538/538; без скачанных android.jar/dx.jar 5 тестов сборки APK пропускаются).
 - Коммиты по-русски, осмысленные; заканчиваются трейлерами
   `Co-Authored-By:` и `Claude-Session:`.
 - Не хардкодить идентификатор модели в коде/коммитах/артефактах.
