@@ -1729,12 +1729,15 @@ def main():
     transport = None
     listen_host = "0.0.0.0"
     if args.transport == "bluetooth":
-        from .transport import BluetoothTransport
+        from .transport import bluetooth_transport
 
-        if not BluetoothTransport.available():
-            print("Bluetooth недоступен: нет адаптера или поддержки в системе.")
+        # Транспорт выбирается по системе: на Linux сокеты берутся из stdlib,
+        # на Windows их там нет вовсе и работает нативная библиотека.
+        transport = bluetooth_transport()
+        if not type(transport).available():
+            print("Bluetooth недоступен: нет адаптера, библиотеки или "
+                  "поддержки в системе.")
             return
-        transport = BluetoothTransport()
         # Свой адрес узнаём у нативного слоя: пирам мы должны называть MAC, а
         # не "0.0.0.0" — по нему они будут звонить обратно.
         listen_host = transport.adapter().get("address") or "0.0.0.0"

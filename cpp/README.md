@@ -10,7 +10,8 @@
 | `bhydra_ec.hpp` | 256-битная арифметика, secp256k1 (координаты Якоби), ECDSA + RFC 6979 |
 | `bhydra_secure.hpp` | рукопожатие ECDH, вывод ключей, кадры, кадрирование сообщений |
 | `bhydra_bridge.cpp` | CLI: мост для pytest + живой клиент/сервер |
-| `bhydra_bt.cpp` | Bluetooth: поиск устройств поблизости (BlueZ) — см. ниже |
+| `bhydra_bt.cpp` | Bluetooth под Linux: поиск устройств (BlueZ) — см. ниже |
+| `bhydra_bt_win.cpp` | Bluetooth под Windows: ВЕСЬ транспорт + поиск (Winsock) |
 
 Зависимостей нет — только стандартная библиотека C++17 и POSIX-сокеты.
 Заголовки самодостаточны: `#include "bhydra_secure.hpp"` и всё.
@@ -142,3 +143,72 @@ Bluetooth: `AF_BLUETOOTH` отвечает «Address family not supported». П�
 (понятная ошибка в JSON вместо падения), разбор ответов на стороне Python и
 логика поиска соседей на подменённом транспорте. Тесты с живым адаптером
 написаны и включатся сами на машине, где он есть.
+
+---
+
+# Bluetooth под Windows: `bhydra_bt_win.cpp`
+
+Отдельный файл, а не `#ifdef`: общего кода с Linux-версией нет вовсе. У Linux
+это BlueZ (`hci_inquiry`, `bdaddr_t`, сокеты `AF_BLUETOOTH`), у Windows —
+Winsock (`AF_BTH`, `SOCKADDR_BTH`) и `bluetoothapis.h`. Совпадает только смысл
+операций, а не их вид.
+
+## Почему здесь ВЕСЬ транспорт, а не только поиск
+
+| | Linux | Windows |
+|---|---|---|
+| соединение RFCOMM | Python (`AF_BLUETOOTH` в stdlib) | **C++** — у Python таких сокетов нет |
+| поиск устройств | **C++** (`hci_inquiry`) | **C++** (`BluetoothFindFirstDevice`) |
+
+Модуль `socket` в CPython не умеет разбирать `SOCKADDR_BTH` ни в каком виде, и
+обойти это из Python нельзя. Поэтому на Windows нативно всё: открыть, принять,
+прочитать, записать. Python получает объект, похожий на сокет (обёртка над
+дескриптором через ctypes), и выше по стеку никто не замечает разницы — стеку
+нужны ровно `sendall`, `recv`, `settimeout`, `gettimeout`, `shutdown`, `close`.
+
+## Сборка (кросс-компиляция с Linux)
+
+```bash
+sudo apt-get install mingw-w64
+x86_64-w64-mingw32-g++ -O2 -std=c++17 -static -o bhydra_bt.exe \
+    cpp/bhydra_bt_win.cpp -lws2_32 -lbthprops
+x86_64-w64-mingw32-g++ -O2 -std=c++17 -static -shared -DBHYDRA_BT_DLL \
+    -o bhydra_bt.dll cpp/bhydra_bt_win.cpp -lws2_32 -lbthprops
+```
+
+На самой Windows тем же mingw-w64 или MSVC (`ws2_32.lib`, `bthprops.lib`).
+
+Два артефакта из одного исходника:
+
+* **`bhydra_bt.exe`** — те же команды, что у Linux-слоя (`selftest`, `adapter`,
+  `scan`), и тот же JSON. Поэтому поиск соседей в Python — общий код на обеих
+  системах (`WindowsBluetoothTransport` наследует `scan`/`neighbours` без
+  изменений).
+* **`bhydra_bt.dll`** — функции транспорта для ctypes. Путь задаётся
+  переменной `BHYDRA_BT_DLL`, файл `bhydra_bt.exe` ищется по `BHYDRA_BT_BRIDGE`.
+
+## Запуск
+
+```powershell
+python -m b_hydra.p2p --port 5 --transport bluetooth
+```
+
+Транспорт выбирается по системе автоматически (`transport.bluetooth_transport`).
+
+## ⚠️ Что проверено, а что нет
+
+Проверено **без Windows-машины и без адаптера**:
+
+* обе сборки идут кросс-компилятором **без единого предупреждения**;
+* результат — настоящий PE-бинарник (`MZ` + `PE\0\0`), а не «что-то собралось»;
+* `bhydra_bt.exe selftest` **запускается под Wine и проходит**: разбор адресов
+  в обе стороны, отказ от шести видов мусорных адресов, экранирование JSON,
+  подъём Winsock, `AF_BTH == 32`, `sizeof(SOCKADDR_BTH) == 30`;
+* без адаптера (а под Wine его нет) команды отвечают JSON с ошибкой и кодом 1,
+  а не падают;
+* канал RFCOMM сверяется во всех ТРЁХ местах сразу — Python, Linux-слой,
+  Windows-слой.
+
+**НЕ проверено**: передача по воздуху и работа на настоящей Windows. Wine — не
+Windows, и Bluetooth-стека в нём нет. Всё, что касается радио, проверит только
+владелец двух машин.

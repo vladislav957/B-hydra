@@ -24,11 +24,13 @@ IP и порт, для Bluetooth это MAC и канал, — поэтому `s
 просто не включает маяки там, где их нет, вместо того чтобы делать вид.
 """
 
+import ctypes
 import json
 import os
 import queue
 import socket
 import subprocess
+import sys
 import threading
 
 
@@ -255,6 +257,193 @@ class BluetoothTransport(Transport):
             except (TypeError, ValueError):
                 continue
         return found
+
+
+#: Где искать библиотеку транспорта под Windows (`cpp/bhydra_bt_win.cpp`).
+BT_DLL_ENV = "BHYDRA_BT_DLL"
+
+
+class _WinBluetoothSocket:
+    """Соединение Bluetooth под Windows — снаружи выглядит как сокет.
+
+    Нужен потому, что у Python на Windows Bluetooth-сокетов НЕТ: модуль socket
+    не умеет разбирать `SOCKADDR_BTH`. Поэтому соединение живёт в нативной
+    библиотеке, а здесь — обёртка ровно с теми методами, которыми пользуется
+    стек: sendall/recv/settimeout/gettimeout/shutdown/close. Больше ничего он
+    от сокета и не требует, поэтому подмена незаметна.
+    """
+
+    def __init__(self, library, handle):
+        self._library = library
+        self._handle = handle
+        self._timeout = None
+        self._closed = False
+
+    def sendall(self, data):
+        view = bytes(data)
+        sent = 0
+        while sent < len(view):
+            written = self._library.bhydra_bt_send(
+                self._handle, view[sent:], len(view) - sent)
+            if written <= 0:
+                raise OSError("Bluetooth: запись не удалась")
+            sent += written
+
+    def recv(self, size):
+        buffer = ctypes.create_string_buffer(int(size))
+        read = self._library.bhydra_bt_recv(self._handle, buffer, int(size))
+        if read < 0:
+            # Winsock не различает здесь «истёк таймаут» и «обрыв» без
+            # WSAGetLastError; для стека и то и другое означает одно — сокет
+            # больше не годится, соединение закрывается.
+            raise OSError("Bluetooth: чтение не удалось")
+        return buffer.raw[:read]
+
+    def settimeout(self, value):
+        self._timeout = value
+        # None означает «ждать вечно», а у Winsock это 0.
+        self._library.bhydra_bt_set_timeout(
+            self._handle, 0 if value is None else int(float(value) * 1000))
+
+    def gettimeout(self):
+        return self._timeout
+
+    def shutdown(self, how=None):
+        self._library.bhydra_bt_shutdown(self._handle)
+
+    def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        self._library.bhydra_bt_close(self._handle)
+
+
+class _WinBluetoothListener:
+    """Приёмник Bluetooth под Windows (то, что возвращает listen)."""
+
+    def __init__(self, library, handle):
+        self._library = library
+        self.handle = handle
+        self._closed = False
+
+    def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        self._library.bhydra_bt_close(self.handle)
+
+
+class WindowsBluetoothTransport(BluetoothTransport):
+    """Bluetooth под Windows: соединение — нативное, поиск — тот же, что везде.
+
+    От Linux-версии отличается ровно транспортной частью. Поиск соседей
+    (`scan`/`adapter`/`neighbours`) унаследован без изменений: `bhydra_bt.exe`
+    отвечает тем же JSON, что и Linux-слой, поэтому кода там на два языка не
+    появилось.
+    """
+
+    name = "bluetooth-win"
+
+    def __init__(self, bridge=None, scan_seconds=6, library=None):
+        super().__init__(bridge=bridge or "bhydra_bt.exe",
+                         scan_seconds=scan_seconds)
+        self.library_path = (library or os.environ.get(BT_DLL_ENV)
+                             or "bhydra_bt.dll")
+        self._library = None
+
+    @staticmethod
+    def available(library=None):
+        """Есть ли под рукой библиотека транспорта (и та ли это система)."""
+        if not sys.platform.startswith("win"):
+            return False
+        try:
+            WindowsBluetoothTransport(library=library)._load()
+        except OSError:
+            return False
+        return True
+
+    def _load(self):
+        """Загружает DLL и объявляет типы. Без типов ctypes испортит указатели.
+
+        Дескрипторы Winsock — 64-битные, и без явного `restype` ctypes обрежет
+        их до int: соединение «откроется» и тут же начнёт читать не из того
+        места. Молчаливая порча хуже отказа, поэтому типы заданы поимённо.
+        """
+        if self._library is not None:
+            return self._library
+        library = ctypes.CDLL(self.library_path)
+        library.bhydra_bt_selftest.restype = ctypes.c_int
+        library.bhydra_bt_listen.argtypes = [ctypes.c_int]
+        library.bhydra_bt_listen.restype = ctypes.c_longlong
+        library.bhydra_bt_accept.argtypes = [ctypes.c_longlong, ctypes.c_char_p,
+                                             ctypes.c_int]
+        library.bhydra_bt_accept.restype = ctypes.c_longlong
+        library.bhydra_bt_connect.argtypes = [ctypes.c_char_p, ctypes.c_int,
+                                              ctypes.c_int]
+        library.bhydra_bt_connect.restype = ctypes.c_longlong
+        library.bhydra_bt_send.argtypes = [ctypes.c_longlong, ctypes.c_char_p,
+                                           ctypes.c_int]
+        library.bhydra_bt_send.restype = ctypes.c_int
+        library.bhydra_bt_recv.argtypes = [ctypes.c_longlong, ctypes.c_char_p,
+                                           ctypes.c_int]
+        library.bhydra_bt_recv.restype = ctypes.c_int
+        library.bhydra_bt_set_timeout.argtypes = [ctypes.c_longlong, ctypes.c_int]
+        library.bhydra_bt_set_timeout.restype = ctypes.c_int
+        library.bhydra_bt_shutdown.argtypes = [ctypes.c_longlong]
+        library.bhydra_bt_shutdown.restype = ctypes.c_int
+        library.bhydra_bt_close.argtypes = [ctypes.c_longlong]
+        library.bhydra_bt_close.restype = ctypes.c_int
+        self._library = library
+        return library
+
+    def selftest(self) -> bool:
+        """Проверка самой библиотеки (разбор адресов + Winsock)."""
+        try:
+            return self._load().bhydra_bt_selftest() == 0
+        except OSError:
+            return False
+
+    def listen(self, port):
+        library = self._load()
+        handle = library.bhydra_bt_listen(int(port))
+        if handle < 0:
+            raise OSError(f"Bluetooth: не удалось занять канал {port}")
+        return _WinBluetoothListener(library, handle)
+
+    def accept(self, server):
+        library = self._load()
+        mac = ctypes.create_string_buffer(32)
+        handle = library.bhydra_bt_accept(server.handle, mac, len(mac))
+        if handle < 0:
+            raise OSError("Bluetooth: приём прерван")
+        return (_WinBluetoothSocket(library, handle),
+                mac.value.decode("ascii", "replace"))
+
+    def connect(self, host, port, timeout):
+        library = self._load()
+        handle = library.bhydra_bt_connect(
+            str(host).encode("ascii", "replace"), int(port),
+            int(float(timeout) * 1000) if timeout else 0)
+        if handle == -2:
+            raise OSError(f"Bluetooth: испорченный адрес {host!r}")
+        if handle < 0:
+            raise OSError(f"Bluetooth: не удалось соединиться с {host}:{port}")
+        return _WinBluetoothSocket(library, handle)
+
+    def close_listener(self, server):
+        server.close()
+
+
+def bluetooth_transport(**options):
+    """Подходящий Bluetooth-транспорт для ЭТОЙ системы.
+
+    Разные системы — разные препятствия: на Linux нативным должен быть только
+    поиск (сокеты есть в stdlib), на Windows — весь транспорт (сокетов нет).
+    Выбор делается здесь, чтобы `--transport bluetooth` работал одинаково.
+    """
+    if sys.platform.startswith("win"):
+        return WindowsBluetoothTransport(**options)
+    return BluetoothTransport(**options)
 
 
 class _PairServer:

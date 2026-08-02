@@ -12,7 +12,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 pip install pytest                            # единственная dev-зависимость
-python -m pytest -q                           # 551 тест + 2 с адаптером Bluetooth
+python -m pytest -q                           # 559 тестов + 2 с адаптером Bluetooth
 python -m pytest tests/test_node.py -q        # один файл
 python -m pytest tests/test_node.py -k mempool -q   # один тест по имени
 
@@ -35,6 +35,8 @@ g++ -O2 -std=c++17 -pthread -I cpp -o bhydra_bridge cpp/bhydra_bridge.cpp
 ./bhydra_bridge selftest                      # нативный транспорт: свои векторы
 g++ -O2 -std=c++17 -o bhydra_bt cpp/bhydra_bt.cpp -lbluetooth   # поиск по Bluetooth
 ./bhydra_bridge connect 127.0.0.1 5000 <ключ_узла> '{"type": "ping"}'
+x86_64-w64-mingw32-g++ -O2 -std=c++17 -static -o bhydra_bt.exe \\
+    cpp/bhydra_bt_win.cpp -lws2_32 -lbthprops          # Bluetooth для Windows
 ```
 
 Линтера/форматтера в проекте нет. Сборка `.exe` — `pyinstaller`, см. `BUILD.md`.
@@ -72,7 +74,7 @@ g++ -O2 -std=c++17 -o bhydra_bt cpp/bhydra_bt.cpp -lbluetooth   # поиск п�
 | `node.py` | узел: блокчейн + мемпул + инкрементальные кэши UTXO/tx-индекса, майнинг, переводы |
 | `blockdag.py` | blockDAG (GHOSTDAG-lite) + гибрид «DAG→PoW→линейная цепь» (экспериментально) |
 | `p2p.py`, `tcp.py` | gossip-сеть, обмен пирами, фрейминг сообщений, лимиты против недружелюбного пира |
-| `transport.py` | чем дотягиваемся до соседей: TCP, Bluetooth RFCOMM (D2D), подменяется на любой байтовый поток |
+| `transport.py` | чем дотягиваемся до соседей: TCP, Bluetooth RFCOMM (Linux и Windows), подменяется на любой байтовый поток |
 | `secure.py` | шифрование канала: эфемерный ECDH secp256k1, SHAKE-256-поток, HMAC, TOFU-закрепление ключа узла |
 | `certgen.py` | самоподписанный сертификат X.509 для HTTPS: ASN.1/DER, ключ P-256, подпись SHA-256 |
 | `icon.py` | иконка приложения: PNG (zlib+CRC32) рисуется по геометрии, в репозитории не хранится |
@@ -92,7 +94,7 @@ RIPEMD-160, base58, secp256k1, RFC 6979 и сериализация «как в 
 
 Корневые `*.py` (`cli.py`, `api.py`, `P2P.py`, `cache.py`, `IP.py`, …) — тонкие
 запускалки/шимы поверх пакета; править логику нужно в `b_hydra/`. Тесты —
-`tests/` (31 файл, 553 теста, `pytest`). Полная карта слоёв — `ARCHITECTURE.md`,
+`tests/` (31 файл, 561 тест, `pytest`). Полная карта слоёв — `ARCHITECTURE.md`,
 схема REST-подписи — `API.md`.
 
 ## REST API (`b_hydra/api.py`)
@@ -460,6 +462,22 @@ TLS — можно, без TLS — только с локального адре
   с живым адаптером написаны и включатся сами там, где он есть.
   ⚠️ Скорость RFCOMM — сотни КБ/с: блок в 4 МиБ идёт десятки секунд. Это
   запасной путь «роутера нет вообще», а не замена TCP/IP.
+  ⚠️ На WINDOWS нативным должен быть ВЕСЬ транспорт (`bhydra_bt_win.cpp`,
+  `WindowsBluetoothTransport`): модуль `socket` в CPython не умеет разбирать
+  `SOCKADDR_BTH` ни в каком виде, Bluetooth-сокетов там нет. Соединение живёт
+  в DLL, Python получает обёртку через ctypes ровно с теми шестью методами,
+  которыми пользуется стек (`sendall`/`recv`/`settimeout`/`gettimeout`/
+  `shutdown`/`close`). Отдельный файл, а не `#ifdef`: общего кода с BlueZ нет
+  вовсе. Транспорт выбирается по системе — `transport.bluetooth_transport()`.
+  ⚠️ У ctypes ОБЯЗАТЕЛЬНЫ `argtypes`/`restype`: дескрипторы Winsock 64-битные,
+  без этого ctypes обрежет их до int и соединение начнёт читать не оттуда —
+  молчаливая порча вместо отказа.
+  ⚠️ `bhydra_bt.exe` отвечает тем же JSON, что Linux-слой, поэтому поиск
+  соседей — ОБЩИЙ код: `WindowsBluetoothTransport` наследует `scan`/
+  `neighbours` без изменений. Канал сверяется тестом сразу в ТРЁХ местах.
+  ⚠️ Windows-слой проверен кросс-сборкой mingw-w64 (без предупреждений, PE на
+  выходе) и запуском `selftest` ПОД WINE. Wine — не Windows и Bluetooth-стека
+  в нём нет: радио и настоящая Windows не проверялись никем.
 - **Seed-подключение для КОШЕЛЬКОВ** (`/api/nodes`, `Network.discover`): seed-узлы
   у нас были всегда, но только между УЗЛАМИ (`--seed`, `bootstrap`). Кошелёк
   узлом не является и не станет: в браузере и WebView нет сырых TCP-сокетов,
@@ -595,7 +613,7 @@ TLS — можно, без TLS — только с локального адре
   `mine_pending` / `_validate_block_transactions` / `_validate_chain`).
   Квант ломает лишь ECDSA — монеты на гибридном адресе недоступны. Обычные
   ECDSA-кошельки (`0x1f`) работают как раньше (обратная совместимость).
-- **Перед push — `python -m pytest -q` должно быть зелёным** (551 + 2 пропуска без адаптера Bluetooth; без скачанных android.jar/dx.jar пропускаются ещё 5 тестов сборки APK).
+- **Перед push — `python -m pytest -q` должно быть зелёным** (559 + 2 пропуска без адаптера Bluetooth; без скачанных android.jar/dx.jar пропускаются ещё 5 тестов сборки APK).
 - Коммиты по-русски, осмысленные; заканчиваются трейлерами
   `Co-Authored-By:` и `Claude-Session:`.
 - Не хардкодить идентификатор модели в коде/коммитах/артефактах.
