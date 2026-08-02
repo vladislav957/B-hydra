@@ -24,8 +24,11 @@ IP и порт, для Bluetooth это MAC и канал, — поэтому `s
 просто не включает маяки там, где их нет, вместо того чтобы делать вид.
 """
 
+import json
+import os
 import queue
 import socket
+import subprocess
 import threading
 
 
@@ -62,6 +65,16 @@ class Transport:
         знает только сам транспорт.
         """
         server.close()
+
+    def neighbours(self):
+        """Соседи, которых транспорт видит САМ, без чужой подсказки.
+
+        Пусто по умолчанию: у TCP такого способа нет — там адрес узнают из
+        UDP-маяка, от seed-узла или руками. А у Bluetooth есть: он умеет
+        осмотреться вокруг. Возвращает список пар (хост, номер), готовых для
+        `P2PNode.connect`.
+        """
+        return []
 
 
 class TCPTransport(Transport):
@@ -102,6 +115,146 @@ class TCPTransport(Transport):
         except OSError:
             pass
         server.close()
+
+
+#: Канал RFCOMM узла B-hydra — то же самое, что порт 5000 у TCP: обе стороны
+#: обязаны знать его заранее. Каналов всего 30, поэтому число небольшое.
+BLUETOOTH_CHANNEL = 5
+
+#: Где искать нативный слой (`cpp/bhydra_bt.cpp`). Собирается командой из
+#: cpp/README.md; путь можно задать переменной окружения.
+BT_BRIDGE_ENV = "BHYDRA_BT_BRIDGE"
+
+
+class BluetoothTransport(Transport):
+    """B-hydra поверх Bluetooth RFCOMM — связь устройств БЕЗ роутера (D2D).
+
+    Само соединение — стандартная библиотека Python: `AF_BLUETOOTH` и
+    `BTPROTO_RFCOMM` есть в ней на Linux, а RFCOMM — обычный байтовый поток,
+    поэтому кадры, рукопожатие и шифрование идут поверх него без единой правки.
+    Адрес пира — пара (MAC, канал) вместо (IP, порт), и `send(host, port)` в
+    `p2p.py` этого даже не замечает.
+
+    ПОИСК соседей — другое дело: его в стандартной библиотеке нет вовсе, нужен
+    `hci_inquiry` из BlueZ. Он вынесен в нативный слой `cpp/bhydra_bt.cpp` и
+    вызывается отсюда. Без собранного слоя транспорт работает — просто соседей
+    придётся называть по адресу вручную.
+
+    ⚠️ Скорость RFCOMM — сотни КБ/с, то есть блок в 4 МиБ идёт десятки секунд.
+    Bluetooth здесь — запасной путь на случай «роутера нет вообще», а не замена
+    TCP/IP.
+    """
+
+    name = "bluetooth"
+    #: UDP-широковещания у Bluetooth нет — соседи ищутся осмотром (neighbours).
+    supports_discovery = False
+
+    def __init__(self, bridge=None, scan_seconds=6):
+        self.bridge = bridge or os.environ.get(BT_BRIDGE_ENV) or "bhydra_bt"
+        self.scan_seconds = int(scan_seconds)
+
+    @staticmethod
+    def available():
+        """Есть ли в этой системе Bluetooth-сокеты вообще.
+
+        Константы есть и там, где адаптера нет, поэтому проверяем созданием
+        сокета: именно оно отвечает «Address family not supported».
+        """
+        if not hasattr(socket, "AF_BLUETOOTH"):
+            return False
+        try:
+            probe = socket.socket(socket.AF_BLUETOOTH, socket.SOCK_STREAM,
+                                  socket.BTPROTO_RFCOMM)
+        except (AttributeError, OSError):
+            return False
+        probe.close()
+        return True
+
+    def _socket(self):
+        return socket.socket(socket.AF_BLUETOOTH, socket.SOCK_STREAM,
+                             socket.BTPROTO_RFCOMM)
+
+    def listen(self, port):
+        server = self._socket()
+        try:
+            # BDADDR_ANY — «на любом адаптере», аналог 0.0.0.0 у TCP.
+            server.bind((socket.BDADDR_ANY, int(port)))
+            server.listen(8)
+        except BaseException:
+            server.close()
+            raise
+        return server
+
+    def accept(self, server):
+        conn, addr = server.accept()
+        return conn, addr[0]          # MAC пира — по нему считается репутация
+
+    def connect(self, host, port, timeout):
+        sock = self._socket()
+        try:
+            sock.settimeout(timeout)
+            sock.connect((host, int(port)))
+        except BaseException:
+            sock.close()
+            raise
+        return sock
+
+    def close_listener(self, server):
+        try:
+            server.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        server.close()
+
+    # --- Нативный слой: то, чего нет в стандартной библиотеке --------------
+    def _bridge_json(self, *args):
+        """Зовёт `cpp/bhydra_bt`. Возвращает {} при любой беде.
+
+        Беда здесь — норма: слой могли не собрать, адаптера может не быть,
+        прав может не хватить. Узел обязан всё это пережить и продолжить
+        работать по адресам, названным вручную.
+        """
+        try:
+            result = subprocess.run([self.bridge, *[str(a) for a in args]],
+                                    capture_output=True, text=True, timeout=60)
+        except (OSError, subprocess.SubprocessError):
+            return {}
+        try:
+            answer = json.loads(result.stdout or "{}")
+        except ValueError:
+            return {}
+        return answer if isinstance(answer, dict) else {}
+
+    def adapter(self):
+        """Свой адрес и имя (или {}, если адаптера/слоя нет)."""
+        answer = self._bridge_json("adapter")
+        return {} if "error" in answer else answer
+
+    def scan(self, seconds=None):
+        """Устройства поблизости: [{address, name, channel}, …].
+
+        Возвращает ВСЕ видимые устройства — наушники и телефоны в том числе.
+        Отличить свои узлы отсюда нельзя, это делает рукопожатие B-hydra, где
+        сверяется отпечаток сети. UDP-маяк устроен так же: летит всем, чужие
+        отсеиваются по генезису.
+        """
+        answer = self._bridge_json("scan", seconds or self.scan_seconds)
+        devices = answer.get("devices")
+        return devices if isinstance(devices, list) else []
+
+    def neighbours(self):
+        """Кандидаты для подключения: пары (MAC, канал)."""
+        found = []
+        for device in self.scan():
+            address = device.get("address")
+            if not address:
+                continue
+            channel = device.get("channel") or BLUETOOTH_CHANNEL
+            try:
+                found.append((str(address), int(channel)))
+            except (TypeError, ValueError):
+                continue
+        return found
 
 
 class _PairServer:

@@ -12,7 +12,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 pip install pytest                            # единственная dev-зависимость
-python -m pytest -q                           # 538 тестов — держать зелёными
+python -m pytest -q                           # 551 тест + 2 с адаптером Bluetooth
 python -m pytest tests/test_node.py -q        # один файл
 python -m pytest tests/test_node.py -k mempool -q   # один тест по имени
 
@@ -28,10 +28,12 @@ python bhydra_gui.py                          # десктоп-клиент (tki
 python P2P.py --demo                          # демо-сеть из трёх узлов
 python P2P.py --port 5000 --seed host:port    # узел в сети (канал шифруется)
 python -m b_hydra.secure                      # демо рукопожатия и кадров
+python -m b_hydra.p2p --port 5 --transport bluetooth   # узел по Bluetooth (D2D)
 python -m b_hydra.apkbuild --out wallet.apk   # APK для Android без SDK (нужен JDK)
 
 g++ -O2 -std=c++17 -pthread -I cpp -o bhydra_bridge cpp/bhydra_bridge.cpp
 ./bhydra_bridge selftest                      # нативный транспорт: свои векторы
+g++ -O2 -std=c++17 -o bhydra_bt cpp/bhydra_bt.cpp -lbluetooth   # поиск по Bluetooth
 ./bhydra_bridge connect 127.0.0.1 5000 <ключ_узла> '{"type": "ping"}'
 ```
 
@@ -70,7 +72,7 @@ g++ -O2 -std=c++17 -pthread -I cpp -o bhydra_bridge cpp/bhydra_bridge.cpp
 | `node.py` | узел: блокчейн + мемпул + инкрементальные кэши UTXO/tx-индекса, майнинг, переводы |
 | `blockdag.py` | blockDAG (GHOSTDAG-lite) + гибрид «DAG→PoW→линейная цепь» (экспериментально) |
 | `p2p.py`, `tcp.py` | gossip-сеть, обмен пирами, фрейминг сообщений, лимиты против недружелюбного пира |
-| `transport.py` | чем дотягиваемся до соседей: TCP по умолчанию, подменяется на любой байтовый поток |
+| `transport.py` | чем дотягиваемся до соседей: TCP, Bluetooth RFCOMM (D2D), подменяется на любой байтовый поток |
 | `secure.py` | шифрование канала: эфемерный ECDH secp256k1, SHAKE-256-поток, HMAC, TOFU-закрепление ключа узла |
 | `certgen.py` | самоподписанный сертификат X.509 для HTTPS: ASN.1/DER, ключ P-256, подпись SHA-256 |
 | `icon.py` | иконка приложения: PNG (zlib+CRC32) рисуется по геометрии, в репозитории не хранится |
@@ -90,7 +92,7 @@ RIPEMD-160, base58, secp256k1, RFC 6979 и сериализация «как в 
 
 Корневые `*.py` (`cli.py`, `api.py`, `P2P.py`, `cache.py`, `IP.py`, …) — тонкие
 запускалки/шимы поверх пакета; править логику нужно в `b_hydra/`. Тесты —
-`tests/` (30 файлов, 538 тестов, `pytest`). Полная карта слоёв — `ARCHITECTURE.md`,
+`tests/` (31 файл, 553 теста, `pytest`). Полная карта слоёв — `ARCHITECTURE.md`,
 схема REST-подписи — `API.md`.
 
 ## REST API (`b_hydra/api.py`)
@@ -432,9 +434,32 @@ TLS — можно, без TLS — только с локального адре
   AF_UNIX): в `tests/test_transport.py` поверх него идут рукопожатие, шифрование,
   анонсы, майнинг и синхронизация — БЕЗ IP вообще. Замер: накладных расходов
   нет (ping 0,19 → 0,17 мс).
-  ⚠️ Bluetooth здесь ПРОВЕРИТЬ НЕЛЬЗЯ: адаптера в контейнере нет
-  (`AF_BLUETOOTH` → «Address family not supported»). Проверено только то, что
-  радиоканал подставляется, ничего не ломая.
+- **Bluetooth-транспорт = D2D без роутера** (`BluetoothTransport`,
+  `cpp/bhydra_bt.cpp`, `--transport bluetooth`). Разделение языков ЖЁСТКОЕ и не
+  случайное: соединение по RFCOMM — Python (в stdlib есть `AF_BLUETOOTH`/
+  `BTPROTO_RFCOMM`, а RFCOMM это байтовый поток, поэтому кадры и шифрование
+  идут поверх без правок), а ПОИСК устройств вокруг — C++, потому что
+  `hci_inquiry` из BlueZ в Python нет вовсе. Здесь C++ нужен НЕ ради скорости
+  (в отличие от `bhydra_secure.hpp` с её 29×) — системный вызов быстрее от
+  языка не станет.
+  ⚠️ Канал RFCOMM ФИКСИРОВАН (`BLUETOOTH_CHANNEL=5` = `kRfcommChannel`) — это
+  ровно то же, что порт 5000 у TCP. Константа в двух языках, и тест
+  `test_native_layer_agrees_with_python_about_the_channel` держит их вместе:
+  разъедься они, узлы слушали бы и звонили на разные каналы и молча никогда не
+  встретились. SDP (спросить канал у соседа) НЕ сделан: это ещё сотня строк,
+  которую здесь нечем проверить.
+  ⚠️ `scan` возвращает ВСЁ видимое — наушники и телефоны тоже. Отсеивает их
+  рукопожатие по отпечатку сети, ровно как у UDP-маяка. Поиск соседей общий для
+  всех транспортов: `transport.neighbours()` → `node.discover_nearby()`.
+  ⚠️ Несобранный C++ ничего не ломает: транспорт работает, теряется только
+  автопоиск (`_bridge_json` возвращает {} на любую беду).
+  ⚠️ ПЕРЕДАЧА ПО ВОЗДУХУ НЕ ПРОВЕРЕНА: адаптера в контейнере нет
+  (`AF_BLUETOOTH` → «Address family not supported»). Проверено всё остальное —
+  сборка без предупреждений, векторы C++ (порядок байтов `bdaddr`), поведение
+  БЕЗ железа, разбор ответов и логика поиска на подменённом транспорте. Тесты
+  с живым адаптером написаны и включатся сами там, где он есть.
+  ⚠️ Скорость RFCOMM — сотни КБ/с: блок в 4 МиБ идёт десятки секунд. Это
+  запасной путь «роутера нет вообще», а не замена TCP/IP.
 - **Seed-подключение для КОШЕЛЬКОВ** (`/api/nodes`, `Network.discover`): seed-узлы
   у нас были всегда, но только между УЗЛАМИ (`--seed`, `bootstrap`). Кошелёк
   узлом не является и не станет: в браузере и WebView нет сырых TCP-сокетов,
@@ -570,7 +595,7 @@ TLS — можно, без TLS — только с локального адре
   `mine_pending` / `_validate_block_transactions` / `_validate_chain`).
   Квант ломает лишь ECDSA — монеты на гибридном адресе недоступны. Обычные
   ECDSA-кошельки (`0x1f`) работают как раньше (обратная совместимость).
-- **Перед push — `python -m pytest -q` должно быть зелёным** (538/538; без скачанных android.jar/dx.jar 5 тестов сборки APK пропускаются).
+- **Перед push — `python -m pytest -q` должно быть зелёным** (551 + 2 пропуска без адаптера Bluetooth; без скачанных android.jar/dx.jar пропускаются ещё 5 тестов сборки APK).
 - Коммиты по-русски, осмысленные; заканчиваются трейлерами
   `Co-Authored-By:` и `Claude-Session:`.
 - Не хардкодить идентификатор модели в коде/коммитах/артефактах.

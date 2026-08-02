@@ -1235,6 +1235,40 @@ class P2PNode:
     def stop_discovery(self):
         self._discovery_running = False
 
+    def discover_nearby(self) -> int:
+        """Соседи, которых транспорт видит САМ (осмотр Bluetooth и подобное).
+
+        Тот же смысл, что у UDP-маяка, только средство другое: у TCP соседей
+        приносит широковещание, у Bluetooth — обзор устройств вокруг. Поэтому
+        метод общий и работает с любым транспортом, который умеет
+        `neighbours()`; кто не умеет, возвращает пустой список, и вызов просто
+        ничего не делает.
+
+        Возвращает, сколько соседей НАШЕЙ сети добавилось. Чужие устройства
+        (наушники, телефоны) отсеиваются сами: `connect` требует совпадения
+        генезиса, и всё, что не наш узел, из таблицы вылетает.
+        """
+        added = 0
+        for host, port in self.transport.neighbours():
+            if (host, port) == (self.host, self.port):
+                continue
+            if not self.add_peer(host, port):
+                continue              # уже знаем или таблица полна
+            try:
+                if not self.connect(host, port):
+                    self.remove_peer(host, port)
+                    continue
+            except OSError:
+                self.remove_peer(host, port)   # не отозвался — не сосед
+                continue
+            added += 1
+            if self.on_discover:
+                try:
+                    self.on_discover(host, port)
+                except Exception:
+                    pass
+        return added
+
     def _discovery_announce(self, interval: int):
         """Периодически кричим в сеть «я — узел B-hydra на порту N»."""
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -1678,6 +1712,9 @@ def main():
                         help="не обслуживать открытые (нешифрованные) соединения")
     parser.add_argument("--difficulty", type=int, default=3, help="базовая сложность")
     parser.add_argument("--demo", action="store_true", help="запустить демо из 3 узлов")
+    parser.add_argument("--transport", choices=("tcp", "bluetooth"), default="tcp",
+                        help="чем связываться: tcp (по умолчанию) или bluetooth "
+                             "(D2D без роутера; --port здесь канал RFCOMM)")
     args = parser.parse_args()
 
     if args.demo or not args.port:
@@ -1689,18 +1726,35 @@ def main():
     seeds = parse_seeds(list(args.seed)
                         + os.environ.get("BHYDRA_SEEDS", "").split(","))
 
-    node = P2PNode("0.0.0.0", args.port, BHydraNode(difficulty=args.difficulty),
+    transport = None
+    listen_host = "0.0.0.0"
+    if args.transport == "bluetooth":
+        from .transport import BluetoothTransport
+
+        if not BluetoothTransport.available():
+            print("Bluetooth недоступен: нет адаптера или поддержки в системе.")
+            return
+        transport = BluetoothTransport()
+        # Свой адрес узнаём у нативного слоя: пирам мы должны называть MAC, а
+        # не "0.0.0.0" — по нему они будут звонить обратно.
+        listen_host = transport.adapter().get("address") or "0.0.0.0"
+
+    node = P2PNode(listen_host, args.port, BHydraNode(difficulty=args.difficulty),
                    peers_file=args.peers_file, seeds=seeds,
                    encrypt=not args.no_encrypt,
                    require_encryption=args.require_encryption,
-                   identity_file=args.identity_file)
+                   identity_file=args.identity_file, transport=transport)
     node.start()
+    if args.transport == "bluetooth":
+        found = node.discover_nearby()   # осмотр вокруг вместо UDP-маяка
+        print(f"Осмотр Bluetooth: узлов B-hydra рядом — {found}")
     # Соседи с прошлого запуска + seed-узлы: узел находит сеть сам, без --peer.
     alive = node.bootstrap()
     if args.peer:
         host, _, port = args.peer.rpartition(":")
         node.connect(host, int(port))
     channel = "шифрован" if node.encrypt else "ОТКРЫТ"
+    print(f"Транспорт: {node.transport.name} ({node.host})")
     print(f"P2P-узел B-hydra на :{args.port} | пиров: {len(node.peers)} "
           f"(живых при старте: {alive}) | высота: {node.node.height}"
           f" | канал: {channel} | ключ узла: {node.node_key[:16]}…"

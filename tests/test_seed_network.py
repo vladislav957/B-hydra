@@ -83,14 +83,23 @@ def test_hello_carries_the_rest_address(pair):
 
 
 def test_peers_learn_each_other_rest_addresses(pair):
-    """После знакомства ОБА знают, где у другого кошелёк."""
+    """После знакомства ОБА знают, где у другого кошелёк.
+
+    Таймаут щедрый намеренно: знакомство идёт с рукопожатием ECDH на чистом
+    Python (~90 мс), и под полным прогоном, где живут десятки узлов сразу,
+    пяти секунд иногда не хватало — тест падал раз на несколько прогонов.
+    Ждём мы СОБЫТИЯ, а не времени, поэтому запас ничего не замедляет: как
+    только адреса разошлись, проверка идёт дальше.
+    """
     a, b = pair
     assert b.connect("127.0.0.1", a.port) is True
-    assert _wait_until(lambda: len(a.api_nodes()) == 2)
+    assert _wait_until(lambda: len(a.api_nodes()) == 2, timeout=20), a.api_nodes()
 
     assert f"http://127.0.0.1:{b.api_port}" in a.api_nodes()
     # И в обратную сторону: инициатор знакомства тоже узнал адрес.
-    assert f"http://127.0.0.1:{a.api_port}" in b.api_nodes()
+    assert _wait_until(
+        lambda: f"http://127.0.0.1:{a.api_port}" in b.api_nodes(),
+        timeout=20), b.api_nodes()
 
 
 def test_seed_bootstrap_also_learns_rest_addresses():
