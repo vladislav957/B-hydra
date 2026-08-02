@@ -16,16 +16,9 @@ def generate_node_id(public_key: str) -> str:
 
 
 def get_local_ip() -> str:
-    """Определяет локальный IP-адрес машины."""
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        # Адрес не обязан быть достижим — нужен лишь выбор интерфейса.
-        s.connect(("8.8.8.8", 80))
-        return s.getsockname()[0]
-    except OSError:
-        return "127.0.0.1"
-    finally:
-        s.close()
+    """Определяет локальный IP-адрес машины (реализация — в `b_hydra.p2p`)."""
+    from b_hydra.p2p import local_ip
+    return local_ip()
 
 
 if __name__ == "__main__":

@@ -2,8 +2,17 @@
 <html lang="ru">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>B-hydra Core — кошелёк</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>B-hydra Wallet</title>
+<!-- Кошелёк ставится на телефон как приложение: манифест + иконки + тема. -->
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png">
+<link rel="apple-touch-icon" href="/icon-192.png">
+<meta name="theme-color" content="#0a1222">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="B-hydra">
 <style>
   :root{
     --abyss:#060a14; --abyss2:#0a1222;
@@ -103,11 +112,53 @@
   .msg .ok{color:var(--venom);} .msg .bad{color:var(--coral);} .msg .go{color:var(--teal);}
 
   /* ── Приём / QR ── */
+  .row{display:grid; align-items:center;}
   .qr-box{display:flex; flex-direction:column; align-items:center; gap:14px;}
-  #qr{border-radius:14px; background:#040810; padding:12px; border:1px solid var(--line);
-    box-shadow:0 0 34px rgba(46,230,192,.18);}
+  #qr{border-radius:14px; background:#fff; padding:10px; border:1px solid var(--line);
+    box-shadow:0 0 34px rgba(46,230,192,.18); line-height:0; width:200px; height:200px;}
+  #qr svg{width:100%; height:100%; display:block; border-radius:6px;}
   .qr-addr{font-family:var(--mono); font-size:12px; word-break:break-all; text-align:center;
     color:var(--muted);}
+
+  /* ── Телефон: установка, офлайн, сканер ── */
+  .bar{display:flex; align-items:center; gap:10px; padding:10px 14px; border-radius:12px;
+    margin-bottom:14px; font-size:13px; border:1px solid var(--line2);}
+  .hide{display:none !important;}
+  .bar.install{background:rgba(46,230,192,.09); color:var(--teal);}
+  .bar.offline{background:rgba(255,207,92,.10); color:var(--gold); border-color:rgba(255,207,92,.35);}
+  .bar.sync{background:rgba(139,108,255,.09); color:var(--muted);}
+  .bar.warn-bar{background:rgba(255,207,92,.10); color:var(--gold);
+    border-color:rgba(255,207,92,.35);}
+  .bar.sync b{color:var(--text);}
+  .nodes{display:flex; flex-direction:column; gap:8px;}
+  .node{display:grid; grid-template-columns:1fr auto auto; gap:10px; align-items:center;
+    padding:9px 11px; border-radius:10px; background:rgba(10,18,32,.55);
+    border:1px solid var(--line); font-family:var(--mono); font-size:11.5px;}
+  .node .u{overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+  .node .st{white-space:nowrap;}
+  .node.best{border-color:var(--teal);}
+  .node.best .st{color:var(--teal);}
+  .node.dead .st{color:var(--coral);}
+  .node.foreign .st{color:var(--gold);}
+  .spv{font-size:10.5px; font-family:var(--mono); color:var(--teal);}
+  .bar b{font-weight:750;}
+  .bar button{margin-left:auto; white-space:nowrap;}
+  .scan{position:fixed; inset:0; z-index:60; background:rgba(4,8,16,.96);
+    display:none; flex-direction:column; align-items:center; justify-content:center; gap:16px;
+    padding:calc(20px + env(safe-area-inset-top)) 20px calc(20px + env(safe-area-inset-bottom));}
+  .scan.show{display:flex;}
+  .scan video{width:min(88vw,420px); aspect-ratio:1; object-fit:cover; border-radius:18px;
+    border:1px solid var(--line2); background:#000;}
+  .scan .hint{font-family:var(--mono); font-size:12.5px; color:var(--muted); text-align:center;}
+
+  /* ── Узкий экран: крупные цели нажатия и безопасные отступы ── */
+  @media(max-width:560px){
+    .wrap{padding:calc(14px + env(safe-area-inset-top)) 14px
+          calc(40px + env(safe-area-inset-bottom));}
+    button{padding:12px 16px; font-size:14.5px;}      /* палец, а не курсор */
+    button.tiny{padding:9px 13px; font-size:12.5px;}
+    input,select{font-size:16px;}   /* < 16px iOS зумит страницу при фокусе */
+  }
 
   /* ── История ── */
   .hist{display:flex; flex-direction:column; gap:9px;}
@@ -144,6 +195,12 @@
      Путь относительный — работает и на /wallet, и при открытии файла с диска.
      Если скрипт не загрузился, кошелёк откатывается на подпись через узел. -->
 <script src="bhydra-sign.js"></script>
+<!-- Настоящий QR-код адреса, считается на устройстве (порт qrcode_gen.py).
+     Нужен именно локальный: «принять деньги» обязано работать без сети. -->
+<script src="bhydra-qr.js"></script>
+<!-- Сеть: несколько узлов, выбор лучшего по работе цепочки, отказоустойчивость
+     и SPV-проверка включения транзакции в блок. -->
+<script src="bhydra-net.js"></script>
 </head>
 <body>
 <div class="wrap">
@@ -154,6 +211,36 @@
     </div>
     <div class="net-badge" id="netBadge"><i></i><span id="netTxt">демо</span></div>
   </header>
+
+  <!-- Установка на телефон: браузер сам решает, когда предложить. -->
+  <div class="bar install hide" id="installBar">
+    <span id="installTxt">📱 <b>Поставить на телефон</b> — откроется как
+      приложение, работает без сети</span>
+    <button class="tiny" id="installBtn" onclick="installApp()">Установить</button>
+  </div>
+  <div class="bar warn-bar hide" id="backupBar">
+    <span>🔑 <b>Сохраните ключ.</b> Он есть только на этом устройстве —
+      потеряете его, потеряете деньги</span>
+    <button class="tiny ghost" onclick="exportKey()">Сохранить</button>
+  </div>
+  <div class="bar offline hide" id="offlineBar">
+    <span>⚡ <b>Нет связи с узлом.</b> Адрес и QR работают, отправка — нет</span>
+  </div>
+  <div class="bar sync" id="syncBar">
+    <span id="syncTxt">Опрашиваю сеть…</span>
+    <button class="tiny ghost" onclick="toggleNodes()">Узлы</button>
+  </div>
+  <div class="panel hide" id="nodesPanel" style="margin-bottom:14px">
+    <h3><span class="ic">◇</span> Узлы сети</h3>
+    <div class="nodes" id="nodeList"></div>
+    <div class="row" style="grid-template-columns:1fr auto; gap:8px; margin-top:10px">
+      <input id="nodeUrl" class="mono" placeholder="192.168.0.10:8000"
+             autocomplete="off" autocapitalize="off" spellcheck="false">
+      <button class="ghost tiny" onclick="addNode()">Добавить</button>
+    </div>
+    <div class="warn">Кошелёк спрашивает все узлы и берёт цепочку с наибольшей
+      работой — то же правило, по которому узлы выбирают главную цепь.</div>
+  </div>
 
   <!-- Карта кошелька -->
   <section class="wallet">
@@ -176,6 +263,11 @@
     <div class="actions">
       <button onclick="newWallet()">✨ Новый кошелёк</button>
       <button class="ghost" onclick="importWallet()">📥 Импорт ключа</button>
+      <button class="ghost" onclick="exportKey()">💾 Сохранить ключ</button>
+      <button class="ghost" onclick="$('backupFile').click()">📂 Восстановить</button>
+      <button class="ghost" onclick="forgetWallet()">🗑 Забыть ключ</button>
+      <input type="file" id="backupFile" accept="application/json,.json"
+             class="hide" onchange="if(this.files[0]) importBackup(this.files[0])">
       <button class="ghost" onclick="toggleKey()">🔑 Показать ключ</button>
       <button class="ghost" onclick="refresh()">⟳ Обновить</button>
     </div>
@@ -187,7 +279,11 @@
     <div class="panel">
       <h3><span class="ic">↑</span> Отправить BHY</h3>
       <label for="to">Адрес получателя</label>
-      <input id="to" class="mono" placeholder="BHY…" autocomplete="off">
+      <div class="row" style="grid-template-columns:1fr auto; gap:8px; align-items:center">
+        <input id="to" class="mono" placeholder="BHY…" autocomplete="off"
+               inputmode="text" autocapitalize="off" autocorrect="off" spellcheck="false">
+        <button class="ghost tiny hide" id="scanBtn" onclick="startScan()">📷 Скан</button>
+      </div>
       <label for="amt">Сумма</label>
       <div class="amt-wrap">
         <input id="amt" type="number" min="0" step="0.0001" placeholder="0.0000">
@@ -209,9 +305,12 @@
     <div class="panel">
       <h3><span class="ic">↓</span> Принять</h3>
       <div class="qr-box">
-        <canvas id="qr" width="180" height="180"></canvas>
+        <div id="qr"></div>
         <div class="qr-addr" id="qrAddr">—</div>
-        <button class="ghost tiny" onclick="copyAddr()">Скопировать адрес</button>
+        <div class="row" style="grid-template-columns:1fr 1fr; gap:8px; width:100%">
+          <button class="ghost tiny" onclick="copyAddr()">Скопировать</button>
+          <button class="ghost tiny" onclick="shareAddr()">Поделиться</button>
+        </div>
       </div>
     </div>
   </div>
@@ -220,6 +319,13 @@
     <h3><span class="ic">≋</span> История операций</h3>
     <div class="hist" id="hist"></div>
   </div>
+</div>
+<!-- Сканер QR: камера + встроенный в Android Chrome BarcodeDetector.
+     Своего декодера здесь нет — на телефоне он уже есть в браузере. -->
+<div class="scan" id="scanBox">
+  <video id="scanVideo" playsinline muted></video>
+  <div class="hint" id="scanHint">Наведите на QR-код адреса</div>
+  <button class="ghost" onclick="stopScan()">Отмена</button>
 </div>
 <div class="toast" id="toast"></div>
 
@@ -239,12 +345,32 @@ const rstr=(n,al)=>Array.from({length:n},()=>pick(al)).join('');
 let wallet={address:'',key:'',balance:0,utxos:0,history:[]};
 
 function newWallet(){
-  wallet={address:"BHY"+rstr(34,B58), key:rstr(64,HEX),
+  // Адрес ВЫВОДИТСЯ ИЗ КЛЮЧА. Раньше здесь генерировались две независимые
+  // случайные строки — адрес отдельно, ключ отдельно. Деньги, присланные на
+  // такой адрес, нельзя было потратить никогда: ключа от него ни у кого нет.
+  const key=randomKey();
+  let address=null;
+  if(window.BHydra){
+    try{ address=BHydra.walletFromPrivateKey(key).address; }catch(e){}
+  }
+  const demo=!address;              // скрипт подписи не загрузился — только показ
+  wallet={address: address || ("BHY"+rstr(34,B58)), key,
     balance: LIVE?0: +(50).toFixed(4), utxos: LIVE?0:1,
     history: LIVE?[]:[{dir:'in',amount:50,txid:rstr(64,HEX),block:1,label:'награда за блок'}]};
   $('keyBox').classList.remove('show');
-  render(); drawQR(); toast('Кошелёк создан');
+  if(!demo) saveWallet();           // ключ обязан пережить закрытие приложения
+  render(); drawQR(); updateBackupBar();
+  toast(demo?'Кошелёк создан (демо: нет bhydra-sign.js)':'Кошелёк создан');
   if(LIVE) refresh();
+}
+
+/** Приватный ключ из криптостойкого генератора браузера.
+ *  Math.random() для ключа недопустим: он предсказуем, и предсказуемый ключ —
+ *  это чужие деньги. */
+function randomKey(){
+  const bytes=new Uint8Array(32);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, b=>b.toString(16).padStart(2,'0')).join('');
 }
 async function importWallet(){
   const k=prompt('Введите приватный ключ (64 hex) или адрес BHY…');
@@ -257,7 +383,8 @@ async function importWallet(){
     if(window.BHydra){
       try{
         wallet.address=BHydra.walletFromPrivateKey(wallet.key).address;
-        try{ LIVE=(await fetch('/api/info',{cache:'no-store'})).ok; }catch(e){ LIVE=false; }
+        saveWallet();
+        LIVE=(await NET.get('/api/info')).ok;
         setBadge(LIVE);
         render(); drawQR(); if(LIVE) refresh();
         toast('Ключ импортирован (адрес получен локально)'); return;
@@ -265,7 +392,7 @@ async function importWallet(){
     }
     // Скрипт подписи не загрузился — как раньше, адрес выводит узел.
     try{
-      const r=await fetch('/api/wallet',{method:'POST',headers:{'Content-Type':'application/json'},
+      const r=await netPost('/api/wallet',{method:'POST',headers:{'Content-Type':'application/json'},
         body:JSON.stringify({private_key:wallet.key})});
       const j=await r.json();
       if(r.ok && j.address){
@@ -305,6 +432,11 @@ function renderHist(){
       <div class="mid">
         <div class="t1">${h.dir==='in'?'Получено':'Отправлено'}${h.label?` · <span style="color:var(--muted)">${esc(h.label)}</span>`:''}</div>
         <div class="t2">${esc(short(h.txid,12))}${h.block!=null?` · блок #${esc(h.block)}`:' · в мемпуле'}</div>
+        ${h.block==null?'':h.spv===true
+          ? `<div class="spv">✔ включение доказано (Меркл)${h.conf?` · ${h.conf} подтв.`:''}</div>`
+          : h.spv===false
+            ? '<div class="spv" style="color:var(--coral)">✕ доказательство не сошлось</div>'
+            : '<div class="spv" style="color:var(--dim)">проверяю…</div>'}
       </div>
       <div class="amt">${h.dir==='in'?'+':'−'}${fmt(h.amount)}</div>
     </div>`).join('');
@@ -328,12 +460,12 @@ async function send(){
   if(hasKey && window.BHydra){
     m.innerHTML='<span class="go">Подпись на устройстве…</span>';
     try{
-      const u=await (await fetch('/api/utxos/'+encodeURIComponent(wallet.address),
+      const u=await (await netGet('/api/utxos/'+encodeURIComponent(wallet.address),
         {cache:'no-store'})).json();
       const utxos=(u.utxos||[]).map(x=>({txid:x.txid,index:x.index,amount:x.amount}));
       const signed=BHydra.buildSignedTransaction(
         {privateKey:wallet.key,to,amount:a,fee:f,utxos});
-      const r=await fetch('/api/transaction',{method:'POST',
+      const r=await netPost('/api/transaction',{method:'POST',
         headers:{'Content-Type':'application/json'},body:JSON.stringify(signed)});
       const j=await r.json();
       if(!r.ok||j.error||j.accepted===false){
@@ -354,7 +486,7 @@ async function send(){
   if(hasKey){
     m.innerHTML='<span class="go">Отправка через узел…</span>';
     try{
-      const r=await fetch('/api/send',{method:'POST',headers:{'Content-Type':'application/json'},
+      const r=await netPost('/api/send',{method:'POST',headers:{'Content-Type':'application/json'},
         body:JSON.stringify({private_key:wallet.key,to,amount:a,fee:f})});
       const j=await r.json();
       if(!r.ok||j.error){ m.innerHTML=`<span class="bad">${esc(j.error||'Ошибка отправки')}</span>`; return; }
@@ -378,48 +510,185 @@ async function send(){
 /* ── Живой баланс с узла (если запущен) ── */
 async function refresh(){
   if(!wallet.address) return;
-  try{
-    const r=await fetch('/api/address/'+encodeURIComponent(wallet.address),{cache:'no-store'});
-    if(!r.ok) throw 0;
-    const d=await r.json();
-    LIVE=true; setBadge(true);
-    wallet.balance=+Number(d.balance||0).toFixed(4);
-    wallet.history=(d.history||[]).map(h=>({
-      dir:h.received?'in':'out', amount:h.received||h.sent||0,
-      txid:h.txid, block:h.block_index,
-    }));
-    try{ const u=await (await fetch('/api/utxos/'+encodeURIComponent(wallet.address))).json();
-      wallet.utxos=(u.utxos||[]).length; }catch(e){}
-    render();
-  }catch(e){ LIVE=false; setBadge(false); }
+  const answer=await NET.get('/api/address/'+encodeURIComponent(wallet.address));
+  if(!answer.ok){ LIVE=false; setBadge(false); return; }
+  const d=answer.body||{};
+  LIVE=true; setBadge(true);
+  wallet.balance=+Number(d.balance||0).toFixed(4);
+  wallet.history=(d.history||[]).map(h=>({
+    dir:h.received?'in':'out', amount:h.received||h.sent||0,
+    txid:h.txid, block:h.block_index, spv:null,
+  }));
+  const utxos=await NET.get('/api/utxos/'+encodeURIComponent(wallet.address));
+  if(utxos.ok) wallet.utxos=((utxos.body||{}).utxos||[]).length;
+  render();
+  verifyHistory();          // подтверждения считаем отдельно, не задерживая показ
+}
+
+/* ── SPV: подтверждаем свои транзакции доказательством Меркла ───────────
+   Узел может соврать про баланс, но подделать путь Меркла к настоящему корню
+   блока — нет. Корень берём из ЗАГОЛОВКА блока, а не из самого доказательства:
+   иначе узел прислал бы согласованную пару, и проверка подтверждала бы себя. */
+async function verifyHistory(){
+  const height=(NET.status.get(NET.chosen)||{}).height||0;
+  for(const item of wallet.history){
+    if(item.block==null || item.spv!==null) continue;
+    try{
+      const result=await NET.confirm(item.txid);
+      item.spv=result.ok;
+      item.conf=result.ok?Math.max(0,height-item.block):0;
+    }catch(e){ item.spv=false; }
+  }
+  render();
 }
 function setBadge(live){
   const b=$('netBadge');
   b.classList.toggle('live',live);
   $('netTxt').textContent=live?'узел онлайн':'демо';
+  // Полоса «нет связи» следует за тем же признаком: два независимых
+  // индикатора состояния рано или поздно разъехались бы.
+  const bar=$('offlineBar');
+  if(bar) bar.classList.toggle('hide', !!live);
 }
 
-/* ── QR адреса (лёгкий детерминированный код, для наглядности) ── */
+/* Проверка связи с узлом (для события online). */
+async function ping(){
+  const report=await syncNetwork();
+  return report.reachable > 0;
+}
+
+/* Совместимость со старыми участками кода: те ждут Response-подобный объект
+   (r.ok, r.json()). Оборачиваем ответ сети, чтобы не переписывать их целиком. */
+function wrap(answer){
+  return {ok: answer.ok, status: answer.status,
+          json: async () => answer.body || {}};
+}
+async function netGet(path){ return wrap(await NET.get(path)); }
+async function netPost(path, init){
+  let body={};
+  try{ body=JSON.parse((init||{}).body||'{}'); }catch(e){}
+  return wrap(await NET.post(path, body));
+}
+
+/* ── QR адреса ──────────────────────────────────────────────────────────
+   Раньше здесь рисовался ПОХОЖИЙ НА QR узор из псевдослучайных модулей: он
+   выглядел как код, но не сканировался ничем. Это хуже, чем ничего — человек
+   наводит камеру и не понимает, почему не работает. Теперь настоящий QR,
+   считается на устройстве (bhydra-qr.js, порт qrcode_gen.py модуль в модуль). */
 function drawQR(){
-  const c=$('qr'), x=c.getContext('2d'), N=25, S=c.width, cell=Math.floor((S-24)/N), off=(S-cell*N)/2;
-  x.clearRect(0,0,S,S);
-  const s=wallet.address||'BHY';
-  // детерминированная матрица из хеша строки
-  let seed=0; for(let i=0;i<s.length;i++) seed=(seed*131+s.charCodeAt(i))>>>0;
-  const rnd=()=>{seed=(seed*1103515245+12345)>>>0; return (seed>>>16)/65536;};
-  for(let i=0;i<N;i++)for(let j=0;j<N;j++){
-    const finder=(i<7&&j<7)||(i<7&&j>=N-7)||(i>=N-7&&j<7);
-    let on = finder ? ((i===0||i===6||j===0||j===6||(i>=2&&i<=4&&j>=2&&j<=4)) ) : rnd()>.55;
-    if(finder){ // рамки-искатели как у QR
-      const bi=i>=N-7?i-(N-7):i, bj=j>=N-7?j-(N-7):j;
-      on=(bi===0||bi===6||bj===0||bj===6||(bi>=2&&bi<=4&&bj>=2&&bj<=4));
-    }
-    if(on){
-      const t=(i+j)/(2*N);
-      x.fillStyle=`rgb(${46+t*140},${230-t*40},${192+t*30})`;
-      x.fillRect(off+j*cell, off+i*cell, cell-1, cell-1);
-    }
+  const box=$('qr'), address=wallet.address||'';
+  if(!box) return;
+  if(!address || typeof BHydraQR==='undefined'){ box.innerHTML=''; return; }
+  try{
+    box.innerHTML=BHydraQR.toSvg(BHydraQR.matrix(address),
+                                 {size:200, quiet:2, dark:'#060a14', light:'#ffffff'});
+  }catch(e){ box.innerHTML=''; }
+}
+
+/* ── Поделиться адресом (системное меню телефона) ── */
+async function shareAddr(){
+  const address=wallet.address||'';
+  if(!address) return;
+  if(navigator.share){
+    try{ await navigator.share({title:'Мой адрес B-hydra', text:address}); return; }
+    catch(e){ if(e && e.name==='AbortError') return; }
   }
+  copyAddr();
+}
+
+/* ── Установка на телефон ──────────────────────────────────────────────
+   Браузер сам решает, когда предложить установку, и даёт событие только если
+   всё на месте: манифест, иконки, сервис-воркер и защищённый источник. */
+let installPrompt=null;
+
+/** iPhone/iPad: Safari НЕ шлёт beforeinstallprompt и не даёт установить
+ *  приложение кнопкой — только вручную через «Поделиться». Без отдельной
+ *  подсказки владелец iPhone не видел вообще ничего: полоса установки
+ *  показывается по событию, которого на iOS не бывает. */
+function isIOS(){
+  const ua=navigator.userAgent||'';
+  // iPad с iPadOS 13+ представляется «Macintosh», отличаем по тач-экрану.
+  return /iPad|iPhone|iPod/.test(ua) ||
+         (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1);
+}
+function isStandalone(){
+  return window.matchMedia('(display-mode: standalone)').matches ||
+         navigator.standalone === true;
+}
+
+window.addEventListener('beforeinstallprompt',(e)=>{
+  e.preventDefault();
+  installPrompt=e;
+  $('installBar').classList.remove('hide');
+});
+window.addEventListener('appinstalled',()=>{
+  installPrompt=null;
+  $('installBar').classList.add('hide');
+  toast('Кошелёк установлен');
+});
+async function installApp(){
+  if(isIOS()){ toast('Поделиться → «На экран «Домой»»'); return; }
+  if(!installPrompt){ toast('Меню браузера → «Добавить на главный экран»'); return; }
+  installPrompt.prompt();
+  await installPrompt.userChoice;
+  installPrompt=null;
+  $('installBar').classList.add('hide');
+}
+
+/* ── Сканирование QR камерой ───────────────────────────────────────────
+   Декодер не пишем: в Android Chrome он уже есть (BarcodeDetector). Где его
+   нет — честно говорим об этом, а не показываем неработающую кнопку. */
+let scanStream=null, scanTimer=null;
+function scanSupported(){ return 'BarcodeDetector' in window &&
+  navigator.mediaDevices && navigator.mediaDevices.getUserMedia; }
+
+async function startScan(){
+  if(!scanSupported()){ toast('Сканер недоступен в этом браузере'); return; }
+  const video=$('scanVideo');
+  try{
+    scanStream=await navigator.mediaDevices.getUserMedia(
+      {video:{facingMode:'environment'}, audio:false});
+  }catch(e){ toast('Нет доступа к камере'); return; }
+  video.srcObject=scanStream;
+  await video.play().catch(()=>{});
+  $('scanBox').classList.add('show');
+  const detector=new BarcodeDetector({formats:['qr_code']});
+  scanTimer=setInterval(async()=>{
+    try{
+      const found=await detector.detect(video);
+      if(found && found.length){ applyScan(found[0].rawValue||''); }
+    }catch(e){ /* кадр не готов — просто ждём следующий */ }
+  },300);
+}
+
+function stopScan(){
+  clearInterval(scanTimer); scanTimer=null;
+  if(scanStream){ scanStream.getTracks().forEach(t=>t.stop()); scanStream=null; }
+  $('scanBox').classList.remove('show');
+}
+
+/* Из QR может прийти как голый адрес, так и ссылка bhydra:<адрес>?amount=… */
+function applyScan(raw){
+  const parsed=parsePaymentUri(raw);
+  if(!parsed.address){ $('scanHint').textContent='Это не адрес B-hydra'; return; }
+  stopScan();
+  $('to').value=parsed.address;
+  if(parsed.amount) $('amt').value=parsed.amount;
+  updTotal();
+  toast('Адрес распознан');
+}
+
+function parsePaymentUri(raw){
+  const text=String(raw||'').trim();
+  const body=text.replace(/^bhydra:/i,'');
+  const [addr,query]=body.split('?');
+  const address=/^BHY[1-9A-HJ-NP-Za-km-z]{20,60}$/.test(addr) ? addr : '';
+  let amount='';
+  if(query){
+    const found=new URLSearchParams(query).get('amount');
+    if(found && isFinite(Number(found))) amount=found;
+  }
+  return {address, amount};
 }
 
 /* ── Живая аура за балансом ── */
@@ -452,10 +721,195 @@ let tt;
 function toast(msg){ const e=$('toast'); e.textContent=msg; e.classList.add('show');
   clearTimeout(tt); tt=setTimeout(()=>e.classList.remove('show'),1800); }
 
-/* ── Старт ── */
-aura();
-newWallet();
-setInterval(()=>{ if(LIVE) refresh(); }, 8000);
+/* ── Сеть: несколько узлов ──────────────────────────────────────────────
+   Кошелёк ходил в ОДИН узел — тот, что отдал страницу. Узел выключили —
+   кошелёк ослеп; узел отстал — кошелёк молча показывал его версию мира. */
+const NET = new BHydraNet.Network({
+  nodes: [location.origin],
+  storage: (()=>{ try{ return window.localStorage; }catch(e){ return null; } })(),
+});
+
+async function syncNetwork(){
+  let report = await NET.survey();
+  // Узел, до которого достучались, знает остальных — спросим и добавим их.
+  // Это «seed» кошелька: владелец вписывает ОДИН адрес, а дальше список живёт
+  // сам, и падение того самого узла больше не оставляет кошелёк слепым.
+  if(report.reachable > 0){
+    try{
+      if(await NET.discover()) report = await NET.survey();
+    }catch(e){ /* узел постарше — эндпоинта просто нет, не беда */ }
+  }
+  LIVE = report.reachable > 0;
+  setBadge(LIVE);
+  renderNodes(report);
+  const bar=$('syncTxt');
+  if(!report.reachable){
+    bar.innerHTML='Сеть недоступна: <b>0</b> из '+report.total+' узлов';
+  } else {
+    const behind = report.behind ? `, отстают: ${report.behind}` : '';
+    bar.innerHTML=`Высота <b>${report.height}</b> · узлов на связи `+
+      `<b>${report.reachable}</b> из ${report.total}${behind}`;
+  }
+  return report;
+}
+
+function renderNodes(report){
+  const box=$('nodeList');
+  box.innerHTML=(report.nodes||[]).map(item=>{
+    const cls = !item.ok ? 'dead' : item.foreign ? 'foreign'
+              : (item.url===report.best ? 'best' : '');
+    const state = !item.ok ? 'недоступен'
+                : item.foreign ? 'чужая сеть'
+                : `высота ${item.height} · ${item.latency} мс`;
+    return `<div class="node ${cls}"><span class="u">${esc(item.url)}</span>`+
+      `<span class="st">${esc(state)}</span>`+
+      `<button class="ghost tiny" data-url="${esc(item.url)}">✕</button></div>`;
+  }).join('') || '<div class="empty">узлов нет</div>';
+  box.querySelectorAll('button[data-url]').forEach(b=>{
+    b.onclick=()=>{ NET.remove(b.dataset.url); syncNetwork(); };
+  });
+}
+
+function toggleNodes(){ $('nodesPanel').classList.toggle('hide'); }
+
+async function addNode(){
+  const value=$('nodeUrl').value.trim();
+  if(!value) return;
+  if(!NET.add(value)){ toast('Такой узел уже есть'); return; }
+  $('nodeUrl').value='';
+  await syncNetwork();
+  toast('Узел добавлен');
+}
+
+/* ── Сохранение кошелька на устройстве ──────────────────────────────────
+   Раньше ключ жил только в памяти страницы: закрыл приложение — потерял
+   деньги. Для кошелька на телефоне это не мелочь, а главное свойство.
+   ⚠️ Ключ лежит в localStorage открытым: у того, кто получил разблокированный
+   телефон, он есть. Шифрование под PIN — следующий шаг. */
+const KEY_STORE='bhydra.wallet';
+function saveWallet(){
+  try{ localStorage.setItem(KEY_STORE, JSON.stringify(
+    {key:wallet.key, address:wallet.address})); }catch(e){}
+}
+function loadWallet(){
+  try{
+    const saved=JSON.parse(localStorage.getItem(KEY_STORE)||'null');
+    if(saved && /^[0-9a-f]{64}$/i.test(saved.key||'')) return saved;
+  }catch(e){}
+  return null;
+}
+function forgetWallet(){
+  if(!confirm('Удалить ключ с этого устройства? Без копии деньги будут потеряны.')) return;
+  try{ localStorage.removeItem(KEY_STORE); }catch(e){}
+  newWallet();
+  toast('Ключ удалён с устройства');
+}
+
+/* ── Резервная копия ключа ─────────────────────────────────────────────
+   На iPhone это не роскошь, а необходимость: Safari чистит хранилище сайта
+   после ~7 дней без визитов (ITP). У приложения, добавленного на главный
+   экран, срок не действует — но пока кошелёк открыт «просто вкладкой», ключ
+   может исчезнуть сам, и вместе с ним деньги. */
+function exportKey(){
+  if(!wallet.key){ toast('Кошелька ещё нет'); return; }
+  const payload=JSON.stringify({
+    network:'B-hydra', address:wallet.address, private_key:wallet.key,
+    saved:new Date().toISOString(),
+  }, null, 2);
+  const name=`bhydra-${(wallet.address||'wallet').slice(3,11)}.json`;
+  try{
+    const blob=new Blob([payload], {type:'application/json'});
+    const link=document.createElement('a');
+    link.href=URL.createObjectURL(blob);
+    link.download=name;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(()=>URL.revokeObjectURL(link.href), 4000);
+    toast('Файл с ключом сохранён');
+  }catch(e){
+    // На iOS скачивание из standalone-приложения может не сработать —
+    // тогда показываем ключ, чтобы его можно было переписать или скопировать.
+    showKey();
+    toast('Скопируйте ключ вручную');
+  }
+  markBackedUp();
+}
+
+const BACKUP_FLAG='bhydra.backed-up';
+function markBackedUp(){
+  try{ localStorage.setItem(BACKUP_FLAG, wallet.key.slice(0,16)); }catch(e){}
+  $('backupBar').classList.add('hide');
+}
+function needsBackup(){
+  if(!wallet.key) return false;
+  try{ return localStorage.getItem(BACKUP_FLAG) !== wallet.key.slice(0,16); }
+  catch(e){ return true; }
+}
+function updateBackupBar(){
+  $('backupBar').classList.toggle('hide', !needsBackup());
+}
+
+/* Восстановление из сохранённого файла. */
+async function importBackup(file){
+  try{
+    const data=JSON.parse(await file.text());
+    const key=String(data.private_key||'').trim();
+    if(!/^[0-9a-f]{64}$/i.test(key)) throw new Error('в файле нет ключа');
+    wallet.key=key.toLowerCase();
+    wallet.address=BHydra.walletFromPrivateKey(wallet.key).address;
+    saveWallet(); markBackedUp();
+    render(); drawQR();
+    if(LIVE) refresh();
+    toast('Кошелёк восстановлен');
+  }catch(e){ toast('Не похоже на копию ключа: '+e.message); }
+}
+
+/* ── Офлайн-индикатор ── */
+window.addEventListener('online', ()=>{ ping().then(live=>{ if(live) refresh(); }); });
+window.addEventListener('offline', ()=>setBadge(false));
+
+/* ── Сервис-воркер: кошелёк открывается без сети ──────────────────────
+   Регистрируем только с сервера (file:// его не поддерживает) и не мешаем
+   работе, если браузер откажет: приложение и без воркера рабочее. */
+if('serviceWorker' in navigator && location.protocol.startsWith('http')){
+  window.addEventListener('load',()=>{
+    navigator.serviceWorker.register('/sw.js').catch(()=>{});
+  });
+}
+
+/* ── Старт ──────────────────────────────────────────────────────────────
+   Связь с узлом проверяется ДО создания кошелька. Раньше LIVE включался
+   только внутри refresh(), а refresh() вызывался только «если LIVE» — круг
+   замыкался, и страница навсегда оставалась в демо-режиме, даже когда узел
+   отвечал на том же адресе. */
+(async function start(){
+  aura();
+  await syncNetwork();              // опрашиваем ВСЕ узлы до создания кошелька
+  const saved=loadWallet();
+  if(saved){
+    // Кошелёк уже есть на этом устройстве — адрес выводим из ключа локально.
+    wallet={address:saved.address, key:saved.key, balance:0, utxos:0, history:[]};
+    if(window.BHydra){
+      try{ wallet.address=BHydra.walletFromPrivateKey(saved.key).address; }catch(e){}
+    }
+    render(); drawQR();
+    if(LIVE) refresh();
+  } else {
+    newWallet();
+  }
+  if(scanSupported()) $('scanBtn').classList.remove('hide');
+  updateBackupBar();
+  // На iOS полосу установки показываем сами: события beforeinstallprompt
+  // там не бывает, и иначе владелец iPhone не узнает про установку вовсе.
+  if(isIOS() && !isStandalone()){
+    $('installTxt').innerHTML='📱 <b>Поставить на телефон:</b> «Поделиться» → '+
+      '«На экран «Домой»». Так кошелёк работает без сети и не теряет ключ';
+    $('installBtn').classList.add('hide');
+    $('installBar').classList.remove('hide');
+  }
+  setInterval(()=>{ if(LIVE){ syncNetwork(); refresh(); } }, 8000);
+})();
 </script>
 </body>
 </html>

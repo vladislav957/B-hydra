@@ -37,6 +37,21 @@ def blocks_per_year() -> float:
     return SECONDS_PER_YEAR / BLOCK_TIME_SECONDS
 
 
+def halving_years() -> float:
+    """Сколько лет проходит между халвингами при ЦЕЛЕВОМ времени блока.
+
+    ⚠️ Это СЛЕДСТВИЕ, а не правило. Правило консенсуса — по ВЫСОТЕ: награда
+    делится пополам каждые HALVING_INTERVAL блоков, и никакой календарь в него
+    не входит. Годы получаются из целевого времени блока, а фактическое время
+    гуляет вокруг цели вместе с хешрейтом сети: майнеров стало больше —
+    халвинг придёт раньше срока, меньше — позже. Писать в документах «халвинг
+    раз в N лет» без этой оговорки нельзя, иначе число выглядит обещанием,
+    которого код не даёт. (В белой книге стояло «каждые 4 года» — цифра
+    Bitcoin, к нашим параметрам отношения не имеющая.)
+    """
+    return HALVING_INTERVAL * BLOCK_TIME_SECONDS / SECONDS_PER_YEAR
+
+
 def year_of_height(height: int) -> float:
     """Календарный год, к которому будет добыт блок с данной высотой."""
     return GENESIS_YEAR + height / blocks_per_year()
@@ -74,7 +89,8 @@ def emission_schedule(max_halvings: int = 10):
 
 
 if __name__ == "__main__":
-    print(f"Интервал халвинга  : {HALVING_INTERVAL:,} блоков")
+    print(f"Интервал халвинга  : {HALVING_INTERVAL:,} блоков "
+          f"(≈{halving_years():.1f} года при целевом времени блока)")
     print(f"Время блока        : {BLOCK_TIME_SECONDS / 60:.1f} мин")
     print(f"Блоков в год       : {blocks_per_year():,.0f}")
     print(f"Делимость монеты   : 1e-{DECIMALS} BHY")

@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleDisplayName</key>
+  <string>B-hydra</string>
+  <key>CFBundleName</key>
+  <string>B-hydra Wallet</string>
+  <key>CFBundleIdentifier</key>
+  <string>io.bhydra.wallet</string>
+  <key>CFBundleShortVersionString</key>
+  <string>1.0</string>
+  <key>CFBundleVersion</key>
+  <string>1</string>
+  <key>LSRequiresIPhoneOS</key>
+  <true/>
+  <key>UILaunchScreen</key>
+  <dict/>
+  <key>UISupportedInterfaceOrientations</key>
+  <array>
+    <string>UIInterfaceOrientationPortrait</string>
+  </array>
+
+  <!-- Без этого текста приложение ПАДАЕТ при первом обращении к камере:
+       iOS требует объяснить пользователю, зачем она нужна. -->
+  <key>NSCameraUsageDescription</key>
+  <string>Камера нужна, чтобы отсканировать QR-код адреса получателя.</string>
+
+  <!-- Узел в домашней сети обычно отвечает по обычному HTTP, а iOS с 9-й
+       версии его запрещает (App Transport Security). Открываем ТОЛЬКО
+       локальные адреса: разрешать открытый HTTP куда угодно нельзя, по нему
+       ходят балансы и адреса. Для узла с сертификатом (флаг tls) это не нужно. -->
+  <key>NSAppTransportSecurity</key>
+  <dict>
+    <key>NSAllowsLocalNetworking</key>
+    <true/>
+  </dict>
+
+  <!-- Ссылка bhydra:<адрес> — её открывает системная «Камера», отсканировав
+       QR чужого кошелька. -->
+  <key>CFBundleURLTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleURLName</key>
+      <string>io.bhydra.wallet</string>
+      <key>CFBundleURLSchemes</key>
+      <array>
+        <string>bhydra</string>
+      </array>
+    </dict>
+  </array>
+</dict>
+</plist>

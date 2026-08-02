@@ -47,6 +47,7 @@ api.py — REST API узла B-hydra (для мобильных кошелько
 import json
 import os
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, unquote
 
@@ -56,7 +57,8 @@ if __name__ == "__main__" and __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     __package__ = "b_hydra"
 
-from .blockchain import MAX_SUPPLY
+from .blockchain import CHAIN_ID, MAX_SUPPLY
+from . import icon
 from .contract import ContractManager
 from .node import BHydraNode
 from .transaction import Transaction
@@ -64,6 +66,10 @@ from .wallet import is_valid_address, Wallet
 
 DEFAULT_STATE = "bhydra_chain.json"
 DEFAULT_DIFFICULTY = 3
+# Файлы сертификата для --tls. Ключ сертификата — НЕ ключ кошелька: его утечка
+# позволяет выдать себя за наш сервер, но не тронуть монеты.
+DEFAULT_CERT = "bhydra_cert.pem"
+DEFAULT_KEY = "bhydra_cert.key"
 MAX_BODY_SIZE = 16 * 1024 * 1024   # анти-DoS: предел размера тела запроса (16 МБ)
 # explorer.html и wallet.html лежат в корне репозитория (на уровень выше пакета).
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -72,18 +78,68 @@ _WALLET_HTML = os.path.join(_ROOT, "wallet.html")
 # Подпись транзакций в браузере: кошелёк грузит этот файл и подписывает сам,
 # поэтому приватный ключ не уходит на узел.
 _SIGN_JS = os.path.join(_ROOT, "bhydra-sign.js")
+# Кошелёк ставится на телефон как приложение (PWA): манифест, сервис-воркер и
+# иконки. Иконки не хранятся в репозитории — их рисует b_hydra/icon.py.
+_QR_JS = os.path.join(_ROOT, "bhydra-qr.js")
+_NET_JS = os.path.join(_ROOT, "bhydra-net.js")
+_MANIFEST = os.path.join(_ROOT, "manifest.webmanifest")
+_SERVICE_WORKER = os.path.join(_ROOT, "sw.js")
 
 
 class BHydraAPI(BaseHTTPRequestHandler):
     """Обработчик REST-запросов к узлу B-hydra."""
 
     node = None             # общий BHydraNode (устанавливается в make_server)
+    p2p = None              # P2PNode, если узел ещё и участник сети
     contracts = None        # общий ContractManager (эскроу и смарт-чеки)
     state_file = None
     contracts_file = None
+    tls = False             # поднят ли сервер по HTTPS
+    allow_key_endpoints = None   # None — решать по обстоятельствам
     lock = threading.Lock()
 
     # --- Вспомогательное -------------------------------------------------
+    def _client_is_local(self) -> bool:
+        host = (self.client_address or ("",))[0]
+        return host in ("127.0.0.1", "::1", "::ffff:127.0.0.1", "localhost")
+
+    # --- Мост в сеть ------------------------------------------------------
+    # Узел в сети обязан РАССЫЛАТЬ то, что сделал сам. Раньше здесь звался
+    # `node.mine_pending`/`node.add_transaction` напрямую, минуя P2P: блок,
+    # добытый через веб-кошелёк или обозреватель, оставался только у этого
+    # узла, а транзакция не доходила до майнеров. Со стороны это выглядело как
+    # «сеть не работает», хотя соединение было в порядке.
+    def _accept_tx(self, tx) -> bool:
+        if self.p2p is not None:
+            return self.p2p.submit_transaction(tx)      # + анонс соседям
+        return self.node.add_transaction(tx)
+
+    def _mine(self, miner, message=None, wallet=None):
+        if self.p2p is not None:
+            return self.p2p.mine(miner, message=message, wallet=wallet)
+        return self.node.mine_pending(miner, message=message, wallet=wallet)
+
+    def _keys_allowed(self) -> bool:
+        """Можно ли на этом соединении принимать приватный ключ.
+
+        `/api/send`, `/api/wallet` и контрактные POST принимают приватный ключ
+        целиком — это описано как «для СВОЕГО локального узла». Но описание в
+        документации ничего не запрещает: по открытому HTTP ключ уходил в сеть
+        открытым текстом, и его читал любой на пути. Теперь правило проверяется
+        кодом: по TLS — можно, без TLS — только с локального адреса, где
+        перехватывать нечего. Явный `allow_key_endpoints` перекрывает оба
+        случая (для тех, кто ставит свой обратный прокси с TLS).
+        """
+        if self.allow_key_endpoints is not None:
+            return bool(self.allow_key_endpoints)
+        return self.tls or self._client_is_local()
+
+    def _refuse_key_endpoint(self) -> None:
+        self._send(403, {"error": "приватный ключ по открытому каналу не "
+                                  "принимается: включите TLS (--tls) или "
+                                  "подписывайте транзакцию на устройстве "
+                                  "(POST /api/transaction)"})
+
     def _send(self, code, obj):
         body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
         self.send_response(code)
@@ -106,6 +162,24 @@ class BHydraAPI(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _send_file(self, path, content_type, no_store=False):
+        """Отдаёт файл с диска. 404, если его нет."""
+        try:
+            with open(path, "rb") as handle:
+                body = handle.read()
+        except OSError:
+            self._send(404, {"error": f"{os.path.basename(path)} не найден"})
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        if no_store:
+            # Сервис-воркер кэшировать нельзя: иначе обновление кошелька
+            # застрянет у пользователя навсегда.
+            self.send_header("Cache-Control", "no-cache")
         self.end_headers()
         self.wfile.write(body)
 
@@ -230,6 +304,37 @@ class BHydraAPI(BaseHTTPRequestHandler):
                 except OSError:
                     self._send_script(404, "// bhydra-sign.js not found")
                 return
+            if parts == ["bhydra-qr.js"]:
+                try:
+                    with open(_QR_JS, encoding="utf-8") as fh:
+                        self._send_script(200, fh.read())
+                except OSError:
+                    self._send_script(404, "// bhydra-qr.js not found")
+                return
+            if parts == ["bhydra-net.js"]:
+                try:
+                    with open(_NET_JS, encoding="utf-8") as fh:
+                        self._send_script(200, fh.read())
+                except OSError:
+                    self._send_script(404, "// bhydra-net.js not found")
+                return
+            if parts == ["manifest.webmanifest"]:
+                self._send_file(_MANIFEST, "application/manifest+json")
+                return
+            if parts == ["sw.js"]:
+                # Сервис-воркер обязан отдаваться из КОРНЯ: его область
+                # действия не может быть шире каталога, из которого он отдан,
+                # а кошелёк лежит на /wallet.
+                self._send_file(_SERVICE_WORKER,
+                                "application/javascript; charset=utf-8",
+                                no_store=True)
+                return
+            if len(parts) == 1 and parts[0] in ("icon-192.png", "icon-512.png"):
+                # Иконки не лежат в репозитории — они СЧИТАЮТСЯ (b_hydra/icon.py)
+                # и создаются при первом запросе рядом с остальными ресурсами.
+                icon.ensure_files(_ROOT)
+                self._send_file(os.path.join(_ROOT, parts[0]), "image/png")
+                return
             if parts == ["api", "block"] or (len(parts) == 3 and parts[:2] == ["api", "block"]):
                 index = int(parts[2]) if len(parts) == 3 else -1
                 block = self.node.get_block(index)
@@ -273,6 +378,17 @@ class BHydraAPI(BaseHTTPRequestHandler):
                 self._send(200, {
                     "network": "B-hydra",
                     "height": len(bc.chain),
+                    # Суммарная работа и генезис — чтобы клиент мог выбрать
+                    # лучший узел ПО ТОМУ ЖЕ правилу, что и сами узлы
+                    # (replace_chain сравнивает работу, а не высоту), и не
+                    # принять за свою сеть чужую с другим генезисом.
+                    "total_work": bc.total_work,
+                    "genesis": bc.chain[0].hash,
+                    "chain_id": CHAIN_ID,
+                    # Кто отвечает. Нужно кошельку, чтобы не счесть ОДИН узел,
+                    # доступный по двум адресам (localhost и IP в сети), за два
+                    # независимых: на числе независимых узлов держится SPV.
+                    "node_id": getattr(self.p2p, "_node_id", None),
                     "difficulty": bc.last_block.difficulty,
                     "block_work": bc.last_block.work,
                     "target_block_time_min": round(TARGET_BLOCK_TIME / 60, 1),
@@ -282,6 +398,28 @@ class BHydraAPI(BaseHTTPRequestHandler):
                     "mining_end_year": round(mining_end_year()),
                     "hash_algorithm": "SHA-512",
                     "model": "UTXO",
+                })
+            elif parts == ["api", "nodes"]:
+                # Список REST-адресов сети — «seed» для кошелька. Телефон
+                # вводит ОДИН адрес, отсюда узнаёт остальные и дальше переживает
+                # падение любого узла. Отпечаток сети рядом: клиент обязан
+                # убедиться, что список пришёл из ЕГО сети, иначе он подцепит
+                # чужую цепочку.
+                bc = self.node.blockchain
+                p2p = getattr(self, "p2p", None)
+                if p2p is not None:
+                    nodes = p2p.api_nodes()
+                    peers = len(p2p.peer_list())
+                else:
+                    nodes, peers = [], None
+                self._send(200, {
+                    "nodes": nodes,
+                    # Сколько соседей у САМОГО узла: ноль здесь означает, что
+                    # он в сети один, и список из одного адреса — не ошибка.
+                    "peers": peers,
+                    "p2p": None if p2p is None else f"{p2p.host}:{p2p.port}",
+                    "genesis": bc.chain[0].hash,
+                    "chain_id": CHAIN_ID,
                 })
             elif len(parts) == 3 and parts[:2] == ["api", "balance"]:
                 addr = parts[2]
@@ -341,12 +479,15 @@ class BHydraAPI(BaseHTTPRequestHandler):
             if parts == ["api", "transaction"]:
                 tx = Transaction.from_dict(data)
                 with self.lock:
-                    accepted = self.node.add_transaction(tx)
+                    accepted = self._accept_tx(tx)
                     if accepted:
                         self._save()
                 self._send(200 if accepted else 400,
                            {"accepted": accepted, "txid": tx.txid})
             elif parts == ["api", "wallet"]:
+                if not self._keys_allowed():
+                    self._refuse_key_endpoint()
+                    return
                 # По приватному ключу вернуть его АДРЕС + баланс/историю, чтобы
                 # кошелёк показал реальные данные после импорта ключа.
                 # (Ключ уходит на узел — как и в /api/send; для своего узла.)
@@ -366,6 +507,9 @@ class BHydraAPI(BaseHTTPRequestHandler):
                     "history": self.node.address_history(w.address),
                 })
             elif parts == ["api", "send"]:
+                if not self._keys_allowed():
+                    self._refuse_key_endpoint()
+                    return
                 # Перевод на другой адрес: узел подписывает транзакцию ключом
                 # отправителя и кладёт в мемпул. Возвращает ЧЁТКУЮ причину отказа
                 # (неверный адрес / сумма / нехватка средств), а не общий отказ.
@@ -407,7 +551,7 @@ class BHydraAPI(BaseHTTPRequestHandler):
                     if tx is None:
                         self._send(400, {"error": "не удалось собрать транзакцию из UTXO"})
                         return
-                    accepted = self.node.add_transaction(tx)
+                    accepted = self._accept_tx(tx)
                     if accepted:
                         self._save()
                 self._send(200 if accepted else 400, {
@@ -421,6 +565,9 @@ class BHydraAPI(BaseHTTPRequestHandler):
                     "error": None if accepted else "транзакция отклонена (двойная трата?)",
                 })
             elif len(parts) >= 3 and parts[:2] == ["api", "contract"]:
+                if not self._keys_allowed():
+                    self._refuse_key_endpoint()   # все контрактные POST с ключом
+                    return
                 # Смарт-контракты: понятная ошибка (400) вместо общего отказа.
                 try:
                     self._handle_contract_post(parts[2:], data)
@@ -438,11 +585,13 @@ class BHydraAPI(BaseHTTPRequestHandler):
                 # Ключ (необязательный) подписывает заметку — как и /api/send,
                 # это путь ДЛЯ СВОЕГО узла: приватный ключ наружу не шлют.
                 key = data.get("private_key")
+                if key and not self._keys_allowed():
+                    self._refuse_key_endpoint()   # без ключа майнить можно
+                    return
                 with self.lock:
                     try:
                         wallet = Wallet.from_private_hex(key) if key else None
-                        block = self.node.mine_pending(miner, message=note,
-                                                       wallet=wallet)
+                        block = self._mine(miner, message=note, wallet=wallet)
                     except ValueError as err:
                         self._send(400, {"error": str(err)})
                         return
@@ -461,10 +610,45 @@ class BHydraAPI(BaseHTTPRequestHandler):
             self._send(500, {"error": str(exc)})
 
 
+def make_tls_context(certfile, keyfile):
+    """Контекст TLS для сервера: TLS 1.2+ и никакого старья.
+
+    Свой TLS мы НЕ пишем: для браузера нужен проверенный стек, и он есть в
+    стандартной библиотеке. Собственный протокол `secure.py` — для канала
+    узел↔узел, где обе стороны наши; браузеру он не годится.
+
+    Минимум TLS 1.2: TLS 1.0/1.1 сломаны и выключены везде, а оставленная
+    поддержка старой версии — это готовое понижение для активного атакующего.
+    """
+    import ssl
+
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    context.load_cert_chain(certfile, keyfile)
+    return context
+
+
 def make_server(host="0.0.0.0", port=8000, state_file=DEFAULT_STATE,
-                difficulty=DEFAULT_DIFFICULTY):
-    """Создаёт HTTP-сервер с загруженным (или новым) узлом B-hydra."""
-    if state_file and os.path.exists(state_file):
+                difficulty=DEFAULT_DIFFICULTY, certfile=None, keyfile=None,
+                allow_key_endpoints=None, p2p=None, node=None):
+    """Создаёт сервер с загруженным (или новым) узлом B-hydra.
+
+    `certfile`/`keyfile` включают HTTPS. `allow_key_endpoints` разрешает
+    эндпоинты, принимающие приватный ключ, и по умолчанию выводится сам:
+    с TLS — да, без TLS — только для локальных клиентов.
+
+    `p2p` — уже созданный `P2PNode` поверх ТОГО ЖЕ узла: тогда REST-сервер не
+    просто отвечает про свою цепочку, а является участником сети, и кошелёк,
+    подключённый к нему, видит общую цепочку, а не изолированную копию.
+    `node` — готовый узел (так его отдаёт GUI, где цепочка уже в памяти).
+    """
+    if p2p is not None:
+        # Узел уже создан снаружи и живёт в сети — берём ЕГО цепочку, иначе
+        # REST отвечал бы про свою копию, а сеть жила бы отдельно.
+        node = p2p.node
+    elif node is not None:
+        pass                        # цепочку дали снаружи — ничего не грузим
+    elif state_file and os.path.exists(state_file):
         node = BHydraNode.load(state_file)
     else:
         node = BHydraNode(difficulty=difficulty)
@@ -477,10 +661,17 @@ def make_server(host="0.0.0.0", port=8000, state_file=DEFAULT_STATE,
     else:
         contracts = ContractManager(node)
     BHydraAPI.node = node
+    BHydraAPI.p2p = p2p
     BHydraAPI.contracts = contracts
     BHydraAPI.state_file = state_file
     BHydraAPI.contracts_file = contracts_file
-    return ThreadingHTTPServer((host, port), BHydraAPI)
+    BHydraAPI.tls = bool(certfile and keyfile)
+    BHydraAPI.allow_key_endpoints = allow_key_endpoints
+    server = ThreadingHTTPServer((host, port), BHydraAPI)
+    if certfile and keyfile:
+        server.socket = make_tls_context(certfile, keyfile).wrap_socket(
+            server.socket, server_side=True)
+    return server
 
 
 def main():
@@ -489,17 +680,104 @@ def main():
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--file", default=DEFAULT_STATE)
+    parser.add_argument("--tls", action="store_true",
+                        help="включить HTTPS (сертификат создаётся сам, если нет)")
+    parser.add_argument("--cert", default=DEFAULT_CERT,
+                        help="файл сертификата (PEM)")
+    parser.add_argument("--key", default=DEFAULT_KEY,
+                        help="файл приватного ключа сертификата (PEM)")
+    parser.add_argument("--allow-insecure-keys", action="store_true",
+                        help="принимать приватный ключ и без TLS (не надо так)")
+    parser.add_argument("--p2p", action="store_true",
+                        help="войти в сеть B-hydra (иначе узел живёт сам по себе)")
+    parser.add_argument("--p2p-port", type=int, default=5000,
+                        help="порт узла в сети (по умолчанию 5000)")
+    parser.add_argument("--seed", action="append", default=[],
+                        help="seed-узел host:port (можно повторять)")
+    parser.add_argument("--peers-file", default="bhydra_peers.json",
+                        help="где хранить соседей между запусками")
+    parser.add_argument("--no-discovery", action="store_true",
+                        help="не искать соседей UDP-маяком в локальной сети")
     args = parser.parse_args()
 
-    server = make_server(args.host, args.port, args.file)
-    print(f"B-hydra обозреватель: http://{args.host}:{args.port}/")
-    print(f"REST API           : http://{args.host}:{args.port}/api/info")
+    certfile = keyfile = None
+    if args.tls:
+        from . import certgen
+
+        if certgen.ensure_files(args.cert, args.key):
+            print(f"Создан самоподписанный сертификат: {args.cert}")
+            print("  ⚠ браузер предупредит про неизвестный центр сертификации —")
+            print("    для публичного узла возьмите настоящий (Let's Encrypt).")
+        certfile, keyfile = args.cert, args.key
+
+    p2p = None
+    if args.p2p:
+        from .p2p import P2PNode, local_ip, parse_seeds
+        from .node import BHydraNode
+
+        if args.file and os.path.exists(args.file):
+            chain_node = BHydraNode.load(args.file)
+        else:
+            chain_node = BHydraNode()
+        # Адрес для представления — тот, по которому нас достанут ДРУГИЕ
+        # машины. 127.0.0.1 виден только этому компьютеру, и узел с таким
+        # адресом в сети бесполезен: соседи не смогут подключиться обратно.
+        p2p = P2PNode(local_ip(), args.p2p_port, node=chain_node,
+                      peers_file=args.peers_file,
+                      seeds=parse_seeds(args.seed) + parse_seeds(
+                          os.environ.get("BHYDRA_SEEDS", "").split(",")),
+                      api_port=args.port, api_tls=bool(certfile))
+
+    server = make_server(args.host, args.port, args.file, certfile=certfile,
+                         keyfile=keyfile,
+                         allow_key_endpoints=True if args.allow_insecure_keys
+                         else None, p2p=p2p)
+    scheme = "https" if certfile else "http"
+    print(f"B-hydra обозреватель: {scheme}://{args.host}:{args.port}/")
+    print(f"REST API           : {scheme}://{args.host}:{args.port}/api/info")
     print(f"Состояние цепочки  : {args.file}   (Ctrl+C — стоп)")
+    if p2p is not None:
+        p2p.start()
+        if not args.no_discovery:
+            p2p.start_discovery()
+        alive = p2p.bootstrap()
+        print(f"Узел в сети        : {p2p.host}:{p2p.port}  "
+              f"(соседей на старте: {alive})")
+        print(f"Кошелькам дайте    : {scheme}://{p2p.host}:{args.port}"
+              f"   — остальные узлы они узнают сами (/api/nodes)")
+        if not args.seed and not alive:
+            print("  ⚠ соседей нет. В локальной сети они найдутся сами по "
+                  "UDP-маяку; через интернет нужен --seed host:5000")
+
+        def _maintain(interval=15):
+            """Периодически: новые соседи + догнать цепочку.
+
+            Анонсы приносят только то, что произошло ПРИ НАС. Узел, который
+            стоял выключенным, без этого так и остался бы на своей высоте:
+            никто не станет пересылать ему старые блоки по собственной воле.
+            """
+            while True:
+                time.sleep(interval)
+                try:
+                    p2p.discover_peers()
+                    p2p.sync()
+                except Exception:      # сеть отвалилась — не роняем сервер
+                    pass
+
+        threading.Thread(target=_maintain, daemon=True).start()
+    if not certfile:
+        # Молча оставлять открытый канал нельзя: пользователь должен знать, что
+        # приватный ключ по нему не примут (и почему).
+        print("Канал ОТКРЫТ (без TLS): эндпоинты с приватным ключом доступны "
+              "только с локального адреса. HTTPS — флаг --tls.")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         print("\nОстановка сервера…")
         server.shutdown()
+    finally:
+        if p2p is not None:
+            p2p.stop()          # заодно сохранит соседей и их REST-адреса
 
 
 if __name__ == "__main__":

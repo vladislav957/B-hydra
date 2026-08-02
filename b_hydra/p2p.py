@@ -21,6 +21,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from . import secure
 from .tcp import MAX_MESSAGE_SIZE, recv_message, send_message
+from .transport import TCPTransport
 
 # Предел числа запомненных txid/хешей блоков для анти-петли gossip. Без него
 # множества seen_* росли бы без границ (утечка памяти и мягкий DoS: атакующий
@@ -114,6 +115,34 @@ DEFAULT_SEEDS = ()               # адреса вида ("host", port); зад�
 # за наш узел, но НЕ тронуть монеты — это разные ключи.
 DEFAULT_IDENTITY_FILE = "bhydra_identity.json"
 
+def local_ip() -> str:
+    """IP этой машины в локальной сети — адрес, по которому достанут ДРУГИЕ.
+
+    `127.0.0.1` виден только на своём компьютере, и узел, представившийся так,
+    для сети бесполезен: соседи не смогут подключиться обратно, а телефон не
+    откроет кошелёк. UDP-«коннект» пакетов не шлёт — он лишь заставляет ядро
+    выбрать интерфейс и показать его адрес.
+    """
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        probe.connect(("8.8.8.8", 80))
+        return probe.getsockname()[0]
+    except OSError:
+        return "127.0.0.1"
+    finally:
+        probe.close()
+
+
+def parse_seeds(items) -> list:
+    """Разбирает адреса вида `host:port` в пары. Мусор молча пропускается."""
+    seeds = []
+    for item in items or ():
+        host, _, port = str(item).strip().rpartition(":")
+        if host and port.isdigit():
+            seeds.append((host, int(port)))
+    return seeds
+
+
 # --- Репутация пиров --------------------------------------------------------
 # Лимиты выше ограничивают УЩЕРБ от плохого соседа, но не отсекают источник:
 # пир, который шлёт мусор или заведомо негодные блоки, оставался в таблице, и
@@ -183,9 +212,22 @@ class P2PNode:
     def __init__(self, host="127.0.0.1", port=5000, node=None,
                  seen_limit=SEEN_LIMIT, max_peers=MAX_PEERS,
                  peers_file=None, seeds=None, encrypt=True,
-                 require_encryption=False, identity=None, identity_file=None):
+                 require_encryption=False, identity=None, identity_file=None,
+                 api_port=None, api_tls=False, transport=None):
         self.host = host
         self.port = port
+        # Чем дотягиваемся до соседей. По умолчанию TCP/IP — как было всегда.
+        # Протокол выше сокета транспорта не знает (см. transport.py), поэтому
+        # подменой этого объекта сеть переносится на любой байтовый поток:
+        # Bluetooth RFCOMM, Unix-сокет, что угодно.
+        self.transport = transport or TCPTransport()
+        # Адрес REST-API этого узла. Он объявляется соседям рядом с P2P-адресом
+        # и нужен КОШЕЛЬКАМ: телефон и браузер не умеют говорить нашим TCP-
+        # протоколом (сырых сокетов там нет вовсе), им нужна HTTP-точка входа.
+        # Узнать её больше неоткуда — P2P-порт для этого не годится.
+        self.api_port = int(api_port) if api_port else None
+        self.api_tls = bool(api_tls)
+        self._peer_api = {}         # (host, port) → (api_port, tls) соседей
         # Шифрование канала. `encrypt` управляет ИСХОДЯЩИМИ соединениями, сервер
         # же принимает и шифрованные, и открытые — иначе узел, намеренно
         # запущенный открытым, оказался бы отрезан от сети. Полностью закрыть
@@ -252,6 +294,7 @@ class P2PNode:
         self._inbound = threading.Semaphore(MAX_INBOUND_CONNECTIONS)
         self._server = None
         self._running = False
+        self._stopping = False      # stop() успел раньше, чем поднялся сокет
         self._node_id = secrets.token_hex(8)   # чтобы не отвечать на свой же маяк
         self._discovery_running = False
         self.on_discover = None                # колбэк (host, port) при находке
@@ -291,6 +334,9 @@ class P2PNode:
             host, port = message.get("host"), message.get("port")
             if host and port:
                 self.add_peer(host, port)
+                # Заодно запоминаем, где у соседа REST: кошелькам нужен именно
+                # он, а другого случая узнать этот адрес не будет.
+                self.remember_api(host, port, message)
             return self._json(self._peers_payload())
 
         if mtype == "get_peers":
@@ -435,6 +481,60 @@ class P2PNode:
         return (message.get("chain_id") == ours["chain_id"]
                 and message.get("genesis") == ours["genesis"])
 
+    # --- Адреса REST-API: как кошелёк узнаёт сеть -------------------------
+    def api_payload(self) -> dict:
+        """Свой REST-адрес для объявления соседям (пусто, если API не поднят)."""
+        if not self.api_port:
+            return {}
+        return {"api": self.api_port, "api_tls": self.api_tls}
+
+    def remember_api(self, host, port, message) -> bool:
+        """Запоминает REST-адрес соседа из его сообщения.
+
+        Хост берётся из адреса пира, а НЕ из тела сообщения: иначе любой узел
+        объявлял бы API на чужом адресе и заводил кошельки не туда.
+        """
+        if not isinstance(message, dict):
+            return False
+        api_port = message.get("api")
+        try:
+            api_port = int(api_port)
+        except (TypeError, ValueError):
+            return False
+        if not 1 <= api_port <= 65535:
+            return False
+        with self._peers_lock:
+            if len(self._peer_api) >= self.max_peers:
+                self._peer_api.pop(next(iter(self._peer_api)), None)
+            self._peer_api[(str(host), int(port))] = (api_port,
+                                                      bool(message.get("api_tls")))
+        return True
+
+    def api_nodes(self, include_self=True) -> list:
+        """Адреса REST-API, известные узлу: свой и соседей.
+
+        Это и есть «seed» для кошелька: телефон вводит ОДИН адрес, получает по
+        нему остальные и дальше переживает падение любого отдельного узла.
+        """
+        found = []
+        if include_self and self.api_port:
+            scheme = "https" if self.api_tls else "http"
+            # Свой адрес — тот, по которому нас достанет ТЕЛЕФОН. `127.0.0.1`
+            # тут всегда ошибка: на телефоне это сам телефон. А значением по
+            # умолчанию в GUI стоит именно loopback, так что случай не редкий.
+            host = local_ip() if self._is_loopback(self.host) else self.host
+            found.append(f"{scheme}://{host}:{self.api_port}")
+        with self._peers_lock:
+            known = dict(self._peer_api)
+            peers = set(self.peers)
+        for (host, port), (api_port, tls) in known.items():
+            if (host, port) not in peers:
+                continue              # соседа уже нет в таблице — и адреса нет
+            url = f"{'https' if tls else 'http'}://{host}:{api_port}"
+            if url not in found:
+                found.append(url)
+        return found
+
     def _peers_payload(self) -> dict:
         """Ответ со списком пиров — не длиннее MAX_PEERS_PER_MESSAGE.
 
@@ -442,30 +542,73 @@ class P2PNode:
         сотни мусорных адресов каждому, кто спросит, и порча расползается по
         сети сама. Отпечаток сети в ответе позволяет спросившему убедиться,
         что список пришёл от своего узла.
+
+        Вместе с адресами уходят и REST-адреса — свой (`api`) и известных
+        соседей (`peer_api`). Свой обязателен отдельным полем: сам себя узел в
+        список пиров не кладёт, и без этого спросивший не узнал бы адрес того,
+        у кого только что спросил.
         """
+        peers = self.peer_list()[:MAX_PEERS_PER_MESSAGE]
+        with self._peers_lock:
+            known = dict(self._peer_api)
+        peer_api = {f"{h}:{p}": [known[(h, p)][0], known[(h, p)][1]]
+                    for (h, p) in peers if (h, p) in known}
         return {"type": "peers",
-                "peers": [list(p) for p in self.peer_list()[:MAX_PEERS_PER_MESSAGE]],
+                "peers": [list(p) for p in peers],
+                "peer_api": peer_api,
+                **self.api_payload(),
                 **self.network_id()}
+
+    def _absorb_peer_api(self, message) -> int:
+        """Принимает REST-адреса соседей из ответа `peers`.
+
+        Адрес API привязан к адресу ПИРА, который уже прошёл проверку сети,
+        поэтому подмешать сюда произвольный хост нельзя: ключи, которых нет в
+        присланном списке пиров, отбрасываются.
+        """
+        table = message.get("peer_api")
+        if not isinstance(table, dict):
+            return 0
+        learned = 0
+        for key, value in list(table.items())[:MAX_PEERS_PER_MESSAGE]:
+            host, _, port = str(key).rpartition(":")
+            try:
+                port = int(port)
+                api_port = int(value[0])
+            except (TypeError, ValueError, IndexError):
+                continue
+            tls = bool(value[1]) if len(value) > 1 else False
+            if (host, port) not in set(self.peer_list()):
+                continue              # про чужих, не наших соседей, не слушаем
+            if self.remember_api(host, port, {"api": api_port, "api_tls": tls}):
+                learned += 1
+        return learned
 
     # --- Сервер ----------------------------------------------------------
     def _serve(self):
-        self._server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self._server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        # Слушаем на ВСЕХ интерфейсах (0.0.0.0): тогда узел доступен и по
-        # localhost, и по IP в локальной сети — другой компьютер сможет
-        # подключиться. self.host остаётся «адресом для представления» (его
-        # узел сообщает пирам, чтобы они могли подключиться обратно).
-        self._server.bind(("0.0.0.0", self.port))
-        self._server.listen(8)
+        # Сокет собирается в ЛОКАЛЬНОЙ переменной и публикуется в self только
+        # готовым: `stop()`, случившийся между bind и listen, обнулял self._server
+        # прямо под ногами у этого потока — тот падал с AttributeError, а сокет
+        # оставался открытым. Узел, остановленный сразу после старта, — обычное
+        # дело в тестах и при ошибке настройки.
+        # Сокет открывает ТРАНСПОРТ: здесь не должно быть ни AF_INET, ни
+        # «0.0.0.0» — иначе узел навсегда привязан к TCP/IP (см. transport.py).
+        # self.host остаётся «адресом для представления» (его узел сообщает
+        # пирам, чтобы они могли подключиться обратно).
+        server = self.transport.listen(self.port)
+        if self._stopping:
+            server.close()          # нас уже остановили — слушать некому
+            return
+        self._server = server
         self._running = True
         while self._running:
             try:
-                conn, addr = self._server.accept()
+                conn, host = self.transport.accept(server)
             except OSError:
                 break
             # Забаненного не обслуживаем вовсе — дешевле всего отказать сразу,
             # не тратя ни потока, ни разбора сообщения.
-            if self.is_banned(addr[0]):
+            if self.is_banned(host):
                 conn.close()
                 continue
             # Каждое соединение обслуживаем в отдельном потоке, чтобы узел мог
@@ -477,11 +620,11 @@ class P2PNode:
                 continue
             # Доля одного хоста ограничена: постоянное соединение держится
             # долго, и без этого один сосед занял бы всю таблицу слотов.
-            if not self._claim_host_slot(addr[0]):
+            if not self._claim_host_slot(host):
                 self._inbound.release()
                 conn.close()
                 continue
-            threading.Thread(target=self._handle_conn, args=(conn, addr[0]),
+            threading.Thread(target=self._handle_conn, args=(conn, host),
                              daemon=True).start()
 
     def _accept_session(self, conn, first_frame):
@@ -571,11 +714,13 @@ class P2PNode:
             self._inbound.release()
 
     def start(self):
+        self._stopping = False
         thread = threading.Thread(target=self._serve, daemon=True)
         thread.start()
         return thread
 
     def stop(self):
+        self._stopping = True
         # Сохраняем соседей до закрытия сокета: после перезапуска узел должен
         # знать, к кому идти, а не начинать с пустой таблицы.
         self.save_peers()
@@ -599,14 +744,11 @@ class P2PNode:
         self.close_pool()
         server, self._server = self._server, None
         if server is not None:
-            # Одного close() мало: поток, висящий в accept(), от него не
-            # просыпается, и «остановленный» узел продолжает отвечать на
-            # запросы. shutdown() прерывает accept и по-настоящему гасит узел.
-            try:
-                server.shutdown(socket.SHUT_RDWR)
-            except OSError:
-                pass
-            server.close()
+            # Разбудить поток, висящий в accept(), умеет только сам транспорт:
+            # у TCP для этого нужен shutdown(), у других — своё. Одного close()
+            # не хватает, и «остановленный» узел продолжал бы отвечать всем,
+            # кто успеет соединиться.
+            self.transport.close_listener(server)
 
     # --- Долговременный ключ узла и закрепление ключей соседей -------------
     def _load_identity(self):
@@ -761,10 +903,8 @@ class P2PNode:
                 return response
             self._close(sock)
 
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock = self.transport.connect(host, port, self.peer_timeout)
         try:
-            sock.settimeout(self.peer_timeout)
-            sock.connect((host, port))
             session = self._start_session(sock, host, port)
             response = self._exchange(sock, payload, session)
         except BaseException:
@@ -890,8 +1030,13 @@ class P2PNode:
         # подмена узла опять проходила бы незамеченной.
         with self._pool_lock:
             pins = {f"{h}:{p}": key for (h, p), key in self._pins.items()}
+        # REST-адреса соседей тоже: иначе после перезапуска кошельки снова
+        # знали бы ровно один узел — тот, что вписан руками.
+        with self._peers_lock:
+            api = {f"{h}:{p}": [port, tls]
+                   for (h, p), (port, tls) in self._peer_api.items()}
         payload = {"peers": [list(peer) for peer in self.peer_list()],
-                   "pins": pins}
+                   "pins": pins, "api": api}
         temporary = f"{path}.tmp"
         try:
             with open(temporary, "w", encoding="utf-8") as handle:
@@ -930,6 +1075,14 @@ class P2PNode:
                 self.pin_peer(host, int(port), str(key))
             except (TypeError, ValueError):
                 continue                  # мусор в закреплениях просто пропускаем
+        for entry, value in (stored.get("api") or {}).items():
+            host, _, port = str(entry).rpartition(":")
+            try:
+                self.remember_api(host, int(port),
+                                  {"api": value[0],
+                                   "api_tls": value[1] if len(value) > 1 else False})
+            except (TypeError, ValueError, IndexError):
+                continue
         return added
 
     def bootstrap(self) -> int:
@@ -951,6 +1104,10 @@ class P2PNode:
                 lambda host, port: self.send(host, port, self._hello_message())):
             if self.same_network(resp):
                 self._accept_peers(resp, source=peer[0])  # узнаём их соседей
+                # И где у них REST: вход в сеть по seed обязан давать кошельку
+                # тот же список, что и знакомство через connect().
+                self.remember_api(peer[0], peer[1], resp)
+                self._absorb_peer_api(resp)
                 alive += 1
             elif resp:
                 self.remove_peer(*peer)    # ответил, но из другой сети
@@ -1002,7 +1159,7 @@ class P2PNode:
 
     def _hello_message(self) -> dict:
         return {"type": "hello", "host": self.host, "port": self.port,
-                **self.network_id()}
+                **self.api_payload(), **self.network_id()}
 
     def _say_hello(self, peers):
         """Представляется каждому пиру (параллельно), чтобы сеть стала мешем.
@@ -1014,6 +1171,11 @@ class P2PNode:
                                                     self._hello_message())):
             if not self.same_network(resp):
                 self.remove_peer(*peer)
+                continue
+            # Свой REST-адрес сосед прислал в ответе — запоминаем его и те,
+            # что он знает про других.
+            self.remember_api(peer[0], peer[1], resp)
+            self._absorb_peer_api(resp)
 
     def connect(self, host, port) -> bool:
         """Подключается к узлу, обменивается пирами и синхронизируется.
@@ -1027,7 +1189,10 @@ class P2PNode:
             self.remove_peer(host, port)
             return False
         self.add_peer(host, port)
-        self._say_hello(self._accept_peers(resp, source=host))
+        self.remember_api(host, port, resp)
+        peers = self._accept_peers(resp, source=host)
+        self._absorb_peer_api(resp)
+        self._say_hello(peers)
         self.sync()
         return True
 
@@ -1041,20 +1206,68 @@ class P2PNode:
         fresh = []
         for _peer, resp in replies:
             fresh.extend(self._accept_peers(resp, source=_peer[0]))
+            # Вместе с адресами разносятся и REST-адреса: кошелёк, спросивший
+            # ЛЮБОЙ узел сети, получит список всех, а не только соседей входа.
+            self.remember_api(_peer[0], _peer[1], resp)
+            self._absorb_peer_api(resp)
         self._say_hello(fresh)
 
     # --- Авто-поиск в локальной сети (UDP-маяки, WiFi/LAN без интернета) ---
     def start_discovery(self, interval: int = 5):
-        """Запустить рассылку и приём UDP-маяков для авто-поиска узлов в сети."""
+        """Запустить рассылку и приём UDP-маяков для авто-поиска узлов в сети.
+
+        Маяки — свойство IP-сети, а не протокола B-hydra: широковещания нет ни
+        у Bluetooth, ни у соединения «точка-точка». Транспорт, который так не
+        умеет, честно отвечает отказом вместо того, чтобы поднимать потоки,
+        которые всё равно ничего не найдут (у него для поиска соседей свои
+        средства — например, обзор устройств Bluetooth).
+        """
+        if not self.transport.supports_discovery:
+            return False
         if self._discovery_running:
-            return
+            return False
         self._discovery_running = True
         threading.Thread(target=self._discovery_listen, daemon=True).start()
         threading.Thread(target=self._discovery_announce, args=(interval,),
                          daemon=True).start()
+        return True
 
     def stop_discovery(self):
         self._discovery_running = False
+
+    def discover_nearby(self) -> int:
+        """Соседи, которых транспорт видит САМ (осмотр Bluetooth и подобное).
+
+        Тот же смысл, что у UDP-маяка, только средство другое: у TCP соседей
+        приносит широковещание, у Bluetooth — обзор устройств вокруг. Поэтому
+        метод общий и работает с любым транспортом, который умеет
+        `neighbours()`; кто не умеет, возвращает пустой список, и вызов просто
+        ничего не делает.
+
+        Возвращает, сколько соседей НАШЕЙ сети добавилось. Чужие устройства
+        (наушники, телефоны) отсеиваются сами: `connect` требует совпадения
+        генезиса, и всё, что не наш узел, из таблицы вылетает.
+        """
+        added = 0
+        for host, port in self.transport.neighbours():
+            if (host, port) == (self.host, self.port):
+                continue
+            if not self.add_peer(host, port):
+                continue              # уже знаем или таблица полна
+            try:
+                if not self.connect(host, port):
+                    self.remove_peer(host, port)
+                    continue
+            except OSError:
+                self.remove_peer(host, port)   # не отозвался — не сосед
+                continue
+            added += 1
+            if self.on_discover:
+                try:
+                    self.on_discover(host, port)
+                except Exception:
+                    pass
+        return added
 
     def _discovery_announce(self, interval: int):
         """Периодически кричим в сеть «я — узел B-hydra на порту N»."""
@@ -1499,6 +1712,9 @@ def main():
                         help="не обслуживать открытые (нешифрованные) соединения")
     parser.add_argument("--difficulty", type=int, default=3, help="базовая сложность")
     parser.add_argument("--demo", action="store_true", help="запустить демо из 3 узлов")
+    parser.add_argument("--transport", choices=("tcp", "bluetooth"), default="tcp",
+                        help="чем связываться: tcp (по умолчанию) или bluetooth "
+                             "(D2D без роутера; --port здесь канал RFCOMM)")
     args = parser.parse_args()
 
     if args.demo or not args.port:
@@ -1507,26 +1723,41 @@ def main():
 
     # Seed-узлы: из --seed и из переменной окружения BHYDRA_SEEDS
     # ("host:port,host:port") — так их удобно задавать в докере/сервисе.
-    raw_seeds = list(args.seed) + [
-        item for item in os.environ.get("BHYDRA_SEEDS", "").split(",") if item]
-    seeds = []
-    for item in raw_seeds:
-        host, _, port = item.rpartition(":")
-        if host and port.isdigit():
-            seeds.append((host, int(port)))
+    seeds = parse_seeds(list(args.seed)
+                        + os.environ.get("BHYDRA_SEEDS", "").split(","))
 
-    node = P2PNode("0.0.0.0", args.port, BHydraNode(difficulty=args.difficulty),
+    transport = None
+    listen_host = "0.0.0.0"
+    if args.transport == "bluetooth":
+        from .transport import bluetooth_transport
+
+        # Транспорт выбирается по системе: на Linux сокеты берутся из stdlib,
+        # на Windows их там нет вовсе и работает нативная библиотека.
+        transport = bluetooth_transport()
+        if not type(transport).available():
+            print("Bluetooth недоступен: нет адаптера, библиотеки или "
+                  "поддержки в системе.")
+            return
+        # Свой адрес узнаём у нативного слоя: пирам мы должны называть MAC, а
+        # не "0.0.0.0" — по нему они будут звонить обратно.
+        listen_host = transport.adapter().get("address") or "0.0.0.0"
+
+    node = P2PNode(listen_host, args.port, BHydraNode(difficulty=args.difficulty),
                    peers_file=args.peers_file, seeds=seeds,
                    encrypt=not args.no_encrypt,
                    require_encryption=args.require_encryption,
-                   identity_file=args.identity_file)
+                   identity_file=args.identity_file, transport=transport)
     node.start()
+    if args.transport == "bluetooth":
+        found = node.discover_nearby()   # осмотр вокруг вместо UDP-маяка
+        print(f"Осмотр Bluetooth: узлов B-hydra рядом — {found}")
     # Соседи с прошлого запуска + seed-узлы: узел находит сеть сам, без --peer.
     alive = node.bootstrap()
     if args.peer:
         host, _, port = args.peer.rpartition(":")
         node.connect(host, int(port))
     channel = "шифрован" if node.encrypt else "ОТКРЫТ"
+    print(f"Транспорт: {node.transport.name} ({node.host})")
     print(f"P2P-узел B-hydra на :{args.port} | пиров: {len(node.peers)} "
           f"(живых при старте: {alive}) | высота: {node.node.height}"
           f" | канал: {channel} | ключ узла: {node.node_key[:16]}…"

@@ -1,0 +1,34 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'io.bhydra.wallet'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "io.bhydra.wallet"
+        minSdk 24            // Android 7: WebView с современным движком
+        targetSdk 29    // см. комментарий в AndroidManifest.xml
+        versionCode 1
+        versionName "1.0"
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            // Для публикации нужна своя подпись: см. android/README.md.
+            signingConfig signingConfigs.debug
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+// Зависимостей нет: активность обычная (android.app.Activity), androidx не
+// используется. Это и делает возможной сборку без Google Maven.
+dependencies {
+}
