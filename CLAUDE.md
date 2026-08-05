@@ -12,7 +12,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 pip install pytest                            # единственная dev-зависимость
-python -m pytest -q                           # 580 тестов + 2 с адаптером Bluetooth
+python -m pytest -q                           # 595 тестов + 2 с адаптером Bluetooth
 python -m pytest tests/test_node.py -q        # один файл
 python -m pytest tests/test_node.py -k mempool -q   # один тест по имени
 
@@ -31,6 +31,8 @@ python -m b_hydra.secure                      # демо рукопожатия 
 python -m b_hydra.p2p --port 5 --transport bluetooth   # узел по Bluetooth (D2D)
 python -m b_hydra.apkbuild --out wallet.apk   # APK для Android без SDK (нужен JDK)
 
+g++ -O2 -std=c++17 -pthread -I cpp -o bhydra_miner cpp/bhydra_miner.cpp
+./bhydra_miner bench 2                        # майнер: скорость на всех ядрах
 g++ -O2 -std=c++17 -pthread -I cpp -o bhydra_bridge cpp/bhydra_bridge.cpp
 ./bhydra_bridge selftest                      # нативный транспорт: свои векторы
 g++ -O2 -std=c++17 -o bhydra_bt cpp/bhydra_bt.cpp -lbluetooth   # поиск по Bluetooth
@@ -69,6 +71,7 @@ x86_64-w64-mingw32-g++ -O2 -std=c++17 -static -o bhydra_bt.exe \\
 | `pqcrypto.py` | пост-квантовые хеш-подписи: Lamport, WOTS, XMSS-lite, `QuantumWallet` (экспериментально) |
 | `hashing.py`, `sha2.py`, `ripemd.py` | SHA-256/512 и RIPEMD-160 с нуля + подключаемый бэкенд |
 | `hashcash.py`, `economics.py` | proof-of-work, награда/эмиссия/halving |
+| `native_miner.py` | мост к `cpp/bhydra_miner.cpp`: перебор nonce на всех ядрах |
 | `merkle.py`, `qrcode_gen.py` | дерево Меркла (+ SPV-доказательства), QR с нуля |
 | `contract.py` | `ContractManager`: эскроу и смарт-чеки НА ЦЕПОЧКЕ (+ учебные in-memory классы) |
 | `node.py` | узел: блокчейн + мемпул + инкрементальные кэши UTXO/tx-индекса, майнинг, переводы |
@@ -94,7 +97,7 @@ RIPEMD-160, base58, secp256k1, RFC 6979 и сериализация «как в 
 
 Корневые `*.py` (`cli.py`, `api.py`, `P2P.py`, `cache.py`, `IP.py`, …) — тонкие
 запускалки/шимы поверх пакета; править логику нужно в `b_hydra/`. Тесты —
-`tests/` (32 файла, 582 теста, `pytest`). Полная карта слоёв — `ARCHITECTURE.md`,
+`tests/` (33 файла, 597 тестов, `pytest`). Полная карта слоёв — `ARCHITECTURE.md`,
 схема REST-подписи — `API.md`.
 
 ## REST API (`b_hydra/api.py`)
@@ -440,6 +443,19 @@ TLS — можно, без TLS — только с локального адре
   ⚠️ Формат заголовка (`header_prefix` + `nonce`) менять НЕЛЬЗЯ — изменится
   хеш, и вся существующая цепочка станет невалидной. Закреплено
   `test_header_format_is_unchanged` на обоих движках.
+- **Нативный майнер** (`cpp/bhydra_miner.cpp`, `native_miner.py`): тот же
+  перебор на всех ядрах, срезами по времени (Python сохраняет право бросить
+  блок). Находится по `BHYDRA_MINER` → PATH → корень проекта; `off` выключает;
+  не собран — молча работает Python.
+  ⚠️ Замер на 4 ядрах: чистый Python 3 023, hashlib 931 793, C++ 1 поток
+  935 814, C++ 4 потока 3 791 693 хеш/с. Вывод НЕОЧЕВИДНЫЙ: в один поток C++
+  НЕ быстрее — `hashlib` это OpenSSL, и наш SHA-512 с ним вровень. Весь
+  выигрыш нативного майнера в ПАРАЛЛЕЛИЗМЕ, которого у Python нет из-за GIL.
+  ⚠️ Результату майнера НЕ ВЕРЯТ: `Block._mine_native` пересчитывает хеш своим
+  кодом и сверяет с порогом, при расхождении — `ValueError`. Молчаливый откат
+  на Python скрыл бы поломку до момента, когда сеть начнёт отвергать блоки.
+  ⚠️ Нативный путь не используется при заданном `max_attempts`: бюджет считается
+  в попытках, а нативный работает срезами по времени.
 - **Транспорт подменяем** (`transport.py`): протокол выше сокета про TCP не
   знает — `tcp.py` пользуется только `sendall`/`recv`, `secure.py` ими же плюс
   таймаутами. Поэтому сеть переносится на любой БАЙТОВЫЙ ПОТОК подменой одного
@@ -636,7 +652,7 @@ TLS — можно, без TLS — только с локального адре
   `mine_pending` / `_validate_block_transactions` / `_validate_chain`).
   Квант ломает лишь ECDSA — монеты на гибридном адресе недоступны. Обычные
   ECDSA-кошельки (`0x1f`) работают как раньше (обратная совместимость).
-- **Перед push — `python -m pytest -q` должно быть зелёным** (580 + 2 пропуска без адаптера Bluetooth; без скачанных android.jar/dx.jar пропускаются ещё 5 тестов сборки APK).
+- **Перед push — `python -m pytest -q` должно быть зелёным** (595 + 2 пропуска без адаптера Bluetooth; без скачанных android.jar/dx.jar пропускаются ещё 5 тестов сборки APK).
 - Коммиты по-русски, осмысленные; заканчиваются трейлерами
   `Co-Authored-By:` и `Claude-Session:`.
 - Не хардкодить идентификатор модели в коде/коммитах/артефактах.

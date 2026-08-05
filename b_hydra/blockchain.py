@@ -37,6 +37,7 @@ if __name__ == "__main__" and __package__ in (None, ""):
     __package__ = "b_hydra"
 
 from . import hashing
+from . import native_miner
 
 # --- Параметры сети B-hydra (белая книга) -------------------------------------
 # Идентификатор сети: вшивается в подпись транзакции и защищает от replay —
@@ -242,7 +243,49 @@ class Block:
         ceiling = (1 << 512) - 1
         return min(int(self.target), ceiling).to_bytes(64, "big")
 
-    def mine_block(self, should_stop=None, max_attempts=None, on_progress=None):
+    def _mine_native(self, miner, should_stop=None, on_progress=None):
+        """Перебор нативным майнером — срезами, чтобы не потерять управление.
+
+        Возвращает хеш, None (брошено) или бросает ValueError, если внешняя
+        программа вернула НЕВЕРНЫЙ результат. Молча откатываться на Python в
+        этом случае нельзя: майнер, который врёт, — это сломанный майнер, и
+        узнать об этом лучше сразу, а не по отвергнутым сетью блокам.
+        """
+        target = self.target_bytes()
+        prefix_hex = self.header_prefix().encode("utf-8").hex()
+        target_hex = target.hex()
+        attempts = 0
+        nonce = self.nonce
+        started = time.monotonic()
+        while True:
+            answer = miner.mine(prefix_hex, target_hex, nonce)
+            if answer is None:
+                return None                     # бинарник не отработал
+            attempts += int(answer.get("attempts") or 0)
+            elapsed = max(time.monotonic() - started, 1e-9)
+            if answer.get("found"):
+                self.nonce = int(answer["nonce"])
+                # ПРОВЕРЯЕМ своим кодом, а не верим на слово.
+                digest = bytes.fromhex(self.calculate_hash())
+                if digest.hex() != answer.get("hash") or digest > target:
+                    raise ValueError(
+                        "нативный майнер вернул неверный блок: "
+                        f"nonce {self.nonce}")
+                self.hash = digest.hex()
+                self.mining_attempts = attempts
+                self.mining_seconds = elapsed
+                return self.hash
+            nonce = int(answer.get("next_nonce") or nonce)
+            self.nonce = nonce
+            if on_progress is not None:
+                on_progress(attempts, attempts / elapsed)
+            if should_stop is not None and should_stop():
+                self.mining_attempts = attempts
+                self.mining_seconds = elapsed
+                return None
+
+    def mine_block(self, should_stop=None, max_attempts=None, on_progress=None,
+                   miner=None):
         """Proof-of-Work: перебираем nonce, пока хеш не станет ≤ target.
 
         `should_stop` — колбэк «бросить блок». Настоящий майнер обязан уметь
@@ -257,6 +300,17 @@ class Block:
         Возвращает хеш или None, если майнинг прерван. Без колбэков ведёт себя
         ровно как раньше: перебирает до победного.
         """
+        # Нативный майнер, если он есть: тот же перебор, но на всех ядрах.
+        # Только когда бюджет попыток не задан — он считается в попытках, а
+        # нативный работает срезами по времени, и точный счёт там невозможен.
+        if max_attempts is None:
+            native = native_miner.default() if miner is None else miner
+            if native is not None:
+                found = self._mine_native(native, should_stop=should_stop,
+                                          on_progress=on_progress)
+                if found is not None or should_stop is not None:
+                    return found
+
         target = self.target_bytes()
         # midstate: неизменная часть заголовка сжимается ОДИН раз (см.
         # hashing.sha512_hasher) — дальше копируется только состояние.
@@ -494,7 +548,7 @@ class Blockchain:
         return min(supply, MAX_SUPPLY)
 
     def add_block(self, data, should_stop=None, max_attempts=None,
-                  on_progress=None):
+                  on_progress=None, miner=None):
         """Создаёт, майнит и добавляет новый блок в цепочку.
 
         Порог-цель определяется LWMA-ретаргетингом (expected_target).
@@ -512,7 +566,7 @@ class Blockchain:
         )
         found = new_block.mine_block(should_stop=should_stop,
                                      max_attempts=max_attempts,
-                                     on_progress=on_progress)
+                                     on_progress=on_progress, miner=miner)
         if found is None:
             return None
         self.chain.append(new_block)
