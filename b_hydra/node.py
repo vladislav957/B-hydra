@@ -363,7 +363,8 @@ class BHydraNode:
 
     # --- Майнинг ---------------------------------------------------------
     def mine_pending(self, miner_address: str, message: str = None,
-                     wallet: Wallet = None):
+                     wallet: Wallet = None, should_stop=None,
+                     max_attempts=None, on_progress=None):
         """Собирает транзакции из мемпула в блок и майнит его.
 
         `message` — заметка майнера, которая останется в блоке навсегда (как
@@ -425,9 +426,30 @@ class BHydraNode:
                                  message=str(message), wallet=wallet)
 
         data = [reward_tx.to_dict()] + [tx.to_dict() for tx in valid]
-        block = self.blockchain.add_block(data=data)
+        block = self.blockchain.add_block(data=data, should_stop=should_stop,
+                                          max_attempts=max_attempts,
+                                          on_progress=on_progress)
+        if block is None:
+            # Блок брошен (сосед успел раньше). Транзакции надо ВЕРНУТЬ: они
+            # сняты с мемпула ДО майнинга, а в цепочку не попали — иначе
+            # прерванный майнинг молча съедал бы чужие переводы.
+            self._return_to_mempool(snapshot)
+            return None
         self._rebuild_effective()  # цепочка и мемпул изменились
         return block
+
+    def _return_to_mempool(self, taken) -> int:
+        """Возвращает в мемпул транзакции брошенного блока.
+
+        Именно доложить, а не заменить список: пока шёл майнинг, сеть могла
+        прислать новые транзакции, и затирать их снимком нельзя.
+        """
+        present = {tx.txid for tx in self.mempool.transactions}
+        restored = [tx for tx in taken if tx.txid not in present]
+        if restored:
+            self.mempool.transactions = restored + list(self.mempool.transactions)
+        self._rebuild_effective()
+        return len(restored)
 
     def _tx_fee(self, tx: Transaction, utxos) -> float:
         total_in = sum(utxos[inp.outpoint]["amount"] for inp in tx.vin)

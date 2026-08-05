@@ -1507,9 +1507,16 @@ class BHydraApp(tk.Tk):
             block = self.p2p.mine(self.wallet.address)   # майнит + рассылает
         else:
             block = self.node.mine_pending(self.wallet.address)
+        if block is None:
+            # Сосед нашёл блок раньше — наш родитель устарел, и майнер честно
+            # бросил работу. Это не сбой, а нормальная гонка: транзакции
+            # вернулись в мемпул, следующая попытка пойдёт от новой вершины.
+            self._queue.put(("abandoned", self.node.height))
+            return
         self.node.save(STATE_FILE)
         self._queue.put(("mined", block.index,
-                         block.mining_attempts, block.nonce))
+                         block.mining_attempts, block.nonce,
+                         block.hashrate()))
 
     def _poll_queue(self) -> None:
         """Главный поток: забирает события воркера и обновляет интерфейс."""
@@ -1517,13 +1524,25 @@ class BHydraApp(tk.Tk):
             while True:
                 msg = self._queue.get_nowait()
                 if msg[0] == "mined":
-                    _, idx, attempts, nonce = msg
+                    _, idx, attempts, nonce, rate = msg
                     self._mining = False
                     self.progress.config(value=0)
-                    self._log(self.mine_log, f"⛏ блок #{idx} | перебрано "
-                                             f"{attempts} хешей | nonce {nonce}")
+                    self._log(self.mine_log,
+                              f"⛏ блок #{idx} | перебрано {attempts} хешей "
+                              f"| {rate:,.0f} хеш/с | nonce {nonce}")
                     self.mine_status.set(f"Блок #{idx} добыт ✓ — следующий "
                                          "по темпу сети.")
+                    self._refresh_status()
+                    self._refresh_blocks()
+                elif msg[0] == "abandoned":
+                    _, height = msg
+                    self._mining = False
+                    self.progress.config(value=0)
+                    self._log(self.mine_log,
+                              "↩ блок брошен: сеть ушла вперёд "
+                              f"(высота {height}). Транзакции вернулись "
+                              "в мемпул, начинаем заново.")
+                    self.mine_status.set("Блок брошен — сеть опередила.")
                     self._refresh_status()
                     self._refresh_blocks()
                 elif msg[0] == "synced":

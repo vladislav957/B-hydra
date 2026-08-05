@@ -1366,14 +1366,25 @@ class P2PNode:
             self._announce_tx(tx.txid, background=False)
         return accepted
 
-    def mine(self, miner_address, message=None, wallet=None):
+    def mine(self, miner_address, message=None, wallet=None, on_progress=None):
         """Майнит блок и распространяет его по сети.
 
         `message` — заметка майнера, которая останется в блоке навсегда;
         `wallet` — ключ майнера, которым эта заметка подписывается.
+
+        Майнинг БРОСАЕТСЯ, если сосед прислал блок раньше нас: наш родитель
+        устарел, и всё, что мы намолотим дальше, сеть отвергнет. Раньше выйти
+        из перебора было нечем — узел добивал заведомо мёртвый блок, а потом
+        сам же его и отклонял. Возвращает None, если блок брошен.
         """
+        parent = self.node.blockchain.last_block.hash
         block = self.node.mine_pending(miner_address, message=message,
-                                       wallet=wallet)
+                                       wallet=wallet, on_progress=on_progress,
+                                       should_stop=lambda: (
+                                           self.node.blockchain.last_block.hash
+                                           != parent))
+        if block is None:
+            return None
         with self._seen_lock:
             self.seen_blocks.add(block.hash)
         # Рассылаем ХЕШ, а не тело: соседи сами попросят блок, если он им

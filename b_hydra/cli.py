@@ -24,6 +24,7 @@ if __name__ == "__main__" and __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     __package__ = "b_hydra"
 
+from . import hashing
 from .blockchain import DEFAULT_FEE
 from .node import BHydraNode
 from .wallet import Wallet, generate_wallet, is_valid_address
@@ -69,6 +70,8 @@ def cmd_mine(args):
     print(f"Блок #{block.index} добыт (транзакций: {n_tx})")
     print(f"  сложность : {block.difficulty} (хеш начинается с {block.difficulty} нулей)")
     print(f"  перебрано : {block.mining_attempts:,} хешей → найден nonce {block.nonce}")
+    print(f"  скорость  : {block.hashrate():,.0f} хеш/с "
+          f"за {block.mining_seconds:.2f} с ({hashing.backend()})")
     note = node.blockchain.coinbase_message(block)
     if note:
         author = node.block_message_author(block.index)

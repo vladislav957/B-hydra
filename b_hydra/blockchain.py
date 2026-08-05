@@ -146,6 +146,11 @@ MAX_FUTURE_DRIFT = 2 * 60 * 60 # блок не может быть из буду
 # стоять на месте сколько угодно. После перехода на LWMA это стало опасно —
 # застывшее время означает нулевые интервалы, а они гонят сложность в потолок
 # ограничителя. MTP требует, чтобы часы цепочки ДЕЙСТВИТЕЛЬНО шли вперёд.
+# Как часто майнер отвлекается на проверку «не пора ли бросить блок». Реже —
+# дешевле, чаще — быстрее реакция на чужой блок. 512 попыток это доли секунды
+# даже на медленном движке и незаметная доля на быстром.
+MINING_CHECK_INTERVAL = 512
+
 MEDIAN_TIME_BLOCKS = 11
 
 # Фиксированная метка времени генезис-блока. Благодаря ей все узлы с одинаковой
@@ -211,26 +216,92 @@ class Block:
         """
         return merkle_proof(self._tx_leaves(), index)
 
+    def header_prefix(self) -> str:
+        """Заголовок БЕЗ nonce — при переборе меняется только он.
+
+        Выделено отдельно ради майнинга: эта часть считается один раз, а не
+        собирается заново на каждой из миллионов попыток. Порядок и формат
+        полей менять НЕЛЬЗЯ — от них зависит хеш блока, а значит и вся
+        цепочка.
+        """
+        return (f"{self.index}{self.previous_hash}{self.merkle_root}"
+                f"{self.timestamp}{self.target:x}")
+
     def calculate_hash(self):
         """SHA-512 от содержимого заголовка блока (включая target)."""
-        header = (
-            f"{self.index}{self.previous_hash}{self.merkle_root}"
-            f"{self.timestamp}{self.target:x}{self.nonce}"
-        )
-        return hashing.sha512(header)
+        return hashing.sha512(self.header_prefix() + str(self.nonce))
 
-    def mine_block(self):
-        """Proof-of-Work: перебираем nonce, пока хеш (как число) не станет ≤ target.
+    def target_bytes(self) -> bytes:
+        """Порог в виде 64 байт — чтобы сравнивать с дайджестом напрямую.
 
-        Запоминает число перебранных хешей в self.mining_attempts — это и есть
-        проделанная майнером работа за найденный блок.
+        Прежний цикл на каждой попытке звал `int(hash, 16)`, то есть переводил
+        128 шестнадцатеричных символов в число. Замер: это 17% стоимости самого
+        хеша, выброшенных на ровном месте — сравнение байтов даёт тот же ответ
+        (порядок старший-первый у обоих) и стоит 3%.
         """
-        self.mining_attempts = 1          # первый хеш уже посчитан в __init__
-        while int(self.hash, 16) > self.target:
-            self.nonce += 1               # перебираем nonce…
-            self.hash = self.calculate_hash()   # …и пересчитываем SHA-512
-            self.mining_attempts += 1
-        return self.hash
+        ceiling = (1 << 512) - 1
+        return min(int(self.target), ceiling).to_bytes(64, "big")
+
+    def mine_block(self, should_stop=None, max_attempts=None, on_progress=None):
+        """Proof-of-Work: перебираем nonce, пока хеш не станет ≤ target.
+
+        `should_stop` — колбэк «бросить блок». Настоящий майнер обязан уметь
+        сдаваться: как только сосед прислал новый блок, наш родитель устарел, и
+        каждая следующая попытка гарантированно уходит в мусор. Раньше выйти из
+        этого цикла было НЕЧЕМ — он крутился до победы, даже если победа уже
+        никому не нужна.
+
+        `max_attempts` — потолок попыток (вернуть управление и решить заново),
+        `on_progress(attempts, hashrate)` — отчёт для интерфейса.
+
+        Возвращает хеш или None, если майнинг прерван. Без колбэков ведёт себя
+        ровно как раньше: перебирает до победного.
+        """
+        target = self.target_bytes()
+        # midstate: неизменная часть заголовка сжимается ОДИН раз (см.
+        # hashing.sha512_hasher) — дальше копируется только состояние.
+        base = hashing.sha512_hasher(self.header_prefix())
+        # Бюджет проверяется КАЖДУЮ попытку, а не раз в интервал: иначе
+        # max_attempts=1 молча превращался бы в 512, и «отдать управление
+        # немедленно» было бы невозможно. Ноль вместо None — чтобы в горячем
+        # цикле остался один дешёвый ложный тест, а не сравнение с None.
+        budget = int(max_attempts) if max_attempts else 0
+        attempts = 0
+        started = time.monotonic()
+        while True:
+            digest = self._nonce_digest(base)
+            attempts += 1
+            if digest <= target:
+                self.hash = digest.hex()
+                self.mining_attempts = attempts
+                self.mining_seconds = max(time.monotonic() - started, 1e-9)
+                return self.hash
+            self.nonce += 1
+            if budget and attempts >= budget:
+                self.mining_attempts = attempts
+                self.mining_seconds = max(time.monotonic() - started, 1e-9)
+                return None
+            # А вот колбэки — не на каждой попытке: на быстром движке это
+            # миллионы вызовов в секунду, и опрос стоил бы дороже перебора.
+            if attempts % MINING_CHECK_INTERVAL == 0:
+                elapsed = max(time.monotonic() - started, 1e-9)
+                if on_progress is not None:
+                    on_progress(attempts, attempts / elapsed)
+                if should_stop is not None and should_stop():
+                    self.mining_attempts = attempts
+                    self.mining_seconds = elapsed
+                    return None
+
+    def _nonce_digest(self, base) -> bytes:
+        """Хеш заголовка с текущим nonce поверх готового midstate."""
+        attempt = base.copy()
+        attempt.update(str(self.nonce).encode("utf-8"))
+        return attempt.digest()
+
+    def hashrate(self) -> float:
+        """Скорость перебора на последнем майнинге, хешей в секунду."""
+        seconds = getattr(self, "mining_seconds", 0.0)
+        return (self.mining_attempts / seconds) if seconds else 0.0
 
     def to_dict(self):
         return {
@@ -422,10 +493,15 @@ class Blockchain:
         supply = sum(self.block_reward(b.index) for b in self.chain[1:])
         return min(supply, MAX_SUPPLY)
 
-    def add_block(self, data):
+    def add_block(self, data, should_stop=None, max_attempts=None,
+                  on_progress=None):
         """Создаёт, майнит и добавляет новый блок в цепочку.
 
         Порог-цель определяется LWMA-ретаргетингом (expected_target).
+
+        `should_stop`/`max_attempts`/`on_progress` передаются майнеру (см.
+        `Block.mine_block`). Если блок брошен, возвращается None и в цепочку
+        НИЧЕГО не добавляется: недомайненный блок не блок.
         """
         height = len(self.chain)
         new_block = Block(
@@ -434,7 +510,11 @@ class Blockchain:
             data=data,
             target=self.expected_target(height),
         )
-        new_block.mine_block()
+        found = new_block.mine_block(should_stop=should_stop,
+                                     max_attempts=max_attempts,
+                                     on_progress=on_progress)
+        if found is None:
+            return None
         self.chain.append(new_block)
         return new_block
 
