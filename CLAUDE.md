@@ -12,7 +12,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 pip install pytest                            # единственная dev-зависимость
-python -m pytest -q                           # 595 тестов + 2 с адаптером Bluetooth
+python -m pytest -q                           # 598 тестов + 2 с адаптером Bluetooth
 python -m pytest tests/test_node.py -q        # один файл
 python -m pytest tests/test_node.py -k mempool -q   # один тест по имени
 
@@ -39,6 +39,8 @@ g++ -O2 -std=c++17 -o bhydra_bt cpp/bhydra_bt.cpp -lbluetooth   # поиск п�
 ./bhydra_bridge connect 127.0.0.1 5000 <ключ_узла> '{"type": "ping"}'
 x86_64-w64-mingw32-g++ -O2 -std=c++17 -static -o bhydra_bt.exe \\
     cpp/bhydra_bt_win.cpp -lws2_32 -lbthprops          # Bluetooth для Windows
+x86_64-w64-mingw32-g++ -O2 -std=c++17 -static -I cpp \\
+    -o bhydra_miner.exe cpp/bhydra_miner.cpp           # майнер для Windows
 ```
 
 Линтера/форматтера в проекте нет. Сборка `.exe` — `pyinstaller`, см. `BUILD.md`.
@@ -97,7 +99,7 @@ RIPEMD-160, base58, secp256k1, RFC 6979 и сериализация «как в 
 
 Корневые `*.py` (`cli.py`, `api.py`, `P2P.py`, `cache.py`, `IP.py`, …) — тонкие
 запускалки/шимы поверх пакета; править логику нужно в `b_hydra/`. Тесты —
-`tests/` (33 файла, 597 тестов, `pytest`). Полная карта слоёв — `ARCHITECTURE.md`,
+`tests/` (33 файла, 600 тестов, `pytest`). Полная карта слоёв — `ARCHITECTURE.md`,
 схема REST-подписи — `API.md`.
 
 ## REST API (`b_hydra/api.py`)
@@ -456,6 +458,10 @@ TLS — можно, без TLS — только с локального адре
   на Python скрыл бы поломку до момента, когда сеть начнёт отвергать блоки.
   ⚠️ Нативный путь не используется при заданном `max_attempts`: бюджет считается
   в попытках, а нативный работает срезами по времени.
+  ⚠️ Под Windows — ТОТ ЖЕ исходник (кросс-сборка mingw-w64), отдельного файла
+  не нужно: здесь только стандартная библиотека C++ и потоки, а не системные
+  API. Проверено запуском под Wine: блок, найденный виндовой сборкой,
+  пересчитан Python и принят.
 - **Транспорт подменяем** (`transport.py`): протокол выше сокета про TCP не
   знает — `tcp.py` пользуется только `sendall`/`recv`, `secure.py` ими же плюс
   таймаутами. Поэтому сеть переносится на любой БАЙТОВЫЙ ПОТОК подменой одного
@@ -652,7 +658,7 @@ TLS — можно, без TLS — только с локального адре
   `mine_pending` / `_validate_block_transactions` / `_validate_chain`).
   Квант ломает лишь ECDSA — монеты на гибридном адресе недоступны. Обычные
   ECDSA-кошельки (`0x1f`) работают как раньше (обратная совместимость).
-- **Перед push — `python -m pytest -q` должно быть зелёным** (595 + 2 пропуска без адаптера Bluetooth; без скачанных android.jar/dx.jar пропускаются ещё 5 тестов сборки APK).
+- **Перед push — `python -m pytest -q` должно быть зелёным** (598 + 2 пропуска без адаптера Bluetooth; без скачанных android.jar/dx.jar пропускаются ещё 5 тестов сборки APK).
 - Коммиты по-русски, осмысленные; заканчиваются трейлерами
   `Co-Authored-By:` и `Claude-Session:`.
 - Не хардкодить идентификатор модели в коде/коммитах/артефактах.

@@ -250,3 +250,72 @@ def test_native_miner_is_faster_than_pure_python(miner):
     finally:
         hashing.use_pure_sha(previous)
     assert miner.benchmark(seconds=1.0) > python_rate * 10
+
+
+# --- Кросс-сборка под Windows -------------------------------------------------
+MINGW = shutil.which("x86_64-w64-mingw32-g++")
+WINE = next((p for p in ("/usr/lib/wine/wine64", "/usr/lib/wine/wine")
+             if os.path.exists(p)), None) or shutil.which("wine64") \
+    or shutil.which("wine")
+
+
+@pytest.fixture(scope="module")
+def windows_binary(tmp_path_factory):
+    """Тот же исходник под Windows. Пропуск, если нет mingw-w64."""
+    if MINGW is None:
+        pytest.skip("нет кросс-компилятора mingw-w64")
+    out = str(tmp_path_factory.mktemp("winminer") / "bhydra_miner.exe")
+    result = subprocess.run(
+        [MINGW, "-O2", "-std=c++17", "-static", "-Wall", "-Wextra",
+         "-I", os.path.join(ROOT, "cpp"), "-o", out, SOURCE],
+        capture_output=True, text=True, timeout=900)
+    assert result.returncode == 0, result.stderr
+    assert result.stderr.strip() == "", result.stderr
+    return out
+
+
+def test_windows_build_is_a_pe_binary(windows_binary):
+    """Собирается настоящий виндовый бинарник из ТОГО ЖЕ исходника.
+
+    Отдельного файла под Windows у майнера нет и не нужно: здесь только
+    стандартная библиотека C++ и потоки, а не системные API (в отличие от
+    Bluetooth, где пришлось писать два разных слоя).
+    """
+    with open(windows_binary, "rb") as handle:
+        head = handle.read(0x200)
+    assert head[:2] == b"MZ" and b"PE\0\0" in head
+
+
+@pytest.mark.skipif(WINE is None, reason="нет wine — запустить .exe негде")
+def test_windows_miner_passes_its_vectors_under_wine(windows_binary, tmp_path):
+    environment = dict(os.environ, WINEDEBUG="-all",
+                       WINEPREFIX=str(tmp_path / "wine"))
+    result = subprocess.run([WINE, windows_binary, "selftest"],
+                            capture_output=True, text=True, timeout=600,
+                            env=environment)
+    assert result.returncode == 0, result.stdout + result.stderr
+    answer = json.loads(result.stdout)
+    assert answer["ok"] is True
+    assert answer["threads"] >= 1          # потоки видны и под Wine
+
+
+@pytest.mark.skipif(WINE is None, reason="нет wine — запустить .exe негде")
+def test_block_mined_by_the_windows_binary_is_valid(windows_binary, tmp_path):
+    """Блок, найденный ВИНДОВОЙ сборкой, проходит проверку нашего Python.
+
+    Это и есть то, ради чего сборка нужна: хеш обязан совпасть байт-в-байт,
+    иначе на Windows майнили бы блоки, которые сеть не принимает.
+    """
+    launcher = tmp_path / "winminer.sh"
+    launcher.write_text(
+        f'#!/bin/sh\nexport WINEDEBUG=-all\n'
+        f'export WINEPREFIX={tmp_path / "wine"}\n'
+        f'exec {WINE} {windows_binary} "$@"\n', encoding="utf-8")
+    launcher.chmod(0o755)
+
+    miner = native_miner.NativeMiner(str(launcher), slice_seconds=5.0)
+    assert miner.selftest() is True
+    block = _block(target=genesis_target_for(3))
+    found = block.mine_block(miner=miner)
+    assert found == block.calculate_hash()
+    assert int(found, 16) <= block.target
