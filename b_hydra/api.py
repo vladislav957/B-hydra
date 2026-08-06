@@ -595,6 +595,14 @@ class BHydraAPI(BaseHTTPRequestHandler):
                     except ValueError as err:
                         self._send(400, {"error": str(err)})
                         return
+                    if block is None:
+                        # Блок брошен: сосед нашёл свой раньше, наш родитель
+                        # устарел. Это не ошибка запроса — это гонка, которую
+                        # мы проиграли; транзакции вернулись в мемпул.
+                        self._send(409, {"error": "блок брошен: сеть ушла "
+                                                  "вперёд, попробуйте снова",
+                                         "height": self.node.height})
+                        return
                     self._save()
                 self._send(200, {
                     "index": block.index,

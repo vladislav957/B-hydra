@@ -284,9 +284,12 @@ class BHydraNode:
         уже зарезервированного выхода отклоняется (его нет в наборе)."""
         if tx is None:
             return False
-        if not self.validate_transaction(tx, utxos=self.effective_utxo_set()):
+        utxos = self.effective_utxo_set()
+        if not self.validate_transaction(tx, utxos=utxos):
             return False
-        if not self.mempool.add(tx):
+        # Комиссию считаем ЗДЕСЬ: мемпул сам её не знает (нужен набор UTXO), а
+        # без неё он не может ни вытеснить дешёвое, ни отдать майнеру порядок.
+        if not self.mempool.add(tx, fee=self._tx_fee(tx, utxos)):
             return False
         self._cache_apply(tx)  # инкрементально: без пересборки всего набора
         return True
@@ -363,7 +366,8 @@ class BHydraNode:
 
     # --- Майнинг ---------------------------------------------------------
     def mine_pending(self, miner_address: str, message: str = None,
-                     wallet: Wallet = None):
+                     wallet: Wallet = None, should_stop=None,
+                     max_attempts=None, on_progress=None):
         """Собирает транзакции из мемпула в блок и майнит его.
 
         `message` — заметка майнера, которая останется в блоке навсегда (как
@@ -385,7 +389,7 @@ class BHydraNode:
         pq_used = self.pq_used_indices(include_mempool=False)
         valid = []
         fees = 0.0
-        snapshot = list(self.mempool.transactions)
+        snapshot = self._by_fee_rate(list(self.mempool.transactions))
         leftover = []
         # Бюджет по размеру, а не только по числу: транзакции бывают крупные, и
         # узел не должен собирать блок, который потом не сможет ни передать, ни
@@ -425,9 +429,68 @@ class BHydraNode:
                                  message=str(message), wallet=wallet)
 
         data = [reward_tx.to_dict()] + [tx.to_dict() for tx in valid]
-        block = self.blockchain.add_block(data=data)
+        block = self.blockchain.add_block(data=data, should_stop=should_stop,
+                                          max_attempts=max_attempts,
+                                          on_progress=on_progress)
+        if block is None:
+            # Блок брошен (сосед успел раньше). Транзакции надо ВЕРНУТЬ: они
+            # сняты с мемпула ДО майнинга, а в цепочку не попали — иначе
+            # прерванный майнинг молча съедал бы чужие переводы.
+            self._return_to_mempool(snapshot)
+            return None
         self._rebuild_effective()  # цепочка и мемпул изменились
         return block
+
+    def _by_fee_rate(self, transactions):
+        """Порядок сборки блока: сначала дорогие ЗА БАЙТ, но предки — раньше.
+
+        Место в блоке ограничено байтами, поэтому майнер выбирает по ставке на
+        байт, а не по комиссии целиком. Раньше транзакции брались в порядке
+        поступления, и комиссия не влияла ни на что: заплатить за срочность
+        было невозможно.
+
+        ⚠️ Одной сортировкой не обойтись. В мемпуле лежат СВЯЗАННЫЕ транзакции
+        (потомок тратит неподтверждённую сдачу предка), и если потомок окажется
+        раньше предка, он не пройдёт проверку по набору UTXO и будет отброшен
+        НАВСЕГДА — то есть сортировка по комиссии молча съедала бы переводы.
+        Поэтому: идём по убыванию ставки и перед каждой транзакцией выкладываем
+        её ещё не выложенных предков из мемпула (как package selection у
+        Bitcoin, только без пересчёта ставки пакета).
+        """
+        in_pool = {tx.txid: tx for tx in transactions}
+        ranked = sorted(
+            transactions,
+            key=lambda tx: (-self.mempool.fee_rate(tx.txid), tx.timestamp))
+
+        ordered, placed = [], set()
+
+        def place(tx, guard):
+            if tx.txid in placed or tx.txid in guard:
+                return                       # уже выложен или круг (его не бывает)
+            guard.add(tx.txid)
+            for inp in tx.vin:
+                parent = in_pool.get(inp.txid)
+                if parent is not None:
+                    place(parent, guard)
+            placed.add(tx.txid)
+            ordered.append(tx)
+
+        for tx in ranked:
+            place(tx, set())
+        return ordered
+
+    def _return_to_mempool(self, taken) -> int:
+        """Возвращает в мемпул транзакции брошенного блока.
+
+        Именно доложить, а не заменить список: пока шёл майнинг, сеть могла
+        прислать новые транзакции, и затирать их снимком нельзя.
+        """
+        present = {tx.txid for tx in self.mempool.transactions}
+        restored = [tx for tx in taken if tx.txid not in present]
+        if restored:
+            self.mempool.transactions = restored + list(self.mempool.transactions)
+        self._rebuild_effective()
+        return len(restored)
 
     def _tx_fee(self, tx: Transaction, utxos) -> float:
         total_in = sum(utxos[inp.outpoint]["amount"] for inp in tx.vin)

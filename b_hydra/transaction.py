@@ -114,6 +114,8 @@ class Transaction:
         # приславший целую метку времени (JS сериализует 1785009903.0 как
         # «1785009903»), иначе получал бы неверный payload и отказ подписи.
         self.timestamp = float(timestamp) if timestamp is not None else time.time()
+        self._txid = None            # кеш идентификатора…
+        self._txid_payload = None    # …и содержимого, от которого он посчитан
 
     # --- Идентификация и сериализация ------------------------------------
     def signing_payload(self) -> bytes:
@@ -132,8 +134,24 @@ class Transaction:
 
     @property
     def txid(self) -> str:
-        """Идентификатор транзакции = SHA-512 от её содержимого."""
-        return hashing.sha512(self.signing_payload())
+        """Идентификатор транзакции = SHA-512 от её содержимого.
+
+        Кешируется ПО СОДЕРЖИМОМУ: payload собирается заново (это ~6 мкс) и
+        сверяется с тем, от которого считался хеш; совпал — отдаём готовый.
+        Просто запомнить результат навсегда было бы неверно — транзакцию могут
+        достроить после создания, и txid обязан измениться вместе с ней.
+
+        Смысл в том, что SHA-512 здесь В 122 РАЗА дороже сборки payload, а
+        `txid` дёргается постоянно: дедуп в мемпуле, индекс, сериализация,
+        поиск в блоке. Один `add()` в мемпул трогал его трижды — 2 мс на
+        чистом Python-движке, то есть 10 000 транзакций укладывались в
+        полминуты чистого хеширования одного и того же.
+        """
+        payload = self.signing_payload()
+        if payload != self._txid_payload:
+            self._txid = hashing.sha512(payload)
+            self._txid_payload = payload
+        return self._txid
 
     def to_dict(self):
         return {
@@ -155,6 +173,16 @@ class Transaction:
     @property
     def total_output(self) -> float:
         return sum(o.amount for o in self.vout)
+
+    def size_bytes(self) -> int:
+        """Сколько места транзакция займёт в блоке.
+
+        Место в блоке ограничено БАЙТАМИ, поэтому и комиссия сравнивается на
+        байт, а не целиком: транзакция с двадцатью входами и щедрой комиссией
+        может быть невыгоднее пяти маленьких с той же суммой на всех.
+        """
+        return len(json.dumps(self.to_dict(),
+                              ensure_ascii=False).encode("utf-8"))
 
     # --- Подпись ---------------------------------------------------------
     def sign(self, wallet):
@@ -270,12 +298,19 @@ class TransactionPool:
     MAX_MEMPOOL_TRANSACTIONS транзакций. Дедуп и поиск идут по индексу
     txid → транзакция, поэтому add() и get() — O(1), и мемпул спокойно вмещает
     десятки тысяч транзакций.
+
+    ⚠️ Полный мемпул ВЫТЕСНЯЕТ самое дешёвое, а не отказывает всем подряд.
+    Прежний `return False` при переполнении означал, что сеть встаёт, как
+    только кто-то набил пул копеечными транзакциями: перебить ставкой было
+    нельзя вообще ничем. Теперь дороже — значит вперёд, и спам стоит денег.
+    Ставка считается НА БАЙТ: место в блоке ограничено байтами.
     """
 
     def __init__(self, max_size=50000):
         self.max_size = max_size
         self._transactions = []
         self._index = {}                # txid → Transaction
+        self._rates = {}                # txid → комиссия за байт
 
     @property
     def transactions(self):
@@ -287,14 +322,65 @@ class TransactionPool:
         # txid в синхроне, чтобы дедуп в add() оставался корректным.
         self._transactions = list(txs)
         self._index = {t.txid: t for t in self._transactions}
+        # Ставка нужна КАЖДОЙ транзакции в пуле: cheapest() смотрит только в
+        # _rates, и запись без ставки была бы для него невидима.
+        previous = self._rates
+        self._rates = {txid: previous.get(txid, 0.0) for txid in self._index}
 
-    def add(self, transaction: Transaction) -> bool:
-        if transaction.txid in self._index:
+    def fee_rate(self, txid) -> float:
+        """Комиссия за байт у транзакции в пуле (0 — если неизвестна)."""
+        return self._rates.get(txid, 0.0)
+
+    def cheapest(self):
+        """Транзакция с наименьшей ставкой — кандидат на вытеснение.
+
+        Идём по УЖЕ ИЗВЕСТНЫМ txid из `_rates`, а не по объектам: обращение к
+        `tx.txid` стоит хеша, и перебор всего пула на каждой вставке был бы
+        дороже самой вставки в тысячи раз.
+        """
+        if not self._rates:
+            return None
+        txid = min(self._rates, key=self._rates.get)
+        return self._index.get(txid)
+
+    def remove(self, txid) -> bool:
+        """Убирает транзакцию из пула по txid.
+
+        Нужный объект берётся из индекса и выкидывается по ТОЖДЕСТВУ, а не
+        сравнением txid у каждой записи: `tx.txid` пересобирает payload, и
+        такой проход по полному пулу стоил 6 мс — при вытеснении на каждой
+        вставке это превращалось в секунды на ровном месте.
+        """
+        target = self._index.pop(txid, None)
+        if target is None:
+            return False
+        self._rates.pop(txid, None)
+        for position, candidate in enumerate(self._transactions):
+            if candidate is target:
+                del self._transactions[position]
+                break
+        return True
+
+    def add(self, transaction: Transaction, fee: float = 0.0) -> bool:
+        """Кладёт транзакцию в пул. `fee` — комиссия целиком, в BHY.
+
+        При переполнении вытесняет самую дешёвую, если новая дороже ЗА БАЙТ.
+        Если новая не дороже — отказ: иначе полный пул можно было бы бесконечно
+        перемешивать, ничего не платя.
+        """
+        txid = transaction.txid
+        if txid in self._index:
             return False  # дубликат
+        size = max(transaction.size_bytes(), 1)
+        rate = float(fee) / size
         if self.max_size is not None and len(self._transactions) >= self.max_size:
-            return False  # мемпул переполнен
+            victim = self.cheapest()
+            if victim is None or self._rates.get(victim.txid, 0.0) >= rate:
+                return False          # дешевле того, что уже лежит, — мимо
+            self.remove(victim.txid)
         self._transactions.append(transaction)
-        self._index[transaction.txid] = transaction
+        self._index[txid] = transaction
+        self._rates[txid] = rate
         return True
 
     def get(self, txid):
