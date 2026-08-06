@@ -12,7 +12,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 pip install pytest                            # единственная dev-зависимость
-python -m pytest -q                           # 616 тестов + 2 с адаптером Bluetooth
+python -m pytest -q                           # 634 теста + 2 с адаптером Bluetooth
 python -m pytest tests/test_node.py -q        # один файл
 python -m pytest tests/test_node.py -k mempool -q   # один тест по имени
 
@@ -31,6 +31,8 @@ python -m b_hydra.secure                      # демо рукопожатия 
 python -m b_hydra.p2p --port 5 --transport bluetooth   # узел по Bluetooth (D2D)
 python -m b_hydra.apkbuild --out wallet.apk   # APK для Android без SDK (нужен JDK)
 
+g++ -O2 -std=c++17 -shared -fPIC -I cpp -o libbhydra_ec.so cpp/bhydra_ec_lib.cpp
+                                              # ×17 на проверке подписи (свой код)
 g++ -O2 -std=c++17 -pthread -I cpp -o bhydra_miner cpp/bhydra_miner.cpp
 ./bhydra_miner bench 2                        # майнер: скорость на всех ядрах
 g++ -O2 -std=c++17 -pthread -I cpp -o bhydra_bridge cpp/bhydra_bridge.cpp
@@ -74,6 +76,7 @@ x86_64-w64-mingw32-g++ -O2 -std=c++17 -static -I cpp \\
 | `hashing.py`, `sha2.py`, `ripemd.py` | SHA-256/512 и RIPEMD-160 с нуля + подключаемый бэкенд |
 | `hashcash.py`, `economics.py` | proof-of-work, награда/эмиссия/halving |
 | `native_miner.py` | мост к `cpp/bhydra_miner.cpp`: перебор nonce на всех ядрах |
+| `native_ec.py` | мост к `cpp/bhydra_ec_lib.cpp`: проверка подписи НАШЕЙ же ECDSA |
 | `merkle.py`, `qrcode_gen.py` | дерево Меркла (+ SPV-доказательства), QR с нуля |
 | `contract.py` | `ContractManager`: эскроу и смарт-чеки НА ЦЕПОЧКЕ (+ учебные in-memory классы) |
 | `node.py` | узел: блокчейн + мемпул + инкрементальные кэши UTXO/tx-индекса, майнинг, переводы |
@@ -99,7 +102,7 @@ RIPEMD-160, base58, secp256k1, RFC 6979 и сериализация «как в 
 
 Корневые `*.py` (`cli.py`, `api.py`, `P2P.py`, `cache.py`, `IP.py`, …) — тонкие
 запускалки/шимы поверх пакета; править логику нужно в `b_hydra/`. Тесты —
-`tests/` (34 файла, 618 тестов, `pytest`). Полная карта слоёв — `ARCHITECTURE.md`,
+`tests/` (35 файлов, 636 тестов, `pytest`). Полная карта слоёв — `ARCHITECTURE.md`,
 схема REST-подписи — `API.md`.
 
 ## REST API (`b_hydra/api.py`)
@@ -241,10 +244,24 @@ TLS — можно, без TLS — только с локального адре
   Чек подписан ключом плательщика (`verify_cheque` — офлайн-проверка); секрет
   выдаётся один раз, хранится только его SHA-512. Состояние контрактов API
   сохраняет в `<state>.contracts` (там приватный ключ контракта — не терять).
-- **Скорость подписи**: `Wallet.verify` использует нативный `coincurve`
-  (libsecp256k1), если он установлен и прошёл self-test на байт-совместимость
-  (иначе чистый Python). Ускорение проверки ~55× (20 мс → 0.36 мс). Активный
-  бэкенд — `wallet._BACKEND`.
+- **Скорость подписи**. Замер приёма транзакции: 15,5 мс, из них 12,2 —
+  проверка подписи, а хеш всего 5%. Поэтому ускорять надо КРИВУЮ, а не SHA.
+  Порядок бэкендов `Wallet.verify` (активный — `wallet._BACKEND`):
+  1. **свой C++** `cpp/bhydra_ec_lib.cpp` через ctypes (`native_ec.py`) — то же
+     уравнение из `bhydra_ec.hpp`, что и в рукопожатии транспорта, чужой
+     крипты не добавляется. Замер: проверка 12,24 → 0,71 мс (×17), приём
+     транзакции 15,49 → 3,66 мс (×4,2);
+  2. сторонний `coincurve` (libsecp256k1) — быстрее, но библиотека чужая,
+     поэтому только если своей нет;
+  3. чистый Python.
+  ⚠️ Библиотека, а не команда (как у майнера): там срез в секунду покрывает
+  запуск процесса, здесь работы на полмиллисекунды — процесс стоил бы дороже
+  проверки. У ctypes обязательны `argtypes`.
+  ⚠️ Множество принимаемых подписей обязано СОВПАДАТЬ с чистым Python: разойдись
+  оно, узлы с библиотекой и без неё по-разному решали бы, какая транзакция
+  валидна — раскол сети. Поэтому `_selftest_backend` гоняет живые подписи и
+  проверяет ОБЕ половины (верную принять, подделку отвергнуть): ядро «да на
+  всё» — самая опасная поломка, и односторонняя проверка его бы пропустила.
 - **Сетевые лимиты** (`p2p.py`): таблица пиров `MAX_PEERS=256`, не больше
   `MAX_PEERS_PER_MESSAGE=32` адресов в одном сообщении (и принимаем, и
   отдаём — чтобы порча не расползалась), обход пиров ПАРАЛЛЕЛЬНЫЙ
@@ -684,7 +701,7 @@ TLS — можно, без TLS — только с локального адре
   `mine_pending` / `_validate_block_transactions` / `_validate_chain`).
   Квант ломает лишь ECDSA — монеты на гибридном адресе недоступны. Обычные
   ECDSA-кошельки (`0x1f`) работают как раньше (обратная совместимость).
-- **Перед push — `python -m pytest -q` должно быть зелёным** (616 + 2 пропуска без адаптера Bluetooth; без скачанных android.jar/dx.jar пропускаются ещё 5 тестов сборки APK).
+- **Перед push — `python -m pytest -q` должно быть зелёным** (634 + 2 пропуска без адаптера Bluetooth; без скачанных android.jar/dx.jar пропускаются ещё 5 тестов сборки APK).
 - Коммиты по-русски, осмысленные; заканчиваются трейлерами
   `Co-Authored-By:` и `Claude-Session:`.
 - Не хардкодить идентификатор модели в коде/коммитах/артефактах.

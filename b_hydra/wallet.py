@@ -397,7 +397,55 @@ def _der_sig(r: int, s: int) -> bytes:
     return b"\x30" + bytes([len(body)]) + body
 
 
+# Сначала пробуем СВОЮ реализацию на C++ (`cpp/bhydra_ec_lib.cpp`) — тот же
+# алгоритм, что и в чистом Python, просто скомпилированный. Она предпочтительнее
+# сторонней libsecp256k1 не по скорости (та быстрее), а по существу: проект
+# считает своей криптографией всё, что в нём есть, и внешняя библиотека остаётся
+# запасным ускорителем, а не основным путём.
+def _try_native_ec() -> bool:
+    from . import native_ec
+
+    library = native_ec.default()
+    if library is None:
+        return False
+
+    def _verify_core_native(x, y, z, r, s) -> bool:
+        return native_ec.verify_core(library, x, y, z, r, s)
+
+    if not _selftest_backend(_verify_core_native):
+        return False
+    global _VERIFY_CORE, _BACKEND
+    _VERIFY_CORE = _verify_core_native
+    _BACKEND = "bhydra_ec (свой C++)"
+    return True
+
+
+def _selftest_backend(core) -> bool:
+    """Ядро обязано совпасть с эталоном на живых подписях.
+
+    Проверяются ОБА исхода: верную подпись принять, подделанный payload
+    отвергнуть. Ядро, которое говорит «да» на всё, прошло бы проверку из одной
+    половины — и тихо приняло бы любую транзакцию.
+    """
+    for _ in range(8):
+        w = Wallet()
+        msg = b"b-hydra ecdsa backend self-test"
+        sig = bytes.fromhex(w.sign(msg))
+        pb = w.public_key_bytes
+        x = int.from_bytes(pb[1:33], "big")
+        y = int.from_bytes(pb[33:65], "big")
+        r = int.from_bytes(sig[:32], "big")
+        s = int.from_bytes(sig[32:], "big")
+        if not core(x, y, _hash_to_int(msg), r, s):
+            return False                       # верную подпись отверг
+        if core(x, y, _hash_to_int(b"tampered payload"), r, s):
+            return False                       # чужой payload принял
+    return True
+
+
 try:
+    if _try_native_ec():
+        raise StopIteration                    # своя нашлась — чужая не нужна
     import coincurve as _coincurve
 
     def _verify_core_fast(x, y, z, r, s) -> bool:
@@ -409,32 +457,15 @@ try:
         except Exception:
             return False
 
-    def _selftest_fast_backend() -> bool:
-        """Быстрое ядро обязано совпасть с эталоном на нескольких примерах."""
-        for _ in range(8):
-            w = Wallet()
-            msg = b"b-hydra ecdsa backend self-test"
-            sig = bytes.fromhex(w.sign(msg))
-            pb = w.public_key_bytes
-            x = int.from_bytes(pb[1:33], "big")
-            y = int.from_bytes(pb[33:65], "big")
-            r = int.from_bytes(sig[:32], "big")
-            s = int.from_bytes(sig[32:], "big")
-            z = _hash_to_int(msg)
-            z_bad = _hash_to_int(b"tampered payload")
-            if not _verify_core_fast(x, y, z, r, s):
-                return False                       # верную подпись отверг
-            if _verify_core_fast(x, y, z_bad, r, s):
-                return False                       # чужой payload принял
-        return True
-
-    if _selftest_fast_backend():
+    if _selftest_backend(_verify_core_fast):
         _VERIFY_CORE = _verify_core_fast
         _BACKEND = "coincurve (libsecp256k1)"
     else:
         _BACKEND = "pure-python (self-test не пройден)"
+except StopIteration:
+    pass                        # своя нативная реализация уже подключена
 except Exception:
-    _BACKEND = "pure-python (coincurve недоступен)"
+    _BACKEND = "pure-python (нет ни своей библиотеки, ни coincurve)"
 
 
 if __name__ == "__main__":
