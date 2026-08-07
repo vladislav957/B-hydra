@@ -98,6 +98,17 @@ class _Sha2:
         clone._length = self._length
         return clone
 
+    def midstate(self):
+        """(состояние, необработанный хвост, всего байт) — для чужого движка.
+
+        Нужно там, где досчитывать хеш будет не Python: GPU-майнер получает
+        готовое состояние после целых блоков заголовка и дописывает только
+        хвост с nonce. У `hashlib` такого доступа нет, поэтому midstate всегда
+        берётся у НАШЕЙ реализации — она же и определяет, что считается
+        правильным хешем в этом проекте.
+        """
+        return list(self._h), bytes(self._buffer), self._length
+
     # --- Сжатие одного блока (общее для обеих схем) ---------------------
     def _compress(self, block: "bytes | bytearray") -> None:
         wb, mask, rotr = self._WORD_BYTES, self._MASK, self._rotr

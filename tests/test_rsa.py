@@ -160,17 +160,40 @@ def test_oaep_failures_look_identical(key, public):
 
     Разные сообщения об ошибке — это оракул: по тому, как именно отвергнут
     шифротекст, его читают целиком (атака Мангера).
+
+    ⚠️ Шифротекст c ≥ n добавлен ЯВНО, а не в надежде, что порча старшего байта
+    туда попадёт. Изначально попадала по удаче — примерно на одном ключе из
+    нескольких, — и утечка («шифротекст вне диапазона модуля» вместо общего
+    отказа) всплыла случайным падением, а не на первом же прогоне.
     """
     reasons = set()
     box = bytearray(rsa.encrypt_oaep(public, b"secret"))
+    broken_boxes = []
     for position in (0, 5, 100, len(box) - 1):
-        broken = bytearray(box)
-        broken[position] ^= 0xFF
+        copy = bytearray(box)
+        copy[position] ^= 0xFF
+        broken_boxes.append(bytes(copy))
+    # Заведомо больше модуля и заведомо меньше — обе стороны диапазона.
+    broken_boxes.append(b"\xff" * key.size)
+    broken_boxes.append(b"\x00" * key.size)
+
+    for candidate in broken_boxes:
         try:
-            rsa.decrypt_oaep(key, bytes(broken))
+            rsa.decrypt_oaep(key, candidate)
         except rsa.RSAError as error:
             reasons.add(str(error))
     assert len(reasons) == 1, reasons
+    assert reasons == {"расшифровка не удалась"}
+
+
+def test_a_ciphertext_above_the_modulus_is_not_distinguishable(key):
+    """Отдельно: c ≥ n обязан отвергаться теми же словами, что и мусор.
+
+    Это самая заметная утечка из всех: границу модуля атакующий нащупывает
+    первой, и по ней восстанавливается старший байт открытого текста.
+    """
+    with pytest.raises(rsa.RSAError, match="расшифровка не удалась"):
+        rsa.decrypt_oaep(key, key.n.to_bytes(key.size, "big"))
 
 
 def test_oaep_refuses_wrong_length(key):

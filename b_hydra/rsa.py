@@ -380,7 +380,17 @@ def decrypt_oaep(key: PrivateKey, ciphertext: bytes, label: bytes = b"",
     if len(ciphertext) != size or size < 2 * hash_size + 2:
         raise RSAError("расшифровка не удалась")
 
-    encoded = i2osp(_private_op(key, os2ip(ciphertext)), size)
+    try:
+        encoded = i2osp(_private_op(key, os2ip(ciphertext)), size)
+    except RSAError:
+        # ⚠️ Приватная операция отказывает СВОИМИ словами («шифротекст вне
+        # диапазона модуля», «сбой приватной операции»), и наружу они уходить
+        # не должны: по тому, КАКОЙ именно отказ получен, шифротекст читают
+        # целиком. Здесь любая причина превращается в одну и ту же.
+        # Это не теория — тест `test_oaep_failures_look_identical` поймал
+        # ровно эту утечку: порча старшего байта делает c ≥ n, и отказ был
+        # отличим от всех остальных.
+        raise RSAError("расшифровка не удалась") from None
     leading = encoded[0]
     masked_seed = encoded[1:1 + hash_size]
     masked_db = encoded[1 + hash_size:]

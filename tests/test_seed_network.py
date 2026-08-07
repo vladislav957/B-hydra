@@ -531,6 +531,11 @@ def test_phone_wallet_finds_the_whole_network_from_one_address(tmp_path):
                       wait_until="networkidle")
             assert errors == []
 
+            # ⚠️ Ждём саму функцию, а не «сеть затихла»: `networkidle` говорит
+            # только про запросы, и под нагрузкой скрипт страницы мог ещё не
+            # выполниться. Без этого тест плавал — падал примерно раз на три
+            # прогона с `syncNetwork is not defined`.
+            page.wait_for_function("() => typeof syncNetwork === 'function'")
             report = page.evaluate("async () => await syncNetwork()")
             known = page.evaluate("() => NET.nodes")
             # Второй узел кошелёк нашёл сам, руками его никто не вписывал.
