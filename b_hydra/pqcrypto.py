@@ -43,7 +43,7 @@ if __name__ == "__main__" and __package__ in (None, ""):
     __package__ = "b_hydra"
 
 from . import hashing
-from .merkle import merkle_proof, merkle_root, verify_proof
+from .merkle import _sha512d, verify_proof
 
 # --- Наборы параметров -------------------------------------------------------
 # n — байт в элементе подписи; len1 — цифр базы-16 в дайджесте (2 на байт);
@@ -181,34 +181,224 @@ def _wots_pk_hash(pk, p=P256) -> bytes:
 # =============================================================================
 # 3. XMSS-lite — многоразовая подпись (дерево Меркла над ключами WOTS)
 # =============================================================================
+class _Treehash:
+    """Инстанс treehash: считает ОДИН узел уровня `level` по листу за шаг.
+
+    Смысл в том, чтобы узел, который понадобится пути через 2^(level+1) подписей,
+    строился ЗАРАНЕЕ и понемногу, а не целиком в тот момент, когда он нужен.
+    Без этого одна подпись посреди дерева стоила бы половину всех листьев.
+    """
+
+    __slots__ = ("level", "next_leaf", "stack", "node", "_end")
+
+    def __init__(self, level: int):
+        self.level = level
+        self.next_leaf = 0
+        self.stack = []          # частичные узлы (хеш, уровень)
+        self.node = None         # готовый узел уровня `level`
+        self._end = 0
+
+    def schedule(self, start: int, n_leaves: int) -> None:
+        """Нацелить инстанс на поддерево, начинающееся с листа `start`.
+
+        Если поддерево выходит за край дерева, инстанс просто не нужен: такой
+        путь никогда не понадобится (у последнего листа соседей справа нет).
+        """
+        width = 1 << self.level
+        self.stack = []
+        self.node = None
+        if start < 0 or start + width > n_leaves:
+            self.next_leaf = self._end = 0     # неактивен
+            return
+        self.next_leaf = start
+        self._end = start + width
+
+    @property
+    def active(self) -> bool:
+        return self.node is None and self.next_leaf < self._end
+
+    def update(self, leaf_of) -> None:
+        """Один шаг: взять очередной лист и свернуть стек, пока можно."""
+        node, level = leaf_of(self.next_leaf), 0
+        self.next_leaf += 1
+        while self.stack and self.stack[-1][1] == level:
+            left, _ = self.stack.pop()
+            node = _sha512d(left + node)
+            level += 1
+        if level == self.level:
+            self.node = node
+        else:
+            self.stack.append((node, level))
+
+
 class MerkleSigner:
     """XMSS-lite: 2^height одноразовых ключей WOTS под одним публичным ключом
     (корнем дерева Меркла). Подписи с СОСТОЯНИЕМ — индекс не переиспользуется.
 
     Публичный ключ = корень Меркла (hex, SHA-512 — как весь консенсус).
     Подпись = {index, wots, auth, alg}: WOTS-подпись листа + путь включения к
-    корню (наш `merkle_proof`) + имя хеша схемы. Проверяющий восстанавливает
-    публичный ключ WOTS из подписи, хеширует в лист и по пути доходит до
-    корня — знать все листья не нужно.
+    корню + имя хеша схемы. Проверяющий восстанавливает публичный ключ WOTS из
+    подписи, хеширует в лист и по пути доходит до корня — знать все листья не
+    нужно.
+
+    ОБХОД BDS. Листья НЕ ХРАНЯТСЯ: секретный ключ WOTS детерминированно выводится
+    из `seed || i`, поэтому лист считается по требованию. Путь включения
+    строится инкрементально (Buchmann–Dahmen–Szydlo, тот же приём, что в
+    RFC 8391): состояние — O(h²) вместо O(2^h), подпись — O(h) хешей узлов
+    вместо O(2^h).
+
+    Замер:
+
+        память состояния     было           стало
+        h=4                    83 КБ          2 КБ
+        h=8                  1275 КБ          4 КБ
+        h=16              319 МБ (оценка)    ~6 КБ
+        h=20                ~5 ТБ (оценка)   ~7 КБ
+
+        хешей узлов на одну подпись   было (2^h − 1)   стало (≈0,65·h)
+        h=4                                       15              1,2
+        h=6                                       63              2,7
+        h=8                                      255              4,6
+        h=10                                    1023              6,5
+
+    Память перестала зависеть от размера дерева вовсе — именно она, а не
+    время, делала h ≥ 16 невозможным в принципе.
+
+    ⚠️ ГЕНЕРАЦИЯ ОСТАЁТСЯ O(2^h), и это неустранимо: публичный ключ ЕСТЬ корень
+    дерева над всеми 2^h листьями, значит каждый лист обязан быть посчитан хотя
+    бы раз. Обход касается ПОДПИСЕЙ, а не генерации, и никакой алгоритм обхода
+    этого не меняет. Измеренная цена листа WOTS — 227 мс на нашем чистом
+    SHA-256 и 1,0 мс на быстром бэкенде (`BHYDRA_PURE_SHA=0`, байты те же):
+
+        h=6       64 ключа       14,4 с  (замер)   /  0,07 с
+        h=8      256 ключей      58,1 с  (замер)   /  0,26 с
+        h=12    4096 ключей      15 мин            /  4 с
+        h=16   65 536 ключей     4,1 ч             /  1,1 мин
+        h=20    1 048 576        66 ч              /  17 мин
+
+    То есть после BDS высоту ограничивает ОДНО ожидание при создании кошелька,
+    а не память и не стоимость подписи. На чистом SHA практичны h ≤ 12, на
+    быстром бэкенде — h ≤ 20.
     """
 
-    def __init__(self, height: int = 4, seed: bytes | None = None, params=P256):
+    def __init__(self, height: int = 4, seed: bytes | None = None, params=P256,
+                 index: int = 0):
         if not 1 <= height <= 20:
             raise ValueError("height должен быть в диапазоне 1..20")
         self.height = height
         self.params = params
         self.n_leaves = 1 << height
-        self.index = 0
+        if not 0 <= index <= self.n_leaves:
+            raise ValueError("index вне дерева")
+        self.index = index
         self._seed = seed or os.urandom(params["n"])
-        self._wots_sk = []
-        self._leaves = []
-        for i in range(self.n_leaves):
-            sk, pk = wots_keygen(seed=self._seed + i.to_bytes(4, "big"),
-                                 params=params)
-            self._wots_sk.append(sk)
-            self._leaves.append(_wots_pk_hash(pk, params))
-        self.public_key = merkle_root(self._leaves)     # корень = наш merkle.py
+        self._auth = [None] * height
+        self._treehash = [_Treehash(level) for level in range(height)]
+        self.public_key = self._rebuild(min(index, self.n_leaves - 1))
 
+    # --- Листья по требованию -------------------------------------------
+    def _wots_keys(self, i: int):
+        """Пара ключей WOTS листа №i — выводится из seed, не хранится."""
+        return wots_keygen(seed=self._seed + i.to_bytes(4, "big"),
+                           params=self.params)
+
+    def _leaf(self, i: int) -> bytes:
+        """Лист №i дерева: хеш публичного ключа WOTS."""
+        return _wots_pk_hash(self._wots_keys(i)[1], self.params)
+
+    # --- Построение состояния обхода ------------------------------------
+    @staticmethod
+    def _treehash_target(index: int, level: int) -> int:
+        """Номер узла уровня `level`, который понадобится пути СЛЕДУЮЩИМ.
+
+        Путь на уровне l — это N(l, (i>>l) ^ 1). Когда (i>>l) чётный, сосед
+        справа (свежее поддерево); когда нечётный — слева, а такой узел путь
+        достраивает сам из уже известных. Поэтому заранее готовить надо только
+        правых соседей, и ближайший из них — вот этот.
+        """
+        return ((index >> level) | 1) + 2
+
+    def _rebuild(self, index: int) -> str:
+        """Один проход по всем листьям: корень, путь для `index` и инстансы.
+
+        ⚠️ Проход РОВНО ОДИН, поэтому восстановление кошелька с любого индекса
+        стоит столько же, сколько создание нового, — 2^h листьев, не больше.
+        Наивная альтернатива «проиграть все подписи от 0 до index» обошлась бы
+        в index·h/2 листьев: для h=16 и index=50 000 это 400 000 листьев против
+        65 536, то есть в шесть раз ДОРОЖЕ полной генерации.
+        """
+        height, n_leaves = self.height, self.n_leaves
+        targets = [self._treehash_target(index, level) for level in range(height)]
+        for level in range(height):
+            self._treehash[level].schedule(targets[level] << level, n_leaves)
+
+        stack = []
+        for i in range(n_leaves):
+            node, level = self._leaf(i), 0
+            self._capture(node, level, i, index, targets)
+            while stack and stack[-1][1] == level:
+                left, _ = stack.pop()
+                node = _sha512d(left + node)
+                level += 1
+                self._capture(node, level, i, index, targets)
+            stack.append((node, level))
+        return stack[-1][0].hex()
+
+    def _capture(self, node: bytes, level: int, i: int, index: int,
+                 targets: list) -> None:
+        """Забрать узел, если он нужен пути или инстансу treehash.
+
+        В потоковом обходе каждый внутренний узел появляется ровно один раз, и
+        его номер на своём уровне равен i >> level. Достаточно сравнить.
+        """
+        if level >= self.height:
+            return
+        position = i >> level
+        if position == (index >> level) ^ 1:
+            self._auth[level] = node
+        elif position == targets[level]:
+            # Инстанс опережает график — это законно: важно лишь, чтобы узел
+            # был готов к моменту, когда путь его затребует.
+            self._treehash[level].node = node
+            self._treehash[level].next_leaf = self._treehash[level]._end
+
+    def _advance(self, i: int, leaf: bytes) -> None:
+        """Перевести состояние с листа i на i+1.
+
+        `leaf` — уже посчитанный лист №i: подпись его только что вывела, и
+        считать второй раз незачем (это самая дорогая операция здесь).
+        """
+        height = self.height
+        tau = 0
+        while (i >> tau) & 1:
+            tau += 1                       # число младших единиц в i
+
+        # Узел, который ЗАВЕРШИЛСЯ этим листом: N(tau, i >> tau). Он собирается
+        # из листа i и старых элементов пути — новых листьев не нужно вовсе.
+        completed = leaf
+        for level in range(tau):
+            completed = _sha512d(self._auth[level] + completed)
+
+        # Уровни ниже tau забирают готовые узлы у своих инстансов…
+        for level in range(tau):
+            self._auth[level] = self._treehash[level].node
+        # …а уровень tau — только что достроенный узел.
+        self._auth[tau] = completed
+
+        nxt = i + 1
+        for level in range(tau + 1):
+            target = self._treehash_target(nxt, level)
+            self._treehash[level].schedule(target << level, self.n_leaves)
+
+        # Продвигаем незавершённые инстансы на один лист. Инстанс уровня l имеет
+        # 2^(l+1) шагов на 2^l листьев, поэтому одного шага за подпись хватает с
+        # запасом вдвое, а в среднем активна половина инстансов — это и даёт
+        # обещанные O(h) вместо O(2^h).
+        for instance in self._treehash:
+            if instance.active:
+                instance.update(self._leaf)
+
+    # --- Подпись ---------------------------------------------------------
     @property
     def remaining(self) -> int:
         """Сколько подписей ещё можно поставить (одноразовость WOTS)."""
@@ -219,14 +409,19 @@ class MerkleSigner:
         if self.index >= self.n_leaves:
             raise RuntimeError("ключи XMSS исчерпаны — нужно новое дерево")
         i = self.index
-        self.index += 1
-        return {
+        sk, pk = self._wots_keys(i)
+        signature = {
             "index": i,
             "alg": self.params["name"],
-            "wots": [s.hex() for s in wots_sign(self._wots_sk[i], message,
-                                                self.params)],
-            "auth": merkle_proof(self._leaves, i),
+            "wots": [s.hex() for s in wots_sign(sk, message, self.params)],
+            "auth": [{"hash": self._auth[level].hex(),
+                      "position": "right" if (i >> level) % 2 == 0 else "left"}
+                     for level in range(self.height)],
         }
+        self.index = i + 1
+        if self.index < self.n_leaves:
+            self._advance(i, _wots_pk_hash(pk, self.params))
+        return signature
 
     @staticmethod
     def verify(public_key: str, message: bytes, sig: dict) -> bool:
@@ -308,11 +503,13 @@ class HybridWallet:
     """
 
     def __init__(self, ecdsa_wallet=None, height: int = 8,
-                 seed: bytes | None = None, strong: bool = False):
+                 seed: bytes | None = None, strong: bool = False,
+                 index: int = 0):
         from .wallet import generate_wallet
         self.ecdsa = ecdsa_wallet or generate_wallet()
         self.signer = MerkleSigner(height=height, seed=seed,
-                                   params=P512 if strong else P256)
+                                   params=P512 if strong else P256,
+                                   index=index)
 
     @property
     def ecdsa_public_key_hex(self) -> str:
@@ -364,15 +561,24 @@ class HybridWallet:
 
     @classmethod
     def from_dict(cls, data: dict) -> "HybridWallet":
+        """Восстанавливает кошелёк, включая состояние обхода дерева.
+
+        ⚠️ Индекс передаётся В КОНСТРУКТОР, а не присваивается после. Раньше
+        второго варианта хватало: дерево строилось целиком, и путь для любого
+        листа брался из готового списка. Теперь путь — часть состояния обхода,
+        и присвоение `index` задним числом оставило бы путь от нулевого листа:
+        подписи выглядели бы нормально, но не сходились бы с корнем.
+        Состояние в файл не пишется — оно детерминированно выводится из
+        (seed, height, index), поэтому формат `bhydra_hybrid.json` не меняется.
+        """
         from .wallet import Wallet
-        w = cls(
+        return cls(
             ecdsa_wallet=Wallet.from_private_hex(data["ecdsa_private"]),
             height=data["height"],
             seed=bytes.fromhex(data["seed"]),
             strong=(data.get("alg") == "sha512"),
+            index=data.get("index", 0),
         )
-        w.signer.index = data.get("index", 0)      # восстановить остаток ключей
-        return w
 
 
 if __name__ == "__main__":

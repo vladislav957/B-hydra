@@ -244,21 +244,27 @@ def test_state_file_format_is_unchanged(fast_sha):
 def _count_node_hashes(height, signatures):
     """(хешей узлов на генерацию, хешей узлов на `signatures` подписей).
 
-    Считаем именно хеши ВНУТРЕННИХ УЗЛОВ дерева (`merkle._sha512d`), а не время:
-    время на быстром бэкенде тонет в стоимости самой WOTS-подписи, и тест по
-    таймингу проходил бы даже на пересборке всего дерева. Счётчик врать не
-    умеет.
-    """
-    from b_hydra import merkle
+    Считаем именно хеши ВНУТРЕННИХ УЗЛОВ дерева, а не время: время на быстром
+    бэкенде тонет в стоимости самой WOTS-подписи, и тест по таймингу проходил бы
+    даже на полной пересборке дерева. Счётчик врать не умеет.
 
-    original = merkle._sha512d
+    ⚠️ Подменяются ОБА имени — и `merkle._sha512d`, и `pqcrypto._sha512d`.
+    Прежняя реализация звала функцию через `merkle_proof`, новая держит на неё
+    прямую ссылку (`from .merkle import _sha512d`), и подмена только в `merkle`
+    считала бы ноль — тест выглядел бы пройденным, ничего не проверяя. Именно
+    так он и «прошёл» с первого раза.
+    """
+    from b_hydra import merkle, pqcrypto
+
     calls = [0]
+    original = merkle._sha512d
 
     def counting(data):
         calls[0] += 1
         return original(data)
 
     merkle._sha512d = counting
+    pqcrypto._sha512d = counting
     try:
         signer = MerkleSigner(height=height, seed=SEED)
         keygen = calls[0]
@@ -267,9 +273,10 @@ def _count_node_hashes(height, signatures):
         return keygen, calls[0] - keygen
     finally:
         merkle._sha512d = original
+        pqcrypto._sha512d = original
 
 
-@pytest.mark.parametrize("height", [4, 5, 6])
+@pytest.mark.parametrize("height", [4, 5, 6, 7])
 def test_signing_does_not_rebuild_the_whole_tree(fast_sha, height):
     """Подпись обязана стоить O(h) хешей узлов, а не O(2^h).
 
@@ -278,15 +285,17 @@ def test_signing_does_not_rebuild_the_whole_tree(fast_sha, height):
     подпись (15 при h=4, 31 при h=5, 63 при h=6), а полный обход дерева стоил
     2^h·(2^h − 1) — то есть O(4^h).
 
-    Порог: полный обход обязан уложиться в 4·2^h хешей узлов. Каждый узел
-    дерева считается один раз (их 2^h − 1), запас — на служебные пересчёты
-    обхода.
+    Порог привязан к ВЫСОТЕ, а не к константе: именно так отличается O(h) от
+    O(2^h). Замер после перехода на BDS — 0,65·h хешей на подпись (1,2 при h=4,
+    2,7 при h=6, 6,5 при h=10), поэтому запас до h — двукратный, а прежняя
+    реализация превышала порог уже при h=4 (15 против 4).
     """
     leaves = 1 << height
     _keygen, signing = _count_node_hashes(height, leaves)
-    assert signing <= 4 * leaves, (
-        f"h={height}: {signing} хешей узлов на {leaves} подписей "
-        f"({signing / leaves:.0f} на подпись) — дерево пересобирается")
+    per_signature = signing / leaves
+    assert per_signature <= height, (
+        f"h={height}: {per_signature:.1f} хеша узлов на подпись при пороге "
+        f"{height} — дерево пересобирается")
 
 
 def test_state_does_not_grow_with_the_number_of_leaves(fast_sha):
