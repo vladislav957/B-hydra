@@ -308,6 +308,10 @@ def test_wallet_survives_restart_and_picks_the_best_node(tmp_path):
             page.goto(f"http://127.0.0.1:{port}/wallet", wait_until="networkidle")
             assert errors == []
 
+            # `networkidle` говорит только про запросы: скрипт страницы под
+            # нагрузкой мог ещё не выполниться. Ждём то, чем пользуемся.
+            page.wait_for_function("() => typeof syncNetwork === 'function'")
+
             # Адрес обязан соответствовать ключу.
             assert page.evaluate(
                 "() => BHydra.walletFromPrivateKey(wallet.key).address"

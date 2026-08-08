@@ -35,47 +35,23 @@ if __name__ == "__main__" and __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     __package__ = "b_hydra"
 
-from . import hashing
-from .wallet import _hmac_sha512, _inverse_mod, _rfc6979_nonces
+from . import ec, hashing
+from .wallet import _rfc6979_nonces
 
 # --- Кривая P-256 (secp256r1) ------------------------------------------------
 # Не secp256k1: TLS её не принимает — современные стеки её из умолчаний убрали.
-# Отличие только в коэффициенте a (здесь a = p-3, у нас в кошельке a = 0),
-# поэтому удвоение точки считается по чуть другой формуле.
-P256_P = 0xffffffff00000001000000000000000000000000ffffffffffffffffffffffff
-P256_A = P256_P - 3
-P256_B = 0x5ac635d8aa3a93e7b3ebbd55769886bc651d06b0cc53b0f63bce3c3e27d2604b
-P256_GX = 0x6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296
-P256_GY = 0x4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5
-P256_N = 0xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551
-P256_G = (P256_GX, P256_GY)
-
-
-def _point_add(first, second):
-    if first is None:
-        return second
-    if second is None:
-        return first
-    x1, y1 = first
-    x2, y2 = second
-    if x1 == x2 and (y1 + y2) % P256_P == 0:
-        return None                       # P + (−P) = бесконечность
-    if first == second:
-        slope = (3 * x1 * x1 + P256_A) * _inverse_mod(2 * y1, P256_P) % P256_P
-    else:
-        slope = (y2 - y1) * _inverse_mod(x2 - x1, P256_P) % P256_P
-    x3 = (slope * slope - x1 - x2) % P256_P
-    return (x3, (slope * (x1 - x3) - y1) % P256_P)
-
-
-def _scalar_mult(k, point):
-    result, addend = None, point
-    while k:
-        if k & 1:
-            result = _point_add(result, addend)
-        addend = _point_add(addend, addend)
-        k >>= 1
-    return result
+# Отличие только в коэффициенте a (здесь a = p-3, у нас в кошельке a = 0).
+#
+# ⚠️ Арифметика ОБЩАЯ с кошельком (`ec.py`) и параметризована кривой. Раньше
+# здесь лежала вторая, отдельно написанная копия сложения и удвоения точек —
+# формулы почти те же, и ошибка в одной копии не всплыла бы в тестах другой.
+_CURVE = ec.SECP256R1
+P256_P = _CURVE.p
+P256_A = _CURVE.a
+P256_B = _CURVE.b
+P256_GX, P256_GY = _CURVE.g
+P256_N = _CURVE.n
+P256_G = _CURVE.g
 
 
 def _sha256(data: bytes) -> bytes:
@@ -95,21 +71,15 @@ def _hmac_sha256(key: bytes, message: bytes) -> bytes:
 def generate_key():
     """Пара ключей P-256: (приватное число, публичная точка)."""
     private = secrets.randbelow(P256_N - 1) + 1
-    return private, _scalar_mult(private, P256_G)
+    return private, _CURVE.public_key(private)
 
 
 def verify_p256(point, payload: bytes, signature) -> bool:
     """Проверка подписи P-256 — чтобы сертификат можно было сверить своим же
     кодом, не полагаясь только на то, что его «принял OpenSSL»."""
     r, s = signature
-    if not (1 <= r < P256_N and 1 <= s < P256_N):
-        return False
     z = int.from_bytes(_sha256(payload), "big")
-    w = _inverse_mod(s, P256_N)
-    first = _scalar_mult(z * w % P256_N, P256_G)
-    second = _scalar_mult(r * w % P256_N, point)
-    total = _point_add(first, second)
-    return total is not None and total[0] % P256_N == r
+    return _CURVE.verify(point, z, r, s)
 
 
 def sign_p256(private: int, payload: bytes):
@@ -118,19 +88,13 @@ def sign_p256(private: int, payload: bytes):
     Тот же HMAC-DRBG, что и у транзакций, только на SHA-256 и с порядком
     P-256 — он параметризован именно для этого и сверен с официальными
     векторами RFC 6979 (приложение A.2.5).
+
+    ⚠️ Без low-s, в отличие от кошелька: X.509 нормализации не требует, а
+    подпись сертификата обязана совпадать с тем, что ждёт чужой стек.
     """
-    digest = _sha256(payload)
-    z = int.from_bytes(digest, "big")             # len(digest)*8 == qlen
-    for k in _rfc6979_nonces(private, z, order=P256_N,
-                             hmac_fn=_hmac_sha256, hlen=32):
-        point = _scalar_mult(k, P256_G)
-        r = point[0] % P256_N
-        if r == 0:
-            continue
-        s = _inverse_mod(k, P256_N) * (z + r * private) % P256_N
-        if s == 0:
-            continue
-        return r, s
+    z = int.from_bytes(_sha256(payload), "big")    # len(digest)*8 == qlen
+    return _CURVE.sign(private, z, _rfc6979_nonces(
+        private, z, order=P256_N, hmac_fn=_hmac_sha256, hlen=32))
 
 
 # --- ASN.1 / DER --------------------------------------------------------------

@@ -36,6 +36,7 @@ if __name__ == "__main__" and __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     __package__ = "b_hydra"
 
+from . import gpu_miner
 from . import hashing
 from . import native_miner
 
@@ -300,13 +301,17 @@ class Block:
         Возвращает хеш или None, если майнинг прерван. Без колбэков ведёт себя
         ровно как раньше: перебирает до победного.
         """
-        # Нативный майнер, если он есть: тот же перебор, но на всех ядрах.
+        # Внешний майнер, если он есть: тот же перебор, но не на одном ядре
+        # Python. Порядок — видеокарта, потом все ядра процессора: перебор
+        # nonce это тысячи НЕЗАВИСИМЫХ попыток, и GPU создан ровно для такого.
         # Только когда бюджет попыток не задан — он считается в попытках, а
-        # нативный работает срезами по времени, и точный счёт там невозможен.
+        # внешние майнеры работают срезами по времени, и точный счёт невозможен.
         if max_attempts is None:
-            native = native_miner.default() if miner is None else miner
-            if native is not None:
-                found = self._mine_native(native, should_stop=should_stop,
+            engine = miner
+            if engine is None:
+                engine = gpu_miner.default() or native_miner.default()
+            if engine is not None:
+                found = self._mine_native(engine, should_stop=should_stop,
                                           on_progress=on_progress)
                 if found is not None or should_stop is not None:
                     return found
