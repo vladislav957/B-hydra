@@ -4,6 +4,12 @@ on:
   workflow_dispatch:          # запуск вручную из вкладки Actions
   push:
     tags: ["v*"]              # и при пуше тега версии (v1.0.0 и т.п.)
+  release:
+    types: [published]        # ⚠️ и при публикации релиза
+    # Без этого черновик, опубликованный позже, оставался БЕЗ бинарников:
+    # пока релиз черновик, тега ещё нет, а публикация создаёт тег, НЕ порождая
+    # события push. Ровно так у v.0.0.8 не оказалось .exe — сборка не
+    # запускалась вовсе. Событие release этот путь закрывает.
 
 permissions:
   contents: write             # нужно для публикации в Releases
@@ -13,20 +19,29 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # ⚠️ `asset` обязан РАЗЛИЧАТЬСЯ у всех трёх. Раньше macOS и Linux
+        # выкладывали один и тот же `B-hydra-Core`, и в релизе выживал только
+        # тот, кто успел последним: у v0.0.6 и v0.0.7 приехало по 2 бинарника
+        # вместо 3, причём молча — сборка при этом «успешна».
+        # Имя внутри сборки (--name) НЕ трогаем: приложение остаётся
+        # B-hydra-Core, суффикс появляется только у файла в релизе.
         include:
           - os: windows-latest
             artifact: bhydra-core-windows
             binary: dist/B-hydra-Core.exe
+            asset: B-hydra-Core-windows.exe
             iconflag: "--icon assets/bhydra.ico"
             sep: ";"
           - os: macos-latest
             artifact: bhydra-core-macos
             binary: dist/B-hydra-Core
+            asset: B-hydra-Core-macos
             iconflag: "--icon assets/bhydra.png"
             sep: ":"
           - os: ubuntu-latest
             artifact: bhydra-core-linux
             binary: dist/B-hydra-Core
+            asset: B-hydra-Core-linux
             iconflag: ""
             sep: ":"
     runs-on: ${{ matrix.os }}
@@ -57,8 +72,16 @@ jobs:
           path: ${{ matrix.binary }}
           if-no-files-found: error
 
+      # Копия с именем платформы — только для релиза. Артефакт выше уже
+      # разложен по разным папкам (`artifact`), там пересечения нет.
+      # shell: bash задан явно: на windows-latest по умолчанию pwsh, где нет cp.
+      - name: Имя файла для релиза
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: cp "${{ matrix.binary }}" "${{ matrix.asset }}"
+
       - name: Publish to Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: ${{ matrix.binary }}
+          files: ${{ matrix.asset }}
