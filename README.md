@@ -205,8 +205,10 @@ wallet, mining and P2P networking in one app (like Bitcoin Core). Prebuilt
 
 Key Features: Decentralized Architecture: The platform operates without a central server, ensuring complete independence. Ease of Use: Intuitive interface and easy communication with other groups. Reliability and Security: Execution Scalability: The ability to expand the network to work with specified data volumes.
 
-![Снимок экрана (39)](https://github.com/user-attachments/assets/4f05102c-824f-42a4-b1f4-73bfbae0db3a)
-![Снимок экрана (40)](https://github.com/user-attachments/assets/2f56edec-3b73-435f-8394-1870d88855ae)
+<img width="1366" height="768" alt="Снимок экрана (85)" src="https://github.com/user-attachments/assets/0b41e626-d2e0-4b19-b0a6-80a33de2f582" />
+<img width="1366" height="768" alt="Снимок экрана (84)" src="https://github.com/user-attachments/assets/2f0c4ecc-514a-489a-8912-e40ad112aee7" />
+<img width="1366" height="768" alt="Снимок экрана (83)" src="https://github.com/user-attachments/assets/c780ef14-03e5-4073-a70e-ae11bd354198" />
+
 
 Installation
 How to install and run : Requirements: Python 3.9 or higher Installed in dependencies (see requirements.txt) Steps: Clone the repositories
