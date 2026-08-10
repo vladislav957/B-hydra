@@ -656,10 +656,12 @@ def make_server(host="0.0.0.0", port=8000, state_file=DEFAULT_STATE,
         node = p2p.node
     elif node is not None:
         pass                        # цепочку дали снаружи — ничего не грузим
-    elif state_file and os.path.exists(state_file):
-        node = BHydraNode.load(state_file)
     else:
-        node = BHydraNode(difficulty=difficulty)
+        # open_state переживает повреждённый файл (см. BHydraNode.open_state):
+        # раньше битая цепочка роняла REST-сервер на старте.
+        node, notice = BHydraNode.open_state(state_file, difficulty=difficulty)
+        if notice:
+            print(notice)
     # Смарт-контракты (эскроу, чеки) — в отдельном файле рядом с цепочкой:
     # там лежит приватный ключ контрактного кошелька, терять его нельзя.
     contracts_file = state_file + ".contracts" if state_file else None
@@ -723,10 +725,9 @@ def main():
         from .p2p import P2PNode, local_ip, parse_seeds
         from .node import BHydraNode
 
-        if args.file and os.path.exists(args.file):
-            chain_node = BHydraNode.load(args.file)
-        else:
-            chain_node = BHydraNode()
+        chain_node, notice = BHydraNode.open_state(args.file)
+        if notice:
+            print(notice)
         # Адрес для представления — тот, по которому нас достанут ДРУГИЕ
         # машины. 127.0.0.1 виден только этому компьютеру, и узел с таким
         # адресом в сети бесполезен: соседи не смогут подключиться обратно.

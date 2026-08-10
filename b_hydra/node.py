@@ -9,6 +9,7 @@ Node.py — узел сети B-hydra (модель UTXO).
 """
 
 import json
+import os
 
 import time
 from functools import lru_cache
@@ -926,27 +927,172 @@ class BHydraNode:
 
     # --- Сохранение / загрузка ------------------------------------------
     def save(self, path: str) -> None:
-        """Сохраняет цепочку и мемпул в JSON-файл."""
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(
-                {"difficulty": self.blockchain.difficulty,
-                 "chain": self.blockchain.to_dicts(),
-                 "mempool": [tx.to_dict() for tx in self.mempool.transactions]},
-                f, ensure_ascii=False, indent=2,
-            )
+        """Сохраняет цепочку и мемпул в JSON-файл. Запись АТОМАРНАЯ.
+
+        ⚠️ Пишем во временный файл и переименовываем. Прежний код открывал
+        целевой файл на "w", то есть ОБРЕЗАЛ его сразу, а потом писал: любой
+        обрыв посреди записи — закрытая крышка ноутбука, снятие процесса,
+        пропажа питания — оставлял наполовину записанный JSON. Восстановиться
+        из такого файла узел уже не мог и падал при каждом запуске.
+        Это не теория: пользователь получил `JSONDecodeError: Expecting ','
+        delimiter: line 3992 column 153` на 185-килобайтном файле и не смог
+        открыть кошелёк вообще.
+        `os.replace` на одном томе атомарен и на Windows, и на POSIX: файл
+        либо старый целиком, либо новый целиком, промежуточного состояния нет.
+        Тот же приём уже используется для таблицы пиров и ключа узла (`p2p.py`).
+        """
+        payload = {
+            "difficulty": self.blockchain.difficulty,
+            "chain": self.blockchain.to_dicts(),
+            "mempool": [tx.to_dict() for tx in self.mempool.transactions],
+        }
+        temporary = f"{path}.tmp"
+        try:
+            with open(temporary, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+                f.flush()
+                os.fsync(f.fileno())     # данные на диске ДО переименования
+            os.replace(temporary, path)
+        except OSError:
+            # Не оставляем мусор рядом с состоянием, но и не прячем ошибку.
+            try:
+                os.remove(temporary)
+            except OSError:
+                pass
+            raise
 
     @classmethod
     def load(cls, path: str) -> "BHydraNode":
         """Загружает узел из JSON-файла с цепочкой и мемпулом."""
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
+        return cls._from_state(data["chain"], data["difficulty"],
+                               data.get("mempool", []))
+
+    @classmethod
+    def _from_state(cls, chain, difficulty, mempool=()) -> "BHydraNode":
         node = cls.__new__(cls)
-        node.blockchain = Blockchain.from_dicts(data["chain"], data["difficulty"])
+        node.blockchain = Blockchain.from_dicts(chain, difficulty)
         node.mempool = TransactionPool()
-        for tx_dict in data.get("mempool", []):
+        for tx_dict in mempool:
             node.mempool.add(Transaction.from_dict(tx_dict))
         node._rebuild_effective()
         return node
+
+    @classmethod
+    def open_state(cls, path: str, difficulty=DEFAULT_DIFFICULTY):
+        """Открывает файл состояния, переживая его повреждение.
+
+        Возвращает `(узел, сообщение)`; сообщение — None, когда всё прошло
+        обычным путём, иначе человеческий текст о том, что случилось.
+
+        ⚠️ Точки входа звали `load()` НАПРЯМУЮ — и клиент, и REST, и CLI. Битый
+        файл убивал их все ещё до открытия окна: наружу вылетал
+        `JSONDecodeError`, и запустить программу было нельзя больше никогда.
+        Портиться файлу было от чего — запись состояния не была атомарной
+        (исправлено в `save`), — но однажды испорченный файл сам не
+        выздоровеет, поэтому запуск обязан его пережить.
+
+        Порядок: прочитать целиком → спасти уцелевшее начало → начать заново.
+        ⚠️ Битый файл НЕ удаляется, а откладывается с расширением `.corrupt-…`:
+        решать его судьбу вправе только владелец монет.
+        """
+        if not path or not os.path.exists(path):
+            return cls(difficulty=difficulty), None
+        try:
+            return cls.load(path), None
+        except (ValueError, KeyError, TypeError) as error:
+            broken = f"{path}.corrupt-{int(time.time())}"
+            try:
+                os.replace(path, broken)
+            except OSError:
+                broken = path
+            try:
+                node = cls.recover(broken)
+            except (OSError, ValueError):
+                return cls(difficulty=difficulty), (
+                    "Файл цепочки повреждён и восстановлению не поддался.\n\n"
+                    f"Он сохранён как «{broken}» — не удаляйте его.\n"
+                    "Узел запущен с пустой цепочкой; если есть соседи, она "
+                    "догонится по сети.\n\n"
+                    f"Причина: {error}")
+            try:
+                node.save(path)                # уже атомарно
+            except OSError:
+                pass
+            return node, (
+                "Файл цепочки был повреждён — похоже, запись оборвалась.\n\n"
+                f"Восстановлены блоки до высоты {len(node.blockchain.chain) - 1}; "
+                f"повреждённый файл сохранён как «{broken}».\n"
+                "Потерянные блоки догонятся по сети, если есть соседи.")
+
+    @classmethod
+    def recover(cls, path: str) -> "BHydraNode":
+        """Собирает узел из ПОВРЕЖДЁННОГО файла состояния.
+
+        Оборванная запись рвёт файл посреди массива блоков, но всё, что до
+        разрыва, — целые JSON-объекты. Их можно вычитать по одному и собрать
+        цепочку из уцелевшего начала: пользователь теряет последние блоки, а
+        не весь кошелёк.
+
+        ⚠️ Восстановленная цепочка ОБЯЗАНА пройти проверку. Поэтому хвост
+        отбрасывается, пока `is_chain_valid()` не согласится: последний
+        дочитанный блок может быть синтаксически целым, но ссылаться на то,
+        чего в файле не осталось. Молча принять такую цепочку значит завести
+        узел с невалидным состоянием — хуже, чем не открыться.
+
+        Бросает ValueError, если спасать нечего (не осталось даже генезиса).
+        """
+        with open(path, "r", encoding="utf-8") as f:
+            text = f.read()
+
+        marker = '"chain"'
+        head = text.find(marker)
+        start = text.find("[", head) if head >= 0 else -1
+        if start < 0:
+            raise ValueError("в файле не найден массив блоков")
+
+        decoder = json.JSONDecoder()
+
+        def value_at(index):
+            """Значение JSON, начиная с `index`, пропустив пробелы и запятые.
+
+            ⚠️ `raw_decode` сам пробелы НЕ пропускает и падает на них. Из-за
+            этого сложность читалась как «не прочиталась», подставлялось
+            умолчание, и вся цепочка потом не проходила проверку — спасался
+            один генезис вместо всех блоков.
+            """
+            while index < len(text) and text[index] in " \t\r\n,":
+                index += 1
+            if index >= len(text):
+                raise ValueError("конец файла")
+            return decoder.raw_decode(text, index)
+
+        blocks, position = [], start + 1
+        while True:
+            try:
+                block, position = value_at(position)
+            except ValueError:
+                break                      # дальше — обрыв, это и есть конец
+            blocks.append(block)
+
+        difficulty = DEFAULT_DIFFICULTY
+        head_at = text.find('"difficulty"')
+        if head_at >= 0:
+            try:                           # заголовок файла обычно цел
+                difficulty = value_at(text.find(":", head_at) + 1)[0]
+            except ValueError:
+                pass
+
+        while blocks:
+            try:
+                node = cls._from_state(blocks, difficulty)
+                if node.blockchain.is_chain_valid():
+                    return node
+            except (KeyError, TypeError, ValueError):
+                pass
+            blocks.pop()                   # хвост не сходится — отрезаем
+        raise ValueError("не удалось восстановить ни одного блока")
 
 
 if __name__ == "__main__":
