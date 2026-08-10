@@ -150,31 +150,62 @@ def test_hashrate_is_measured():
 
 
 def test_abandoned_block_is_not_added_to_the_chain():
-    """Недомайненный блок — не блок: в цепочке ему места нет."""
-    chain = Blockchain(difficulty=1)
-    height = len(chain.chain)
-    assert chain.add_block(data=["x"], max_attempts=1) is None
-    assert len(chain.chain) == height
+    """Недомайненный блок — не блок: в цепочке ему места нет.
+
+    ⚠️ Одна попытка при difficulty=1 УГАДЫВАЕТ примерно раз на шестнадцать:
+    `genesis_target_for` — это число ведущих нулей hex, значит цель проходит
+    каждый шестнадцатый хеш. Прежняя версия проверяла единственный вызов и
+    поэтому падала примерно в 6% прогонов — что и случилось на CI, на ровном
+    месте. Здесь проверяются ОБЕ ветки, а брошенный блок ловится за несколько
+    попыток: вероятность промахнуться мимо него — 16⁻²⁴.
+    """
+    abandoned = 0
+    for _ in range(24):
+        chain = Blockchain(difficulty=1)
+        height = len(chain.chain)
+        block = chain.add_block(data=["x"], max_attempts=1)
+        if block is None:
+            assert len(chain.chain) == height, "брошенный блок попал в цепочку"
+            abandoned += 1
+        else:
+            # Повезло с первого хеша — тогда блок обязан быть настоящим.
+            assert len(chain.chain) == height + 1
+            assert chain.is_chain_valid()
+    assert abandoned, "24 попытки подряд угадали цель — так не бывает"
 
 
 # --- Мемпул при брошенном блоке ------------------------------------------------
+def _node_with_pending(count=3):
+    """Узел с добытым блоком и `count` переводами в мемпуле."""
+    node = BHydraNode(difficulty=1)
+    sender = generate_wallet()
+    node.mine_pending(sender.address)
+    for _ in range(count):
+        node.add_transaction(
+            node.create_transaction(sender, generate_wallet().address, 1, 0.1))
+    return node, sender
+
+
 def test_abandoned_block_returns_transactions_to_the_mempool():
     """Транзакции снимаются с мемпула ДО майнинга — и обязаны вернуться.
 
     Иначе прерванный майнинг молча съедал бы чужие переводы: из мемпула их
     убрали, а в цепочку не положили.
-    """
-    node = BHydraNode(difficulty=1)
-    sender = generate_wallet()
-    node.mine_pending(sender.address)
-    for _ in range(3):
-        node.add_transaction(
-            node.create_transaction(sender, generate_wallet().address, 1, 0.1))
-    before = {tx.txid for tx in node.mempool.transactions}
-    assert len(before) == 3
 
-    assert node.mine_pending(sender.address, max_attempts=1) is None
-    assert {tx.txid for tx in node.mempool.transactions} == before
+    ⚠️ Одна попытка при difficulty=1 угадывает цель примерно раз на шестнадцать,
+    поэтому ждать отказа от единственного вызова нельзя — тест плавал бы.
+    Берём свежий узел, пока блок не окажется брошенным.
+    """
+    for _ in range(24):
+        node, sender = _node_with_pending()
+        before = {tx.txid for tx in node.mempool.transactions}
+        assert len(before) == 3
+        if node.mine_pending(sender.address, max_attempts=1) is None:
+            assert {tx.txid for tx in node.mempool.transactions} == before
+            return
+        # Повезло с первого хеша: блок добыт, переводы законно ушли в него.
+        assert not node.mempool.transactions
+    raise AssertionError("24 попытки подряд угадали цель — так не бывает")
 
 
 def test_returning_does_not_swallow_transactions_that_arrived_meanwhile():
