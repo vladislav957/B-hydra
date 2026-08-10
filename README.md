@@ -21,9 +21,9 @@
 Надёжность и безопасность : Испол
 Масштабируемость : Возможность расширения сети для работ с указанными объемами данных.
 
-![Uploading Снимок экрана (83).png…]()
-![Uploading Снимок экрана (85).png…]()
-![Uploading Снимок экрана (84).png…]()
+<img width="1366" height="768" alt="Снимок экрана (85)" src="https://github.com/user-attachments/assets/ce03da54-eeda-4c03-a2b9-8bba6c736234" />
+<img width="1366" height="768" alt="Снимок экрана (84)" src="https://github.com/user-attachments/assets/6d4f6696-9676-4586-ad27-697be12d8078" />
+<img width="1366" height="768" alt="Снимок экрана (83)" src="https://github.com/user-attachments/assets/40fae8f3-70de-48cd-bb13-cdcbce7e28a7" />
 
  ---
 
