@@ -67,8 +67,8 @@ class BHydraApp(tk.Tk):
 
         # --- Состояние ---
         import os
-        self.node = (BHydraNode.load(STATE_FILE)
-                     if os.path.exists(STATE_FILE) else BHydraNode(difficulty=3))
+        self.node, self._state_notice = BHydraNode.open_state(
+            STATE_FILE, difficulty=3)
         # Смарт-контракты (эскроу и чеки) — вместе с приватным ключом
         # контрактного кошелька живут в отдельном файле рядом с цепочкой.
         try:
@@ -116,6 +116,12 @@ class BHydraApp(tk.Tk):
         self._refresh_blocks()
         self.after(150, self._poll_queue)        # опрос событий из воркера
         self.after(3000, self._auto_refresh)     # авто-обновление баланса/статуса
+        if self._state_notice:
+            # Показываем ПОСЛЕ сборки окна: диалог в середине __init__ подвесил
+            # бы наполовину собранный интерфейс. Молчать нельзя — иначе высота
+            # цепочки просто «откатится», и владелец не поймёт почему.
+            self.after(300, lambda: messagebox.showwarning(
+                "Файл цепочки восстановлен", self._state_notice))
 
     # --- Интерфейс -------------------------------------------------------
     def _build_ui(self) -> None:

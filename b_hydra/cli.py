@@ -17,6 +17,7 @@ cli.py — командная строка B-hydra.
 
 import argparse
 import os
+import sys
 
 if __name__ == "__main__" and __package__ in (None, ""):
     import os
@@ -34,9 +35,13 @@ DEFAULT_DIFFICULTY = 3
 
 
 def _load_or_init(path):
-    if os.path.exists(path):
-        return BHydraNode.load(path)
-    return BHydraNode(difficulty=DEFAULT_DIFFICULTY)
+    # open_state переживает повреждённый файл: спасает уцелевшее начало вместо
+    # падения с JSONDecodeError. О случившемся сообщаем — молча терять блоки
+    # нельзя, владелец должен понимать, почему высота откатилась.
+    node, notice = BHydraNode.open_state(path, difficulty=DEFAULT_DIFFICULTY)
+    if notice:
+        print(notice, file=sys.stderr)
+    return node
 
 
 def cmd_wallet(args):
