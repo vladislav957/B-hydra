@@ -46,43 +46,11 @@ api.py — REST API узла B-hydra (для мобильных кошелько
 
 import json
 import os
+import socket
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-
-class _DualStackServer(ThreadingHTTPServer):
-    """HTTP-сервер, слушающий сразу IPv6 и IPv4.
-
-    ⚠️ `ThreadingHTTPServer` умеет только IPv4, поэтому телефон и кошелёк в
-    сети, где есть лишь IPv6, до узла не достучались бы вовсе.
-    """
-
-    address_family = __import__("socket").AF_INET6
-
-    def server_bind(self):
-        import socket as _socket
-        try:
-            self.socket.setsockopt(_socket.IPPROTO_IPV6, _socket.IPV6_V6ONLY, 0)
-        except OSError:
-            pass                          # где нельзя — останется чистый IPv6
-        super().server_bind()
-
-
-def _make_server(host, port):
-    """Сервер на двойном стеке; при отсутствии IPv6 — обычный IPv4.
-
-    Пустой хост означает «на всех интерфейсах»: для IPv6 это `::`, и такой
-    сокет принимает заодно IPv4-клиентов.
-    """
-    import socket as _socket
-
-    if _socket.has_ipv6 and host in ("", "0.0.0.0", "::"):
-        try:
-            return _DualStackServer(("::", port), BHydraAPI)
-        except OSError:
-            pass                          # IPv6 недоступен — идём по-старому
-    return ThreadingHTTPServer((host, port), BHydraAPI)
 from urllib.parse import urlparse, unquote
 
 if __name__ == "__main__" and __package__ in (None, ""):
@@ -650,6 +618,45 @@ class BHydraAPI(BaseHTTPRequestHandler):
                 self._send(404, {"error": "not found"})
         except Exception as exc:  # noqa: BLE001
             self._send(500, {"error": str(exc)})
+
+
+class _DualStackServer(ThreadingHTTPServer):
+    """HTTP-сервер, слушающий сразу IPv6 и IPv4.
+
+    ⚠️ `ThreadingHTTPServer` умеет только IPv4, поэтому кошелёк в сети, где
+    есть лишь IPv6, до узла не достучался бы вовсе.
+    """
+
+    #: ⚠️ Через getattr: на сборке Python без IPv6 атрибута `AF_INET6` НЕТ, а
+    #: тело класса выполняется на импорте. Прямая ссылка роняла бы импорт всего
+    #: `api.py` — и вместо отката на IPv4, ради которого этот код и написан,
+    #: узел просто не стартовал бы.
+    address_family = getattr(socket, "AF_INET6", socket.AF_INET)
+
+    def server_bind(self):
+        try:
+            self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+        except (OSError, AttributeError):
+            # AttributeError — там же, где нет AF_INET6: констант IPPROTO_IPV6
+            # и IPV6_V6ONLY на такой сборке тоже не будет.
+            pass
+        super().server_bind()
+
+
+def _make_server(host, port):
+    """Сервер на двойном стеке; без IPv6 — обычный IPv4.
+
+    Пустой хост означает «на всех интерфейсах»: для IPv6 это `::`, и такой
+    сокет принимает заодно IPv4-клиентов.
+    """
+    if (getattr(socket, "has_ipv6", False)
+            and hasattr(socket, "AF_INET6")
+            and host in ("", "0.0.0.0", "::")):
+        try:
+            return _DualStackServer(("::", port), BHydraAPI)
+        except (OSError, AttributeError):
+            pass                          # IPv6 недоступен — идём по-старому
+    return ThreadingHTTPServer((host, port), BHydraAPI)
 
 
 def make_tls_context(certfile, keyfile):

@@ -28,6 +28,7 @@ import ctypes
 import json
 import os
 import queue
+import ipaddress
 import socket
 import subprocess
 import sys
@@ -80,23 +81,59 @@ class Transport:
 
 
 # --- Адреса: IPv4 и IPv6 ------------------------------------------------------
+def _ipv6_literal(text: str):
+    """Разобранный IPv6-адрес без зоны или None. Имена и IPv4 — тоже None."""
+    address, _, _zone = str(text).partition("%")
+    try:
+        parsed = ipaddress.ip_address(address)
+    except ValueError:
+        return None
+    return parsed if parsed.version == 6 else None
+
+
+def _valid_port(text: str):
+    """Номер порта 1..65535 или None. Ноль соединением не станет никогда."""
+    if not str(text).isdigit():
+        return None
+    port = int(text)
+    return port if 1 <= port <= 65535 else None
+
+
 def normalise_host(host: str) -> str:
-    """Приводит хост к одному написанию. Для IPv4 возвращает его же.
+    """Приводит адрес к ОДНОМУ каноническому написанию.
 
-    ⚠️ Двойной стек отдаёт IPv4-соседа как `::ffff:1.2.3.4` — это тот же самый
-    адрес, записанный по-другому. Без сведе́ния к одному виду один сосед считался
-    бы ДВУМЯ: лимит соединений с хоста обходился бы вдвое, бан по одной записи
-    не действовал бы на вторую, а таблица пиров копила бы дубли.
+    ⚠️ Сравнивать адреса как строки нельзя. У одного и того же /128 написаний
+    не пара, а десятки: ведущие нули независимо в каждой из восьми групп, `::`
+    на любом месте нулевой серии, регистр hex-цифр. Пока написания разные,
+    сосед переписыванием собственного адреса обходит `MAX_INBOUND_PER_HOST`
+    (каждая форма — свой счётчик), раздувает таблицу пиров и уходит от бана.
+    Поэтому адрес РАЗБИРАЕТСЯ и печатается в сжатой форме, а не режется строкой.
 
-    Зона link-local (`fe80::1%eth0`) сохраняется: без неё адрес неработоспособен.
+    `::ffff:1.2.3.4` сводится к `1.2.3.4` через `ipv4_mapped`: он ловит и
+    `0:0:0:0:0:ffff:1.2.3.4`, и `::FFFF:…`, которые проверка по префиксу
+    пропускала.
+
+    ⚠️ Зона link-local (`fe80::1%eth0`) СОХРАНЯЕТСЯ — без неё адрес
+    неработоспособен. Отрезаем её до разбора и приклеиваем обратно: сам
+    `ip_address` зону понимает не во всех версиях Python 3.9+.
+
+    ⚠️ Имена узлов и IPv4 возвращаются как есть: их написание и так однозначно,
+    а `ipaddress` на имени бросил бы ValueError. Строка с двоеточием, которая
+    адресом не является, разбор не роняет.
     """
     text = str(host).strip()
     if text.startswith("[") and text.endswith("]"):
         text = text[1:-1]
-    low = text.lower()
-    if low.startswith("::ffff:") and "." in low:
-        return low[len("::ffff:"):]        # IPv4, записанный как IPv6
-    return low if ":" in low else text
+    if ":" not in text:
+        return text                        # IPv4 или имя — однозначны и так
+    address, separator, zone = text.partition("%")
+    try:
+        parsed = ipaddress.ip_address(address)
+    except ValueError:
+        return text.lower()                # двоеточия есть, а адреса нет
+    if parsed.version == 6 and parsed.ipv4_mapped is not None:
+        return str(parsed.ipv4_mapped)     # IPv4, записанный как IPv6
+    return f"{parsed}{separator}{zone}" if separator else str(parsed)
 
 
 def is_ipv6(host: str) -> bool:
@@ -115,13 +152,21 @@ def join_host_port(host: str, port: int) -> str:
 
 
 def split_host_port(text: str):
-    """`(host, port)` из строки. None — если это не адрес.
+    """`(host, port)` из строки. None — если это не пара «адрес и порт».
 
-    Понимает три написания: `1.2.3.4:5000`, `[2001:db8::1]:5000` и голое
-    `2001:db8::1:5000` (так адрес выглядел бы, собери его наивным `f"{h}:{p}"`).
-    ⚠️ Скобочная форма — стандарт (RFC 3986), и именно её напечатает человек;
-    прежний разбор через `rpartition(":")` давал на ней хост `[2001:db8::1]`,
-    с которым соединиться нельзя.
+    Понимает `1.2.3.4:5000`, `example.com:5000` и `[2001:db8::1]:5000`.
+
+    ⚠️ ГОЛЫЙ IPv6 — ЭТО АДРЕС ЦЕЛИКОМ, и здесь он отвергается. Отличить
+    `2001:db8::1:5000` от «`2001:db8::1` на порту 5000» нельзя в принципе: обе
+    строки законны. Прежний `rpartition(":")` резал такую строку по последнему
+    двоеточию, и `2001:db8::1` превращался в хост `2001:db8:` с портом 1 —
+    узел ходил стучаться в несуществующий адрес. Хуже того, такие строки
+    приходят из `peers`-сообщения соседа, то есть таблицу можно было засорять
+    УДАЛЁННО. Терять нечего: записывает адреса только `join_host_port`, а он
+    IPv6 всегда берёт в скобки (RFC 3986).
+
+    ⚠️ В скобках обязан быть настоящий IPv6-литерал, а порт — лежать в
+    1..65535: `[not-an-addr]:80` и `1.2.3.4:0` соединением не станут никогда.
     """
     raw = str(text).strip()
     if raw.startswith("["):
@@ -129,13 +174,18 @@ def split_host_port(text: str):
         if end < 0:
             return None
         host, rest = raw[1:end], raw[end + 1:]
-        if not rest.startswith(":") or not rest[1:].isdigit():
+        if _ipv6_literal(host) is None:    # скобки — только для IPv6
             return None
-        return normalise_host(host), int(rest[1:])
-    host, _, port = raw.rpartition(":")
-    if not host or not port.isdigit():
+        if not rest.startswith(":"):
+            return None
+        port = _valid_port(rest[1:])
+        return None if port is None else (normalise_host(host), port)
+
+    host, _, port_text = raw.rpartition(":")
+    if not host or ":" in host:            # голый IPv6 парой не является
         return None
-    return normalise_host(host), int(port)
+    port = _valid_port(port_text)
+    return None if port is None else (normalise_host(host), port)
 
 
 class TCPTransport(Transport):
