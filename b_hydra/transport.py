@@ -79,37 +79,133 @@ class Transport:
         return []
 
 
+# --- Адреса: IPv4 и IPv6 ------------------------------------------------------
+def normalise_host(host: str) -> str:
+    """Приводит хост к одному написанию. Для IPv4 возвращает его же.
+
+    ⚠️ Двойной стек отдаёт IPv4-соседа как `::ffff:1.2.3.4` — это тот же самый
+    адрес, записанный по-другому. Без сведе́ния к одному виду один сосед считался
+    бы ДВУМЯ: лимит соединений с хоста обходился бы вдвое, бан по одной записи
+    не действовал бы на вторую, а таблица пиров копила бы дубли.
+
+    Зона link-local (`fe80::1%eth0`) сохраняется: без неё адрес неработоспособен.
+    """
+    text = str(host).strip()
+    if text.startswith("[") and text.endswith("]"):
+        text = text[1:-1]
+    low = text.lower()
+    if low.startswith("::ffff:") and "." in low:
+        return low[len("::ffff:"):]        # IPv4, записанный как IPv6
+    return low if ":" in low else text
+
+
+def is_ipv6(host: str) -> bool:
+    """IPv6-адрес узнаётся по двоеточию — в IPv4 и в именах его не бывает."""
+    return ":" in str(host)
+
+
+def join_host_port(host: str, port: int) -> str:
+    """`host:port` для записи и передачи. IPv6 — в скобках, как принято.
+
+    ⚠️ Для IPv4 формат НЕ меняется ни на байт: ключи в файле пиров и в
+    сообщении `peers` остаются прежними, поэтому старые узлы читают их как
+    читали. Скобки появляются только у IPv6, которого раньше не было вовсе.
+    """
+    return f"[{host}]:{port}" if is_ipv6(host) else f"{host}:{port}"
+
+
+def split_host_port(text: str):
+    """`(host, port)` из строки. None — если это не адрес.
+
+    Понимает три написания: `1.2.3.4:5000`, `[2001:db8::1]:5000` и голое
+    `2001:db8::1:5000` (так адрес выглядел бы, собери его наивным `f"{h}:{p}"`).
+    ⚠️ Скобочная форма — стандарт (RFC 3986), и именно её напечатает человек;
+    прежний разбор через `rpartition(":")` давал на ней хост `[2001:db8::1]`,
+    с которым соединиться нельзя.
+    """
+    raw = str(text).strip()
+    if raw.startswith("["):
+        end = raw.find("]")
+        if end < 0:
+            return None
+        host, rest = raw[1:end], raw[end + 1:]
+        if not rest.startswith(":") or not rest[1:].isdigit():
+            return None
+        return normalise_host(host), int(rest[1:])
+    host, _, port = raw.rpartition(":")
+    if not host or not port.isdigit():
+        return None
+    return normalise_host(host), int(port)
+
+
 class TCPTransport(Transport):
-    """Обычный TCP/IP — то, на чём сеть работала всегда."""
+    """Обычный TCP/IP — то, на чём сеть работала всегда. IPv4 и IPv6."""
 
     name = "tcp"
     supports_discovery = True          # UDP-широковещание в локальной сети
 
     def listen(self, port):
-        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        # Слушаем на ВСЕХ интерфейсах (0.0.0.0): тогда узел доступен и по
-        # localhost, и по IP в локальной сети — другой компьютер сможет
-        # подключиться. Адрес «для представления» узел хранит отдельно.
-        server.bind(("0.0.0.0", port))
+        """Слушает на всех интерфейсах, по возможности сразу IPv6 и IPv4.
+
+        ⚠️ ОДИН сокет на оба протокола: `AF_INET6` с выключенным `IPV6_V6ONLY`
+        принимает и IPv6, и IPv4 (последние приходят как `::ffff:1.2.3.4`).
+        Два отдельных сокета потребовали бы второго потока `accept()` и
+        удвоили бы весь учёт соединений.
+
+        ⚠️ Откат на чистый IPv4 обязателен: `IPV6_V6ONLY` выключается не везде
+        (OpenBSD запрещает в принципе), да и самого `AF_INET6` может не быть —
+        например, в контейнере, где это писалось. Тогда узел работает ровно
+        как раньше, а не отказывается стартовать.
+        """
+        server = self._dual_stack_socket()
+        if server is None:
+            server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            server.bind(("0.0.0.0", port))
+        else:
+            try:
+                server.bind(("::", port))
+            except OSError:
+                server.close()
+                server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                server.bind(("0.0.0.0", port))
         server.listen(8)
+        return server
+
+    @staticmethod
+    def _dual_stack_socket():
+        """Сокет IPv6, принимающий и IPv4, или None, если так нельзя."""
+        if not socket.has_ipv6:
+            return None
+        try:
+            server = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+        except OSError:
+            return None                    # IPv6 в системе нет вовсе
+        try:
+            server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            server.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+        except OSError:
+            server.close()
+            return None                    # двойной стек запрещён — уходим на IPv4
         return server
 
     def accept(self, server):
         conn, addr = server.accept()
         # Хост без порта: у входящего соединения порт эфемерный, и репутация
-        # с лимитами считаются именно по хосту.
-        return conn, addr[0]
+        # с лимитами считаются именно по хосту. Написание сводится к одному —
+        # иначе `1.2.3.4` и `::ffff:1.2.3.4` были бы разными соседями.
+        return conn, normalise_host(addr[0])
 
     def connect(self, host, port, timeout):
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        try:
-            sock.settimeout(timeout)
-            sock.connect((host, port))
-        except BaseException:
-            sock.close()
-            raise
-        return sock
+        """Соединение по IPv4 или IPv6 — что доступно.
+
+        ⚠️ `create_connection` вместо ручного `AF_INET`: он спрашивает
+        `getaddrinfo` и перебирает все адреса имени. Без этого узел, у которого
+        в DNS только AAAA-запись, был недостижим, а имя с двумя записями всегда
+        шло по IPv4.
+        """
+        return socket.create_connection((normalise_host(host), port), timeout)
 
     def close_listener(self, server):
         try:

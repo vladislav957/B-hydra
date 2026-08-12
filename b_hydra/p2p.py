@@ -21,7 +21,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from . import secure
 from .tcp import MAX_MESSAGE_SIZE, recv_message, send_message
-from .transport import TCPTransport
+from .transport import (TCPTransport, join_host_port, normalise_host,
+                        split_host_port)
 
 # Предел числа запомненных txid/хешей блоков для анти-петли gossip. Без него
 # множества seen_* росли бы без границ (утечка памяти и мягкий DoS: атакующий
@@ -134,12 +135,16 @@ def local_ip() -> str:
 
 
 def parse_seeds(items) -> list:
-    """Разбирает адреса вида `host:port` в пары. Мусор молча пропускается."""
+    """Разбирает адреса вида `host:port` в пары. Мусор молча пропускается.
+
+    Понимает и IPv6: `[2001:db8::1]:5000` — скобочная форма стандартна
+    (RFC 3986) и именно её напечатает человек.
+    """
     seeds = []
     for item in items or ():
-        host, _, port = str(item).strip().rpartition(":")
-        if host and port.isdigit():
-            seeds.append((host, int(port)))
+        parsed = split_host_port(item)
+        if parsed:
+            seeds.append(parsed)
     return seeds
 
 
@@ -551,7 +556,7 @@ class P2PNode:
         peers = self.peer_list()[:MAX_PEERS_PER_MESSAGE]
         with self._peers_lock:
             known = dict(self._peer_api)
-        peer_api = {f"{h}:{p}": [known[(h, p)][0], known[(h, p)][1]]
+        peer_api = {join_host_port(h, p): [known[(h, p)][0], known[(h, p)][1]]
                     for (h, p) in peers if (h, p) in known}
         return {"type": "peers",
                 "peers": [list(p) for p in peers],
@@ -571,9 +576,11 @@ class P2PNode:
             return 0
         learned = 0
         for key, value in list(table.items())[:MAX_PEERS_PER_MESSAGE]:
-            host, _, port = str(key).rpartition(":")
+            parsed = split_host_port(key)
+            if parsed is None:
+                continue
+            host, port = parsed
             try:
-                port = int(port)
                 api_port = int(value[0])
             except (TypeError, ValueError, IndexError):
                 continue
@@ -942,6 +949,10 @@ class P2PNode:
         Потолок обязателен: адреса ничего не стоят и никак не проверяются, так
         что без него один ответ на hello раздувает таблицу до любого размера.
         """
+        # ⚠️ Написание сводится к одному ДО всех проверок: иначе `1.2.3.4` и
+        # `::ffff:1.2.3.4` — один и тот же сосед — заняли бы две записи, обошли
+        # бы потолок таблицы вдвое, а бан одной формы не подействовал бы на вторую.
+        host = normalise_host(host)
         if (host, port) == (self.host, self.port):
             return False
         if self.is_banned(host):
@@ -959,10 +970,14 @@ class P2PNode:
     # --- Репутация пиров --------------------------------------------------
     @staticmethod
     def _is_loopback(host) -> bool:
-        return str(host) in ("localhost", "::1") or str(host).startswith("127.")
+        # ⚠️ `::1` — IPv6-петля, и она тоже не банится: демо и тесты поднимают
+        # десятки узлов на одной машине, где общий банлист положил бы все.
+        host = normalise_host(host)
+        return host in ("localhost", "::1") or host.startswith("127.")
 
     def is_banned(self, host) -> bool:
         """Забанен ли адрес прямо сейчас (истёкшие баны снимаются сами)."""
+        host = normalise_host(host)
         with self._ban_lock:
             until = self._banned.get(host)
             if until is None:
@@ -974,12 +989,14 @@ class P2PNode:
 
     def ban_score(self, host) -> int:
         """Текущие штрафные очки адреса (для диагностики и тестов)."""
+        host = normalise_host(host)
         with self._ban_lock:
             score, _when = self._scores.get(host, (0, 0.0))
             return score
 
     def ban_peer(self, host, duration=None) -> None:
         """Банит адрес и выкидывает все его порты из таблицы пиров."""
+        host = normalise_host(host)
         with self._ban_lock:
             self._banned[host] = time.monotonic() + (duration or self.ban_duration)
             self._scores.pop(host, None)
@@ -999,6 +1016,7 @@ class P2PNode:
         """
         if not host or (self._is_loopback(host) and not self.ban_loopback):
             return False
+        host = normalise_host(host)       # штраф и бан — по одному написанию
         now = time.monotonic()
         with self._ban_lock:
             score, when = self._scores.get(host, (0, now))
@@ -1029,11 +1047,12 @@ class P2PNode:
         # перезапуска каждое соединение снова было бы «первым контактом», и
         # подмена узла опять проходила бы незамеченной.
         with self._pool_lock:
-            pins = {f"{h}:{p}": key for (h, p), key in self._pins.items()}
+            pins = {join_host_port(h, p): key
+                    for (h, p), key in self._pins.items()}
         # REST-адреса соседей тоже: иначе после перезапуска кошельки снова
         # знали бы ровно один узел — тот, что вписан руками.
         with self._peers_lock:
-            api = {f"{h}:{p}": [port, tls]
+            api = {join_host_port(h, p): [port, tls]
                    for (h, p), (port, tls) in self._peer_api.items()}
         payload = {"peers": [list(peer) for peer in self.peer_list()],
                    "pins": pins, "api": api}
@@ -1070,15 +1089,16 @@ class P2PNode:
             if self.add_peer(host, port):
                 added += 1
         for entry, key in (stored.get("pins") or {}).items():
-            host, _, port = str(entry).rpartition(":")
-            try:
-                self.pin_peer(host, int(port), str(key))
-            except (TypeError, ValueError):
+            parsed = split_host_port(entry)
+            if parsed is None:
                 continue                  # мусор в закреплениях просто пропускаем
+            self.pin_peer(parsed[0], parsed[1], str(key))
         for entry, value in (stored.get("api") or {}).items():
-            host, _, port = str(entry).rpartition(":")
+            parsed = split_host_port(entry)
+            if parsed is None:
+                continue
             try:
-                self.remember_api(host, int(port),
+                self.remember_api(parsed[0], parsed[1],
                                   {"api": value[0],
                                    "api_tls": value[1] if len(value) > 1 else False})
             except (TypeError, ValueError, IndexError):
@@ -1765,8 +1785,10 @@ def main():
     # Соседи с прошлого запуска + seed-узлы: узел находит сеть сам, без --peer.
     alive = node.bootstrap()
     if args.peer:
-        host, _, port = args.peer.rpartition(":")
-        node.connect(host, int(port))
+        parsed = split_host_port(args.peer)
+        if parsed is None:
+            raise SystemExit(f"не разобрать адрес: {args.peer}")
+        node.connect(*parsed)
     channel = "шифрован" if node.encrypt else "ОТКРЫТ"
     print(f"Транспорт: {node.transport.name} ({node.host})")
     print(f"P2P-узел B-hydra на :{args.port} | пиров: {len(node.peers)} "
