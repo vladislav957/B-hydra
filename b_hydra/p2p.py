@@ -645,9 +645,15 @@ class P2PNode:
         return _REFUSED if self.require_encryption else None
 
     def _claim_host_slot(self, host) -> bool:
-        """Занимает слот входящего соединения под хост (или отказывает)."""
+        """Занимает слот входящего соединения под хост (или отказывает).
+
+        ⚠️ Счёт идёт по КАНОНИЧЕСКОМУ написанию: иначе сосед переписыванием
+        собственного адреса (ведущие нули, место `::`, регистр) заводил бы
+        себе новый счётчик на каждую форму и обходил лимит сколько угодно раз.
+        """
         if self._is_loopback(host):
             return True
+        host = normalise_host(host)
         with self._conns_lock:
             if self._per_host.get(host, 0) >= MAX_INBOUND_PER_HOST:
                 return False
@@ -657,6 +663,7 @@ class P2PNode:
     def _release_host_slot(self, host) -> None:
         if self._is_loopback(host):
             return
+        host = normalise_host(host)
         with self._conns_lock:
             left = self._per_host.get(host, 0) - 1
             if left > 0:
@@ -667,7 +674,9 @@ class P2PNode:
     def inbound_connections(self, host=None) -> int:
         """Сколько входящих соединений обслуживается сейчас (всего или с хоста)."""
         with self._conns_lock:
-            return self._per_host.get(host, 0) if host else len(self._conns)
+            if not host:
+                return len(self._conns)
+            return self._per_host.get(normalise_host(host), 0)
 
     def _handle_conn(self, conn, host=None):
         """Обслуживает соединение, пока пир его не закроет или не замолчит.

@@ -62,7 +62,6 @@ def test_is_ipv6_recognises_by_the_colon():
     ("localhost:5000", ("localhost", 5000)),
     ("[::1]:5000", ("::1", 5000)),
     ("[2001:db8::1]:5000", ("2001:db8::1", 5000)),
-    ("2001:db8::1:5000", ("2001:db8::1", 5000)),        # наивная запись
     ("  1.2.3.4:5000  ", ("1.2.3.4", 5000)),
 ])
 def test_split_host_port(text, expected):
@@ -76,6 +75,42 @@ def test_split_host_port(text, expected):
 def test_split_host_port_refuses_junk(junk):
     """Мусор — None, а не пара с нулевым портом: молча звонить в никуда нельзя."""
     assert split_host_port(junk) is None
+
+
+@pytest.mark.parametrize("bare", [
+    "2001:db8::1", "::1", "fe80::1%eth0", "2001:db8::1:5000",
+    "0:0:0:0:0:0:0:1",
+])
+def test_a_bare_ipv6_is_not_a_host_port_pair(bare):
+    """⚠️ Голый IPv6 — это адрес ЦЕЛИКОМ, а не «хост и порт».
+
+    Отличить `2001:db8::1:5000` от «`2001:db8::1` на порту 5000» нельзя в
+    принципе: обе строки законны. Прежний `rpartition(":")` резал адрес по
+    последнему двоеточию, и `2001:db8::1` превращался в хост `2001:db8:` с
+    портом 1 — узел ходил стучаться в несуществующий адрес. Такие строки
+    приходят из `peers`-сообщения соседа, то есть таблицу можно было засорять
+    УДАЛЁННО.
+    """
+    assert split_host_port(bare) is None
+
+
+@pytest.mark.parametrize("text", ["1.2.3.4:0", "[::1]:0", "1.2.3.4:65536",
+                                  "1.2.3.4:99999", "[::1]:70000"])
+def test_port_must_be_in_range(text):
+    """Порт 0 и всё сверх 65535 соединением не станут никогда."""
+    assert split_host_port(text) is None
+
+
+def test_port_boundaries_are_accepted():
+    assert split_host_port("1.2.3.4:1") == ("1.2.3.4", 1)
+    assert split_host_port("1.2.3.4:65535") == ("1.2.3.4", 65535)
+
+
+@pytest.mark.parametrize("text", ["[not-an-addr]:80", "[1.2.3.4]:80",
+                                  "[example.com]:80", "[]:80"])
+def test_brackets_are_only_for_ipv6(text):
+    """В скобках обязан быть настоящий IPv6-литерал, а не что попало."""
+    assert split_host_port(text) is None
 
 
 def test_round_trip_through_write_and_read():
@@ -117,6 +152,40 @@ def test_normalise_keeps_real_addresses_intact():
 def test_zone_index_is_preserved():
     """`fe80::1%eth0` без зоны неработоспособен — обрезать её нельзя."""
     assert normalise_host("fe80::1%eth0") == "fe80::1%eth0"
+    assert normalise_host("FE80::0001%eth0") == "fe80::1%eth0"   # и сводится
+
+
+@pytest.mark.parametrize("spelling", [
+    "2001:db8::1",
+    "2001:0db8::1",
+    "2001:0DB8:0000:0000:0000:0000:0000:0001",
+    "2001:db8:0:0:0:0:0:1",
+    "2001:DB8::0001",
+    "[2001:0db8::1]",
+])
+def test_every_spelling_of_one_address_gives_one_key(spelling):
+    """⚠️ У одного /128 написаний десятки, и все обязаны сойтись в одно.
+
+    Ведущие нули независимо в каждой из восьми групп, `::` на любом месте
+    нулевой серии, регистр hex-цифр. Пока написания разные, сосед их
+    переписыванием заводит себе новый счётчик и новый ключ в таблице.
+    """
+    assert normalise_host(spelling) == "2001:db8::1"
+
+
+@pytest.mark.parametrize("mapped", [
+    "::ffff:1.2.3.4", "::FFFF:1.2.3.4", "0:0:0:0:0:ffff:1.2.3.4",
+    "[::ffff:1.2.3.4]",
+])
+def test_every_mapped_form_folds_to_ipv4(mapped):
+    """`ipv4_mapped` ловит и те записи, которые проверка по префиксу пропускала."""
+    assert normalise_host(mapped) == "1.2.3.4"
+
+
+def test_a_colonful_non_address_does_not_crash():
+    """Строка с двоеточиями, адресом не являющаяся, не должна ронять разбор."""
+    assert normalise_host("не:адрес:вовсе") == "не:адрес:вовсе"
+    assert normalise_host("http://example.com") == "http://example.com"
 
 
 # --- Seeds ---------------------------------------------------------------------
@@ -256,3 +325,47 @@ def test_dual_stack_accepts_ipv4_too():
             client.close()
     finally:
         transport.close_listener(server)
+
+
+def test_rewriting_the_address_does_not_buy_extra_connection_slots():
+    """⚠️ Сосед не должен обходить `MAX_INBOUND_PER_HOST` переписыванием адреса.
+
+    Счёт входящих идёт по хосту, и пока написания IPv6 сравнивались строками,
+    каждая форма одного и того же /128 заводила СВОЙ счётчик: лимит обходился
+    столько раз, сколько написаний придумает сосед, — а их десятки.
+    """
+    from b_hydra.p2p import MAX_INBOUND_PER_HOST
+
+    node = P2PNode("127.0.0.1", 5406, None)
+    spellings = ["2001:db8::5", "2001:0db8::5", "2001:DB8:0:0:0:0:0:5",
+                 "[2001:0DB8::0005]"]
+    taken = 0
+    for index in range(MAX_INBOUND_PER_HOST):
+        assert node._claim_host_slot(spellings[index % len(spellings)]) is True
+        taken += 1
+    assert taken == MAX_INBOUND_PER_HOST
+    # Лимит выбран — любое написание того же адреса обязано получить отказ.
+    for spelling in spellings:
+        assert node._claim_host_slot(spelling) is False, spelling
+    assert node.inbound_connections("2001:db8::5") == MAX_INBOUND_PER_HOST
+
+
+def test_a_ban_covers_every_spelling_of_the_address():
+    """Бан по одной форме обязан действовать на все остальные."""
+    node = P2PNode("127.0.0.1", 5407, None)
+    node.ban_peer("2001:0DB8:0000:0000:0000:0000:0000:0009")
+    for spelling in ("2001:db8::9", "2001:0db8::9", "[2001:DB8::9]"):
+        assert node.is_banned(spelling) is True, spelling
+        assert node.add_peer(spelling, 5000) is False, spelling
+
+
+def test_ipv4_keys_in_the_peers_file_are_byte_identical():
+    """⚠️ Совместимость: узлы прежних версий обязаны читать записи как читали.
+
+    Ключи IPv4 в файле пиров и в сообщении `peers` не меняются ни на байт —
+    скобки появляются только у IPv6, которого раньше не было вовсе.
+    """
+    assert join_host_port("192.168.1.50", 5000) == "192.168.1.50:5000"
+    assert join_host_port("10.0.0.1", 65535) == "10.0.0.1:65535"
+    # И читаются обратно тем же разбором, что и раньше.
+    assert split_host_port("192.168.1.50:5000") == ("192.168.1.50", 5000)
