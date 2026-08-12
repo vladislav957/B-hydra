@@ -49,6 +49,40 @@ import os
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+
+class _DualStackServer(ThreadingHTTPServer):
+    """HTTP-сервер, слушающий сразу IPv6 и IPv4.
+
+    ⚠️ `ThreadingHTTPServer` умеет только IPv4, поэтому телефон и кошелёк в
+    сети, где есть лишь IPv6, до узла не достучались бы вовсе.
+    """
+
+    address_family = __import__("socket").AF_INET6
+
+    def server_bind(self):
+        import socket as _socket
+        try:
+            self.socket.setsockopt(_socket.IPPROTO_IPV6, _socket.IPV6_V6ONLY, 0)
+        except OSError:
+            pass                          # где нельзя — останется чистый IPv6
+        super().server_bind()
+
+
+def _make_server(host, port):
+    """Сервер на двойном стеке; при отсутствии IPv6 — обычный IPv4.
+
+    Пустой хост означает «на всех интерфейсах»: для IPv6 это `::`, и такой
+    сокет принимает заодно IPv4-клиентов.
+    """
+    import socket as _socket
+
+    if _socket.has_ipv6 and host in ("", "0.0.0.0", "::"):
+        try:
+            return _DualStackServer(("::", port), BHydraAPI)
+        except OSError:
+            pass                          # IPv6 недоступен — идём по-старому
+    return ThreadingHTTPServer((host, port), BHydraAPI)
 from urllib.parse import urlparse, unquote
 
 if __name__ == "__main__" and __package__ in (None, ""):
@@ -677,7 +711,7 @@ def make_server(host="0.0.0.0", port=8000, state_file=DEFAULT_STATE,
     BHydraAPI.contracts_file = contracts_file
     BHydraAPI.tls = bool(certfile and keyfile)
     BHydraAPI.allow_key_endpoints = allow_key_endpoints
-    server = ThreadingHTTPServer((host, port), BHydraAPI)
+    server = _make_server(host, port)
     if certfile and keyfile:
         server.socket = make_tls_context(certfile, keyfile).wrap_socket(
             server.socket, server_side=True)
