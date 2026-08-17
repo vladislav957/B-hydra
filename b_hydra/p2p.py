@@ -90,6 +90,15 @@ MAX_BATCH_BYTES = MAX_MESSAGE_SIZE // 4
 MAX_SYNC_BLOCKS = 100_000        # потолок докачки за одну синхронизацию
 SYNC_PEER_ATTEMPTS = 4           # сколько кандидатов пробуем за одну sync()
 
+#: Как часто узел сам ищет соседей и догоняет цепочку, секунд.
+#: ⚠️ Обслуживание обязательно, и вот почему: анонсы приносят только то, что
+#: произошло ПРИ НАС. Узел, который стоял выключенным или потерял связь, без
+#: этого так и остался бы на своей высоте — старые блоки ему никто не станет
+#: пересылать по собственной воле. Раньше цикл жил в `api.py`, поэтому узел,
+#: запущенный через `P2P.py`, обслуживал себя только реактивно: поведение
+#: зависело от способа запуска.
+MAINTENANCE_INTERVAL = 15.0
+
 # Блок анонсируется ХЕШЕМ (inv), тело запрашивается отдельно (get_block).
 # Раньше полный блок улетал каждому пиру, даже тому, у кого он уже есть:
 # трафик равнялся размеру блока, умноженному на число соседей, а заполненный
@@ -218,7 +227,8 @@ class P2PNode:
                  seen_limit=SEEN_LIMIT, max_peers=MAX_PEERS,
                  peers_file=None, seeds=None, encrypt=True,
                  require_encryption=False, identity=None, identity_file=None,
-                 api_port=None, api_tls=False, transport=None):
+                 api_port=None, api_tls=False, transport=None,
+                 maintenance_interval=None):
         self.host = host
         self.port = port
         # Чем дотягиваемся до соседей. По умолчанию TCP/IP — как было всегда.
@@ -226,6 +236,12 @@ class P2PNode:
         # подменой этого объекта сеть переносится на любой байтовый поток:
         # Bluetooth RFCOMM, Unix-сокет, что угодно.
         self.transport = transport or TCPTransport()
+        # Периодическое обслуживание: None/0 — выключено. Включают точки входа
+        # (`P2P.py`, `api.py --p2p`); в тестах десятки узлов, и фоновые сетевые
+        # вызовы сделали бы их плавающими, поэтому по умолчанию тихо.
+        self.maintenance_interval = float(maintenance_interval or 0)
+        self._maintenance_stop = threading.Event()
+        self._maintenance_thread = None
         # Адрес REST-API этого узла. Он объявляется соседям рядом с P2P-адресом
         # и нужен КОШЕЛЬКАМ: телефон и браузер не умеют говорить нашим TCP-
         # протоколом (сырых сокетов там нет вовсе), им нужна HTTP-точка входа.
@@ -733,10 +749,49 @@ class P2PNode:
         self._stopping = False
         thread = threading.Thread(target=self._serve, daemon=True)
         thread.start()
+        self.start_maintenance()
         return thread
+
+    def start_maintenance(self, interval=None) -> bool:
+        """Запускает фоновое обслуживание: поиск соседей + догон цепочки.
+
+        ⚠️ Без него узел живёт РЕАКТИВНО — узнаёт только о том, что произошло
+        при нём. Постоявший выключенным или потерявший связь так и остался бы
+        на своей высоте: старые блоки ему никто не перешлёт по своей воле.
+
+        Возвращает False, если интервал не задан (обслуживание выключено) или
+        поток уже работает.
+        """
+        if interval is not None:
+            self.maintenance_interval = float(interval or 0)
+        if self.maintenance_interval <= 0:
+            return False
+        if self._maintenance_thread is not None and self._maintenance_thread.is_alive():
+            return False
+        self._maintenance_stop.clear()
+        self._maintenance_thread = threading.Thread(target=self._maintain,
+                                                    daemon=True)
+        self._maintenance_thread.start()
+        return True
+
+    def _maintain(self):
+        """Цикл обслуживания. Спит на Event, поэтому stop() будит его сразу."""
+        while not self._maintenance_stop.wait(self.maintenance_interval):
+            if self._stopping:
+                return
+            try:
+                self.discover_peers()
+                self.sync()
+            except Exception:
+                # Сеть отвалилась — это штатное состояние, а не повод падать:
+                # цикл обязан пережить любую беду и попробовать снова.
+                pass
 
     def stop(self):
         self._stopping = True
+        # Будим обслуживание сразу, а не ждём конца интервала: иначе
+        # «остановленный» узел ещё до 15 секунд ходил бы по сети.
+        self._maintenance_stop.set()
         # Сохраняем соседей до закрытия сокета: после перезапуска узел должен
         # знать, к кому идти, а не начинать с пустой таблицы.
         self.save_peers()
@@ -1793,6 +1848,10 @@ def main():
         print(f"Осмотр Bluetooth: узлов B-hydra рядом — {found}")
     # Соседи с прошлого запуска + seed-узлы: узел находит сеть сам, без --peer.
     alive = node.bootstrap()
+    # Узел обслуживает себя сам — независимо от того, запущен он отсюда или
+    # из `api.py --p2p`. Иначе постоявший выключенным так и остался бы на
+    # своей высоте: анонсы приносят только то, что произошло при нас.
+    node.start_maintenance(MAINTENANCE_INTERVAL)
     if args.peer:
         parsed = split_host_port(args.peer)
         if parsed is None:

@@ -763,7 +763,8 @@ def main():
 
     p2p = None
     if args.p2p:
-        from .p2p import P2PNode, local_ip, parse_seeds
+        from .p2p import (MAINTENANCE_INTERVAL, P2PNode, local_ip,
+                          parse_seeds)
         from .node import BHydraNode
 
         chain_node, notice = BHydraNode.open_state(args.file)
@@ -799,22 +800,11 @@ def main():
             print("  ⚠ соседей нет. В локальной сети они найдутся сами по "
                   "UDP-маяку; через интернет нужен --seed host:5000")
 
-        def _maintain(interval=15):
-            """Периодически: новые соседи + догнать цепочку.
-
-            Анонсы приносят только то, что произошло ПРИ НАС. Узел, который
-            стоял выключенным, без этого так и остался бы на своей высоте:
-            никто не станет пересылать ему старые блоки по собственной воле.
-            """
-            while True:
-                time.sleep(interval)
-                try:
-                    p2p.discover_peers()
-                    p2p.sync()
-                except Exception:      # сеть отвалилась — не роняем сервер
-                    pass
-
-        threading.Thread(target=_maintain, daemon=True).start()
+        # Периодическое обслуживание (новые соседи + догон цепочки) живёт
+        # В САМОМ УЗЛЕ: раньше цикл был здесь, и узел, запущенный через
+        # `P2P.py`, обслуживал себя только реактивно — поведение зависело от
+        # способа запуска.
+        p2p.start_maintenance(MAINTENANCE_INTERVAL)
     if not certfile:
         # Молча оставлять открытый канал нельзя: пользователь должен знать, что
         # приватный ключ по нему не примут (и почему).
