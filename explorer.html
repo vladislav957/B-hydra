@@ -142,7 +142,11 @@
   .blk .mid{min-width:0;}
   .blk .miner{font-family:var(--mono); font-size:12.5px; color:var(--text);
     white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
-  .blk .sub{font-size:11.5px; color:var(--muted); font-family:var(--mono);}
+  .blk .sub{font-size:11.5px; color:var(--muted); font-family:var(--mono);
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
+  /* Возраст блока: заметнее хеша, но тише адреса майнера. На узком экране
+     обрезается вместе с хешем — строка не должна ломать сетку. */
+  .blk .when{color:var(--teal); opacity:.75;}
   .pill{font-family:var(--mono); font-size:11px; padding:3px 9px; border-radius:99px;
     background:rgba(139,108,255,.16); color:var(--magenta); border:1px solid rgba(139,108,255,.3);
     white-space:nowrap;}
@@ -241,6 +245,23 @@ const $ = id => document.getElementById(id);
 const esc = s => String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const short = (s,n=20)=>{s=String(s);return s.length>2*n?s.slice(0,n)+'…'+s.slice(-n):s;};
 const fmtDate = ts => new Date(ts*1000).toLocaleString();
+// Возраст блока коротко: в списке важно «когда», а не точная секунда — полная
+// дата остаётся во всплывающей подсказке и в карточке блока.
+// ⚠️ Метка блока может оказаться В БУДУЩЕМ: сеть допускает расхождение часов
+// до MAX_FUTURE_DRIFT (2 часа), и наивная разность дала бы «-5 мин назад».
+function fmtAgo(ts){
+  const sec = Date.now()/1000 - Number(ts);
+  if(!isFinite(sec)) return '';
+  if(sec < 0) return 'только что';          // часы соседа спешат — не пугаем
+  if(sec < 60) return 'только что';
+  const min = Math.floor(sec/60);
+  if(min < 60) return min+' мин назад';
+  const hour = Math.floor(min/60);
+  if(hour < 24) return hour+' ч назад';
+  const day = Math.floor(hour/24);
+  if(day < 30) return day+' дн назад';
+  return new Date(ts*1000).toLocaleDateString();
+}
 const fmtNum = n => Number(n).toLocaleString('ru-RU');
 const MEMPOOL_CAP = 50000;
 
@@ -467,10 +488,19 @@ async function loadBlocks(){
     const m=minerOf(b);
     const miner=m?`<span class="miner">${esc(short(m,12))}</span>`
                  :`<span class="miner sub">генезис</span>`;
+    // Дата создания блока — прямо в списке: без неё «когда это было» видно
+    // только открыв блок. Точное время уходит в подсказку при наведении.
+    // ⚠️ У ГЕНЕЗИСА МЕТКА НУЛЕВАЯ, и это намеренно: она входит в хеш, а хеш
+    // генезиса обязан совпадать у всех узлов сети — «взять текущее время»
+    // означало бы у каждого свою цепочку. Поэтому не «1 января 1970» и не
+    // «20 000 дн назад», а прочерк с объяснением.
+    const when = Number(b.timestamp) > 0
+      ? ` · <span class="when" title="${esc(fmtDate(b.timestamp))}">${esc(fmtAgo(b.timestamp))}</span>`
+      : ` · <span class="when sub" title="у генезиса нет времени создания: метка нулевая, иначе хеш генезиса был бы у каждого узла свой">—</span>`;
     return `<div class="blk" data-action="block" data-id="${esc(b.index)}">
       <span class="h">#${esc(b.index)}</span>
       <span class="mid">${miner}
-        <div class="sub">${esc(short(b.hash,10))}</div></span>
+        <div class="sub">${esc(short(b.hash,10))}${when}</div></span>
       <span class="pill tx">${esc(n)} tx</span></div>`;
   }).join('');
 }
