@@ -186,9 +186,9 @@ P2P-сеть — несколько узлов синхронизируются 
 Улучшение производительности за счет многоточности.
 Интеграция с другими платёжными жизнью.
  ---
-[B-hydra.docx](https://github.com/user-attachments/files/19970749/B-hydra.docx)
 
-[B-hydra.pdf](https://github.com/user-attachments/files/20148652/B-hydra.pdf)
+[B-Hydra-whitepaper-v2.pdf](https://github.com/user-attachments/files/31319394/B-Hydra-whitepaper-v2.pdf)
+
 
  ---
 Контакты:
@@ -272,9 +272,8 @@ halving interval 310,000 blocks, maximum supply 31,000,000 BHY.
 
 Future plans: Adding a command line interface for the management system. Implementation of the automatic complexity adjustment function. Improving performance through multi-precision. Integration with other payment services.
  ---
-[B-hydra.docx](https://github.com/user-attachments/files/19970757/B-hydra.docx)
 
-[B-hydra.pdf](https://github.com/user-attachments/files/20148653/B-hydra.pdf)
+[B-Hydra-whitepaper-v2.pdf](https://github.com/user-attachments/files/31319416/B-Hydra-whitepaper-v2.pdf)
 
  ---
 Contacts: If you have any questions or suggestions, please contact me via GitHub Issues or write to: Kovtunvladislav96@gmail.com killnetvladislav@outlook.com
