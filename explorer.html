@@ -81,8 +81,12 @@
   /* ── Основной макет ── */
   .wrap{max-width:1080px; margin:0 auto; padding:22px 20px 64px;}
   .bar{display:grid; grid-template-columns:1fr; gap:14px; margin:6px 0 24px;}
-  @media(min-width:760px){.bar{grid-template-columns:1.3fr 1fr;}}
+  @media(min-width:760px){.bar{grid-template-columns:1.3fr 1fr auto;}}
   .field{display:flex; gap:9px;}
+  /* Шторка адресов: когда включена, кнопка должна быть ЗАМЕТНА — иначе легко
+     забыть, что список на экране показан не полностью. */
+  button.eye.on{border-color:var(--venom); color:var(--venom);
+    background:rgba(46,230,192,.10);}
   input{flex:1; min-width:0; padding:12px 14px; border-radius:12px;
     border:1px solid var(--line2); background:rgba(8,14,26,.7); color:var(--text);
     font-size:14px; font-family:var(--sans); transition:border-color .2s, box-shadow .2s;}
@@ -205,6 +209,7 @@
       <input id="miner" placeholder="Адрес майнера (BHY…)" autocomplete="off">
       <button class="ghost" onclick="mine()">⛏ Майнить</button>
     </div>
+    <button class="ghost eye" id="hideAddr" onclick="toggleHideAddr()">👁 Адреса видны</button>
   </div>
   <div id="mineMsg"></div>
 
@@ -244,6 +249,40 @@
 const $ = id => document.getElementById(id);
 const esc = s => String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const short = (s,n=20)=>{s=String(s);return s.length>2*n?s.slice(0,n)+'…'+s.slice(-n):s;};
+
+// ── Скрытие адресов ──────────────────────────────────────────────────────────
+// ⚠️ ЭТО НЕ ПРИВАТНОСТЬ, А ШТОРКА. Цепочка публична по устройству: все адреса и
+// суммы лежат в ответе /api/chain, и любой может забрать их curl'ом в обход
+// этой страницы. Переключатель нужен ровно для одного — показать обозреватель
+// на проекторе, в записи экрана или на скриншоте, не засветив чужие адреса.
+// Настоящая приватность требует другой криптографии в САМОЙ цепочке
+// (скрытые адреса, смешивание, конфиденциальные суммы) — это смена консенсуса.
+let HIDE_ADDR = false;
+try { HIDE_ADDR = localStorage.getItem('bhydra.hideAddr') === '1'; } catch(e){}
+
+// Адрес для показа: либо укороченный, либо шторка. Префикс BHY оставляем —
+// по нему видно, что это адрес, а не пропавшие данные.
+const maskAddr = (a,n=10)=> HIDE_ADDR ? 'BHY' + '•'.repeat(8) : short(a,n);
+// То же для подсказок и всплывающих title.
+const maskFull = a => HIDE_ADDR ? 'адрес скрыт' : String(a);
+
+function toggleHideAddr(){
+  HIDE_ADDR = !HIDE_ADDR;
+  try { localStorage.setItem('bhydra.hideAddr', HIDE_ADDR ? '1' : '0'); } catch(e){}
+  syncHideAddrButton();
+  refresh();                      // перерисовать уже показанные списки
+  $('detail').innerHTML = '';     // и открытую карточку: в ней тоже адреса
+}
+
+function syncHideAddrButton(){
+  const button = $('hideAddr');
+  if(!button) return;
+  button.textContent = HIDE_ADDR ? '🙈 Адреса скрыты' : '👁 Адреса видны';
+  button.classList.toggle('on', HIDE_ADDR);
+  button.title = HIDE_ADDR
+    ? 'Адреса скрыты на экране. Это ШТОРКА для показа и скриншотов, а не приватность: в цепочке они по-прежнему открыты и доступны через /api/chain.'
+    : 'Скрыть адреса на экране — для показа на проекторе или скриншота. Из цепочки они при этом никуда не денутся.';
+}
 const fmtDate = ts => new Date(ts*1000).toLocaleString();
 // Возраст блока коротко: в списке важно «когда», а не точная секунда — полная
 // дата остаётся во всплывающей подсказке и в карточке блока.
@@ -486,7 +525,7 @@ async function loadBlocks(){
   $('blocks').innerHTML = blocks.slice(0,12).map(b=>{
     const n=Array.isArray(b.data)?b.data.length:1;
     const m=minerOf(b);
-    const miner=m?`<span class="miner">${esc(short(m,12))}</span>`
+    const miner=m?`<span class="miner">${esc(maskAddr(m,12))}</span>`
                  :`<span class="miner sub">генезис</span>`;
     // Дата создания блока — прямо в списке: без неё «когда это было» видно
     // только открыв блок. Точное время уходит в подсказку при наведении.
@@ -521,10 +560,13 @@ async function loadAddresses(){
   const sup=+d.total_supply||0;
   $('rich').innerHTML=(d.addresses||[]).map((a,i)=>{
     const pct=sup?(a.balance/sup*100):0;
+    // ⚠️ Подсказку тоже прячем: она всплывает НА ЭКРАНЕ при наведении, то есть
+    // попадает и в запись экрана, и в скриншот — маскировать одну строку, оставив
+    // адрес в title, значило бы не скрыть ничего.
     return `<div class="lg" data-action="address" data-id="${esc(a.address)}"
-      style="cursor:pointer" title="${esc(a.address)}">
+      style="cursor:pointer" title="${esc(maskFull(a.address))}">
       <span class="swatch" style="color:var(--teal);background:var(--teal)"></span>
-      <span>#${i+1} <span class="sub">${esc(short(a.address,9))}</span></span>
+      <span>#${i+1} <span class="sub">${esc(maskAddr(a.address,9))}</span></span>
       <b style="color:var(--venom)">${esc((+a.balance).toFixed(2))}
         <small class="sub">${pct.toFixed(1)}%</small></b>
     </div>`;
@@ -571,7 +613,7 @@ function txCard(tx,blockIndex){
        <span class="mono">${esc(short(i.txid,10))}:${esc(i.index)}</span></div>`).join('');
   const vout=(tx.vout||[]).map((o,idx)=>`<div class="row">
     <span class="k out">→ #${esc(idx)}</span>
-    <span>${link(short(o.address,10),'address',o.address)} &nbsp;<b>${esc(o.amount)}</b> BHY</span></div>`).join('');
+    <span>${link(maskAddr(o.address,10),'address',o.address)} &nbsp;<b>${esc(o.amount)}</b> BHY</span></div>`).join('');
   return `<div class="card"><h4><span class="tag-hue">Транзакция</span></h4>
     <div class="row"><span class="k">txid</span><span class="mono">${esc(short(tx.txid,16))}</span></div>
     ${blockIndex!=null?`<div class="row"><span class="k">блок</span><span>${link('#'+blockIndex,'block',blockIndex)}</span></div>`:''}
@@ -585,7 +627,7 @@ async function showBlock(index){
   const txs=(Array.isArray(b.data)?b.data:[]).map(tx=>txCard(tx,null)).join('');
   const m=minerOf(b);
   $('detail').innerHTML=`<div class="card"><h4>Блок <span class="tag-hue">#${esc(b.index)}</span></h4>
-    ${m?`<div class="row"><span class="k">майнер</span><span>${link(short(m,14),'address',m)}</span></div>`:''}
+    ${m?`<div class="row"><span class="k">майнер</span><span>${link(maskAddr(m,14),'address',m)}</span></div>`:''}
     <div class="row"><span class="k">hash</span><span class="mono">${esc(short(b.hash,16))}</span></div>
     <div class="row"><span class="k">пред. блок</span><span class="mono">${esc(short(b.previous_hash,16))}</span></div>
     <div class="row"><span class="k">merkle root</span><span class="mono">${esc(short(b.merkle_root,16))}</span></div>
@@ -609,7 +651,7 @@ async function showAddress(addr){
     <span>${h.received?`<span class="out">+${esc(h.received)}</span> `:''}${h.sent?`<span class="in">-${esc(h.sent)}</span>`:''}</span>
   </div>`).join('')||'<div class="sub">нет транзакций</div>';
   $('detail').innerHTML=`<div class="card"><h4><span class="tag-hue">Адрес</span></h4>
-    <div class="row"><span class="k">адрес</span><span class="mono">${esc(addr)}</span></div>
+    <div class="row"><span class="k">адрес</span><span class="mono">${esc(maskFull(addr))}</span></div>
     <div class="row"><span class="k">баланс</span><span><b style="color:var(--venom)">${esc(r.balance)}</b> BHY</span></div>
     <div class="grp"><span class="sub">История</span>${hist}</div></div>`;
   scrollTo({top:0,behavior:'smooth'});
@@ -669,6 +711,7 @@ async function refresh(){
 }
 function boot(){
   demoInit();
+  syncHideAddrButton();   // выбор пережил перезагрузку — кнопка обязана его показать
   resize();
   if(reduce){ rebuildNet(demoMiners); staticFrame(); }
   else requestAnimationFrame(frame);
