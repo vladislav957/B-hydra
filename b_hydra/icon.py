@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import os
 import struct
+import tempfile
 import zlib
 
 BACKGROUND = (10, 18, 34)          # --abyss2 из wallet.html
@@ -85,17 +86,53 @@ def png_bytes(size: int = 192) -> bytes:
 
 
 def ensure_files(folder: str, sizes=(192, 512)) -> list:
-    """Создаёт недостающие иконки в каталоге. Возвращает пути созданных."""
+    """Создаёт недостающие иконки в каталоге. Возвращает пути созданных.
+
+    ⚠️ Запись АТОМАРНАЯ (временный файл + `os.replace`), как у состояния цепочки
+    и таблицы пиров. Прежний код открывал целевой файл на "wb" — то есть создавал
+    его ПУСТЫМ, а рисовал только потом. Между этими двумя моментами файл уже
+    существует, и `os.path.exists` у соседа проходит: 512×512 считается заметно
+    дольше 192×192, окно широкое.
+
+    Это не теория: иконки отдаёт REST-сервер, а он многопоточный, и запросы
+    /icon-192.png и /icon-512.png прилетают от браузера ОДНОВРЕМЕННО — оба
+    зовут `ensure_files`. Пойманное следствие: второй поток отдал браузеру
+    иконку нулевой длины, и она осталась лежать на диске навсегда — сам файл
+    уже «есть», значит его никто больше не нарисует. На телефоне это пустой
+    квадрат вместо значка приложения.
+
+    Пустой файл на диске поэтому считается ОТСУТСТВУЮЩИМ и перерисовывается:
+    один раз испортившись, иконка иначе не выздоровеет.
+
+    ⚠️ Имя временного файла берётся у `tempfile`, а не собирается из pid: гонка
+    здесь ВНУТРИПРОЦЕССНАЯ (потоки одного HTTP-сервера), и pid у них общий —
+    два потока писали бы в один и тот же временный файл, перетирая друг друга,
+    и `os.replace` мог бы подставить недописанную смесь. Уникальное имя — то,
+    ради чего вся эта запись и затевается.
+    """
     made = []
     for size in sizes:
         path = os.path.join(folder, f"icon-{size}.png")
-        if os.path.exists(path):
-            continue
         try:
-            with open(path, "wb") as handle:
-                handle.write(png_bytes(size))
+            if os.path.getsize(path) > 0:
+                continue
+        except OSError:
+            pass              # файла нет (или он пуст) — рисуем
+        try:
+            handle, temporary = tempfile.mkstemp(prefix=f"icon-{size}.",
+                                                 suffix=".tmp", dir=folder)
         except OSError:
             continue          # каталог только для чтения — не повод падать
+        try:
+            with os.fdopen(handle, "wb") as stream:
+                stream.write(png_bytes(size))
+            os.replace(temporary, path)
+        except OSError:
+            try:
+                os.remove(temporary)
+            except OSError:
+                pass
+            continue
         made.append(path)
     return made
 
