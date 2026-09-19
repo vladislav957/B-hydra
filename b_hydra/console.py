@@ -56,18 +56,44 @@ def _fmt_amount(value) -> str:
     return f"{float(value):.4f}"
 
 
+#: Длиннее этого значение уезжает на свою строку с отступом.
+#: ⚠️ Нужно из-за хешей: они по 128 символов, и втиснутые в колонку они
+#: переносились по ширине окна, разваливая всю таблицу. Замечено на живом
+#: снимке окна, а не в рассуждениях.
+_WIDE_VALUE = 48
+
+
 def _table(rows, headers):
-    """Простая таблица с выравниванием — консоль читают глазами."""
+    """Простая таблица с выравниванием — консоль читают глазами.
+
+    ⚠️ Выравнивание держится на МОНОШИРИННОМ шрифте окна: на пропорциональном
+    пробелы разной ширины превращают колонки в кашу.
+    """
     if not rows:
         return "(пусто)"
+    cells = [[str(c) for c in row] for row in rows]
     widths = [len(str(h)) for h in headers]
-    for row in rows:
+    for row in cells:
         for i, cell in enumerate(row):
-            widths[i] = max(widths[i], len(str(cell)))
-    line = "  ".join(str(h).ljust(widths[i]) for i, h in enumerate(headers))
-    out = [line, "  ".join("─" * w for w in widths)]
-    for row in rows:
-        out.append("  ".join(str(c).ljust(widths[i]) for i, c in enumerate(row)))
+            if len(row) == 2 and i == 1 and len(cell) > _WIDE_VALUE:
+                continue                 # длинные значения в ширину не входят
+            widths[i] = max(widths[i], len(cell))
+
+    out = ["  ".join(str(h).ljust(widths[i]) for i, h in enumerate(headers)),
+           "  ".join("─" * w for w in widths)]
+    for row in cells:
+        if len(row) == 2 and len(row[1]) > _WIDE_VALUE:
+            # Полное значение сохраняем целиком: из `getblock` хеш копируют,
+            # чтобы тут же скормить его `gettx`. Обрезать было бы удобно
+            # глазу и бесполезно на деле.
+            # ⚠️ Отступ РОВНО два пробела, а не по ширине колонки: хеш в 128
+            # символов и так занимает почти всю строку, и отступ под колонку
+            # выталкивал его за край — окно переносило строку, и «аккуратный»
+            # вывод выглядел хуже исходного.
+            out.append(row[0])
+            out.append("  " + row[1])
+        else:
+            out.append("  ".join(c.ljust(widths[i]) for i, c in enumerate(row)))
     return "\n".join(out)
 
 

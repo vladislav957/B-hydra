@@ -22,6 +22,7 @@ import sys
 import threading
 import time
 import tkinter as tk
+import tkinter.font as tkfont
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
 
@@ -2023,7 +2024,17 @@ class BHydraApp(tk.Tk):
         # было принять за ответ. Предупреждение о мошенничестве держим
         # заметным в обеих темах, оно там не для красоты.
         if hasattr(self, "console_out"):
-            self.console_out.configure(font=("TkFixedFont", 10))
+            # ⚠️ МОНОШИРИННЫЙ ШРИФТ ЗДЕСЬ ОБЯЗАТЕЛЕН: весь вывод консоли —
+            # таблицы, выровненные пробелами, и на пропорциональном шрифте
+            # колонки разъезжаются в кашу.
+            # ⚠️ И задавать его НАДО ИМЕНОВАННЫМ шрифтом. `("TkFixedFont", 10)`
+            # Tk понимает как СЕМЕЙСТВО с таким именем — а его не существует
+            # (`"TkFixedFont" in font.families()` → False), и Tk молча
+            # откатывается на пропорциональный. Ошибки нет, таблицы просто
+            # разъезжаются; поймано на живом снимке окна.
+            mono = tkfont.nametofont("TkFixedFont").copy()
+            mono.configure(size=10)
+            self.console_out.configure(font=mono)
             self.console_out.tag_configure("cmd", foreground=accent_hi)
             self.console_out.tag_configure("err", foreground=magenta)
             self._console_warning.configure(
