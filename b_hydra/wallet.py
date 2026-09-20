@@ -241,6 +241,11 @@ def _verify_core_pure(x, y, z, r, s) -> bool:
 _VERIFY_CORE = _verify_core_pure
 _BACKEND = "pure-python"
 
+#: Ядро ПОДПИСИ: (private, z) → (r, s) или None. None здесь означает «своего
+#: нет, считай на Python» — подпись важнее проверки, и молчаливо подставлять
+#: вместо неё что попало нельзя.
+_SIGN_CORE = None
+
 
 class Wallet:
     """Кошелёк B-hydra: пара ключей ECDSA (secp256k1) + адрес."""
@@ -291,8 +296,14 @@ class Wallet:
         if isinstance(payload, str):
             payload = payload.encode("utf-8")
         z = _hash_to_int(payload)
-        r, s = _CURVE.sign(self._priv, z, _rfc6979_nonces(self._priv, z),
-                           low_s=True)
+        pair = _SIGN_CORE(self._priv, z) if _SIGN_CORE is not None else None
+        if pair is None:
+            # ⚠️ Нативное ядро отказало (или его нет) — считаем на Python, а НЕ
+            # роняем подпись. Байты получатся те же: нонс детерминированный, и
+            # совпадение сверено на живых подписях при включении бэкенда.
+            pair = _CURVE.sign(self._priv, z, _rfc6979_nonces(self._priv, z),
+                               low_s=True)
+        r, s = pair
         return r.to_bytes(32, "big").hex() + s.to_bytes(32, "big").hex()
 
     @staticmethod
@@ -393,10 +404,57 @@ def _try_native_ec() -> bool:
 
     if not _selftest_backend(_verify_core_native):
         return False
-    global _VERIFY_CORE, _BACKEND
+    global _VERIFY_CORE, _BACKEND, _SIGN_CORE
     _VERIFY_CORE = _verify_core_native
     _BACKEND = "bhydra_ec (свой C++)"
+
+    # Подпись — отдельно от проверки и только если сборка её умеет: `sign`
+    # появился позже, и у старой библиотеки его нет. Проверка при этом уже
+    # ускорена — терять её из-за отсутствия подписи было бы глупо.
+    if native_ec.has_sign(library):
+        def _sign_core_native(private, z):
+            return native_ec.sign_core(library, private, z)
+
+        if _selftest_sign(_sign_core_native):
+            _SIGN_CORE = _sign_core_native
+            _BACKEND += " + подпись"
     return True
+
+
+def _selftest_sign(core) -> bool:
+    """Ядро подписи обязано давать БАЙТ В БАЙТ то же, что чистый Python.
+
+    ⚠️ Здесь проверка строже, чем у `verify`, и это не педантизм. У проверки
+    достаточно совпадения ОТВЕТА («да/нет»), а подпись в B-hydra намеренно
+    ВОСПРОИЗВОДИМА: нонс детерминированный (RFC 6979), и от байтов подписи
+    зависит `txid`. Разойдись две реализации хоть на бит — один и тот же
+    перевод получил бы разные идентификаторы у узла со сборкой и без неё, то
+    есть мемпул считал бы их разными транзакциями, а подписанные заранее
+    транзакции перестали бы сходиться.
+
+    ⚠️ Проверяется и то, что подпись ВЕРНА (а не только совпадает): ядро,
+    возвращающее ту же ошибку, что и эталон, прошло бы сверку на равенство.
+    """
+    for index in range(8):
+        w = Wallet()
+        message = f"b-hydra ecdsa sign self-test {index}".encode("utf-8")
+        z = _hash_to_int(message)
+        native = core(w._priv, z)
+        if native is None:
+            return False
+        reference = _CURVE.sign(w._priv, z, _rfc6979_nonces(w._priv, z),
+                                low_s=True)
+        if reference is None or tuple(native) != tuple(reference):
+            return False
+        if not _verify_core_pure(*_point_of(w), z, native[0], native[1]):
+            return False
+    return True
+
+
+def _point_of(w):
+    """Координаты публичного ключа кошелька — для самопроверки."""
+    raw = w.public_key_bytes
+    return int.from_bytes(raw[1:33], "big"), int.from_bytes(raw[33:65], "big")
 
 
 def _selftest_backend(core) -> bool:

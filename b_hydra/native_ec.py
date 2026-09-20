@@ -59,10 +59,24 @@ def load(path=None):
             library.bhydra_ec_verify.restype = ctypes.c_int
             library.bhydra_ec_selftest.argtypes = []
             library.bhydra_ec_selftest.restype = ctypes.c_int
+            # ⚠️ `sign` появился позже `verify`: у СТАРОЙ собранной библиотеки
+            # его нет, и требовать его здесь значило бы отвергнуть её целиком,
+            # потеряв уже работающее ускорение проверки. Поэтому подпись
+            # необязательна — её наличие проверяет `has_sign()`.
+            if hasattr(library, "bhydra_ec_sign"):
+                library.bhydra_ec_sign.argtypes = [ctypes.c_char_p,
+                                                   ctypes.c_char_p,
+                                                   ctypes.c_char_p]
+                library.bhydra_ec_sign.restype = ctypes.c_int
         except AttributeError:
             continue          # библиотека есть, но это не наша
         return library
     return None
+
+
+def has_sign(library) -> bool:
+    """Умеет ли эта сборка подписывать (а не только проверять)."""
+    return library is not None and hasattr(library, "bhydra_ec_sign")
 
 
 def verify_core(library, x: int, y: int, z: int, r: int, s: int) -> bool:
@@ -75,6 +89,29 @@ def verify_core(library, x: int, y: int, z: int, r: int, s: int) -> bool:
         # Число не влезло в 32 байта — такой подписи быть не может, и это
         # ровно тот же ответ, что дал бы чистый Python.
         return False
+
+
+def sign_core(library, private: int, z: int):
+    """Подпись ECDSA нативно → (r, s) или None.
+
+    ⚠️ Хеш сюда приходит ПОСЧИТАННЫМ (как и в `verify_core`): в Python он уже
+    есть, и считать SHA-512 второй раз в C++ было бы чистой потерей.
+
+    ⚠️ Нонс выводится по RFC 6979 из (private, z) — той же цепочкой HMAC-SHA512,
+    что и в чистом Python, поэтому подпись совпадает БАЙТ В БАЙТ. Иначе один и
+    тот же перевод получал бы разные txid у узлов с библиотекой и без неё.
+    Совпадение проверяется на живых подписях перед включением бэкенда.
+    """
+    out = ctypes.create_string_buffer(64)
+    try:
+        ok = library.bhydra_ec_sign(private.to_bytes(32, "big"),
+                                    z.to_bytes(32, "big"), out)
+    except (OverflowError, ValueError):
+        return None               # число не влезло в 32 байта — не наш случай
+    if ok != 1:
+        return None
+    raw = out.raw
+    return int.from_bytes(raw[:32], "big"), int.from_bytes(raw[32:], "big")
 
 
 def default():

@@ -475,9 +475,15 @@ private:
     bool has_pending_ = false;
 };
 
-// Подпись r||s (64 байта, low-s) — как Wallet.sign.
-inline Bytes sign(const U256 &priv, const Bytes &payload) {
-    U256 z = hash_to_int(payload);
+// Подпись r||s (64 байта, low-s) ОТ ГОТОВОГО ХЕША z — как `Curve.sign` в
+// Python, куда z тоже приходит посчитанным.
+//
+// ⚠️ Вынесено из `sign()` отдельной функцией, а НЕ скопировано: это код
+// консенсуса, и две его копии однажды разъедутся. Ровно из-за этого в проекте
+// уже сводили две реализации кривой в один `ec.py` — ошибка в одной копии не
+// всплыла бы в тестах другой. `sign()` ниже стал вызовом этой функции и ведёт
+// себя как прежде, поэтому рукопожатие транспорта не тронуто.
+inline Bytes sign_hash(const U256 &priv, const U256 &z) {
     Rfc6979 nonces(priv, z);
     for (int attempt = 0; attempt < 64; ++attempt) {
         U256 k = nonces.next();
@@ -516,6 +522,12 @@ inline Bytes sign(const U256 &priv, const Bytes &payload) {
         return out;
     }
     throw std::runtime_error("не удалось подписать");
+}
+
+// Подпись байтов: хеш плюс та же самая `sign_hash`. Используется рукопожатием
+// транспорта и самопроверкой библиотеки.
+inline Bytes sign(const U256 &priv, const Bytes &payload) {
+    return sign_hash(priv, hash_to_int(payload));
 }
 
 inline bool verify(const Bytes &public_key, const Bytes &payload,
