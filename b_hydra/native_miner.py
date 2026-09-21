@@ -27,6 +27,8 @@ import subprocess
 #: Путь к бинарнику можно задать явно; `off`/`0` полностью выключает нативный
 #: путь (удобно для тестов и для сравнения скорости).
 MINER_ENV = "BHYDRA_MINER"
+#: Сколько ядер отдать под перебор. Пусто — все, кроме одного.
+THREADS_ENV = "BHYDRA_MINER_THREADS"
 BINARY_NAME = "bhydra_miner"
 #: Сколько секунд длится один срез перебора. Меньше — быстрее реакция на чужой
 #: блок, больше — меньше накладных расходов на запуск процесса.
@@ -94,6 +96,27 @@ def find(path=None):
     return local if os.path.exists(local) else None
 
 
+def default_threads() -> int:
+    """Сколько ядер отдать перебору: все, кроме одного.
+
+    ⚠️ Именно КРОМЕ ОДНОГО, а не все. Перебор грузит ядро на 100% без пауз, и
+    на старом двухъядерном ноутбуке «все ядра» означают неотзывчивый интерфейс
+    и горячий корпус — машина занята майнингом, а не человеком. Одно ядро
+    оставлено системе и окну.
+
+    ⚠️ Ноль здесь НЕЛЬЗЯ: нативный майнер понимает 0 как «сам реши», и тогда он
+    берёт `hardware_concurrency()`, то есть все ядра — ровно то, чего мы
+    избегаем. Поэтому число всегда явное и не меньше единицы.
+    """
+    override = os.environ.get(THREADS_ENV)
+    if override:
+        try:
+            return max(1, int(override))
+        except ValueError:
+            pass                       # мусор в переменной — ведём себя как без неё
+    return max(1, (os.cpu_count() or 2) - 1)
+
+
 def default():
     """Готовый майнер для этой машины или None. Результат запоминается.
 
@@ -108,7 +131,7 @@ def default():
     if path is None:
         _default = None
         return None
-    miner = NativeMiner(path)
+    miner = NativeMiner(path, threads=default_threads())
     _default = miner if miner.selftest() else None
     return _default
 

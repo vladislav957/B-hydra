@@ -1591,24 +1591,61 @@ class BHydraApp(tk.Tk):
                   f"~{TARGET_BLOCK_TIME / 60:.1f} мин.")
         self._mining_tick()
 
+    def _real_pow(self) -> bool:
+        """Работает ли на этой высоте настоящий перебор (а не таймер).
+
+        ⚠️ Проверяется ВЫСОТА СЛЕДУЮЩЕГО блока, а не текущая вершина: правило
+        развилки говорит про блок, который мы собираемся добыть.
+        """
+        chain = self.node.blockchain
+        fork = getattr(chain, "pow_fork_height", None)
+        return fork is not None and len(chain.chain) >= fork
+
+    def _expected_hashes(self) -> int:
+        """Сколько хешей в среднем нужно на блок при нынешней цели.
+
+        ⚠️ «В среднем» здесь не фигура речи: поиск блока — процесс без памяти,
+        и перебрав вдвое больше ожидаемого, вы не становитесь «ближе». Поэтому
+        доля в строке состояния — это именно доля от ожидания, а не от
+        гарантированного конца, и она спокойно переваливает за 100%.
+        """
+        chain = self.node.blockchain
+        target = chain.expected_target(len(chain.chain))
+        return (1 << 512) // max(1, target)
+
     def _next_block_due(self) -> float:
         """Когда пора добывать следующий блок: вершина + целевой темп сети."""
         return self.node.blockchain.last_block.timestamp + TARGET_BLOCK_TIME
 
     def _mining_tick(self) -> None:
-        """Раз в секунду: обновляет обратный отсчёт; в срок — добывает блок."""
+        """Раз в секунду: до развилки — обратный отсчёт, после — сразу перебор.
+
+        ⚠️ ТАЙМЕР ОСТАЁТСЯ НИЖЕ РАЗВИЛКИ, и это не забывчивость. До неё цель —
+        это сложность 3, то есть 4 096 хешей, доли миллисекунды на блок. Сними
+        таймер там — и оставшиеся до развилки блоки добудутся мгновенно, по
+        50 BHY каждый, без всякого труда. Темп ниже развилки по-прежнему
+        задаёт расписание, настоящий перебор начинается ровно с неё.
+        """
         if not self._mining_on:
             return
         if not self._mining:
-            wait = self._next_block_due() - time.time()
-            if wait <= 0:
+            if self._real_pow():
+                # Настоящий PoW: ждать нечего, блок ищется столько, сколько
+                # ищется. Отсчёт заменяется бесконечным индикатором.
                 self._begin_mining()
             else:
-                self.mine_status.set(
-                    f"Следующий блок через {int(wait // 60)}:"
-                    f"{int(wait % 60):02d} (темп сети)")
-                self.progress.config(maximum=TARGET_BLOCK_TIME,
-                                     value=TARGET_BLOCK_TIME - wait)
+                wait = self._next_block_due() - time.time()
+                if wait <= 0:
+                    self._begin_mining()
+                else:
+                    осталось = len(self.node.blockchain.chain)
+                    до = self.node.blockchain.pow_fork_height - осталось
+                    self.mine_status.set(
+                        f"Следующий блок через {int(wait // 60)}:"
+                        f"{int(wait % 60):02d} (темп сети; до настоящего "
+                        f"перебора {до} бл.)")
+                    self.progress.config(maximum=TARGET_BLOCK_TIME,
+                                         value=TARGET_BLOCK_TIME - wait)
         self._auto_after_id = self.after(1000, self._mining_tick)
 
     def _begin_mining(self) -> bool:
@@ -1623,6 +1660,19 @@ class BHydraApp(tk.Tk):
 
     def _mine_worker(self) -> None:
         # Только майнинг и запись в очередь — НИКАКИХ обращений к tkinter.
+        #
+        # ⚠️ Перебор теперь идёт ДЕСЯТКИ МИНУТ, а не доли миллисекунды, и от
+        # этого меняются два требования. Первое: работу обязано быть чем
+        # прервать — иначе «остановить майнинг» висело бы до конца блока.
+        # Второе: человек должен видеть, что узел занят делом, а не замёрз, —
+        # поэтому раз в интервал уходит отчёт о скорости.
+        def бросить():
+            return not self._mining_on
+
+        def отчёт(попыток, скорость):
+            # Из ПОТОКА в tkinter лезть нельзя — только очередь.
+            self._queue.put(("progress", попыток, скорость))
+
         if self.p2p and self.p2p._running:
             # Сначала встаём на самую длинную цепочку сети, потом майним
             # поверх неё — иначе свой блок «улетит» в форк и не примется.
@@ -1630,9 +1680,12 @@ class BHydraApp(tk.Tk):
                 self.p2p.sync()
             except Exception:
                 pass
-            block = self.p2p.mine(self.wallet.address)   # майнит + рассылает
+            block = self.p2p.mine(self.wallet.address, on_progress=отчёт,
+                                  should_stop=бросить)
         else:
-            block = self.node.mine_pending(self.wallet.address)
+            block = self.node.mine_pending(self.wallet.address,
+                                           on_progress=отчёт,
+                                           should_stop=бросить)
         if block is None:
             # Сосед нашёл блок раньше — наш родитель устарел, и майнер честно
             # бросил работу. Это не сбой, а нормальная гонка: транзакции
@@ -1660,15 +1713,24 @@ class BHydraApp(tk.Tk):
                                          "по темпу сети.")
                     self._refresh_status()
                     self._refresh_blocks()
+                elif msg[0] == "progress":
+                    # ⚠️ Только строка состояния, без записи в журнал: отчёт
+                    # приходит часто, и журнал он бы залил за минуту.
+                    _, попыток, скорость = msg
+                    ожидается = self._expected_hashes()
+                    доля = (100.0 * попыток / ожидается) if ожидается else 0.0
+                    self.mine_status.set(
+                        f"Перебор: {попыток:,} хешей | {скорость:,.0f} хеш/с "
+                        f"| в среднем нужно {ожидается:,} ({доля:.0f}%)")
                 elif msg[0] == "abandoned":
                     _, height = msg
                     self._mining = False
                     self.progress.config(value=0)
                     self._log(self.mine_log,
-                              "↩ блок брошен: сеть ушла вперёд "
-                              f"(высота {height}). Транзакции вернулись "
-                              "в мемпул, начинаем заново.")
-                    self.mine_status.set("Блок брошен — сеть опередила.")
+                              "↩ блок брошен: сеть ушла вперёд или майнинг "
+                              f"остановлен (высота {height}). Транзакции "
+                              "вернулись в мемпул.")
+                    self.mine_status.set("Блок брошен.")
                     self._refresh_status()
                     self._refresh_blocks()
                 elif msg[0] == "synced":

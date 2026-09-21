@@ -1450,7 +1450,8 @@ class P2PNode:
             self._announce_tx(tx.txid, background=False)
         return accepted
 
-    def mine(self, miner_address, message=None, wallet=None, on_progress=None):
+    def mine(self, miner_address, message=None, wallet=None, on_progress=None,
+             should_stop=None):
         """Майнит блок и распространяет его по сети.
 
         `message` — заметка майнера, которая останется в блоке навсегда;
@@ -1462,11 +1463,20 @@ class P2PNode:
         сам же его и отклонял. Возвращает None, если блок брошен.
         """
         parent = self.node.blockchain.last_block.hash
+
+        # ⚠️ Внешняя причина бросить работу СКЛАДЫВАЕТСЯ с внутренней, а не
+        # заменяет её. Внутренняя — «сосед нашёл блок раньше», внешняя —
+        # «человек нажал стоп». Забыть любую значит либо молотить мёртвый
+        # блок, либо не реагировать на кнопку: при настоящем переборе это уже
+        # не миллисекунды, а десятки минут.
+        def бросить():
+            if self.node.blockchain.last_block.hash != parent:
+                return True
+            return bool(should_stop and should_stop())
+
         block = self.node.mine_pending(miner_address, message=message,
                                        wallet=wallet, on_progress=on_progress,
-                                       should_stop=lambda: (
-                                           self.node.blockchain.last_block.hash
-                                           != parent))
+                                       should_stop=бросить)
         if block is None:
             return None
         with self._seen_lock:
