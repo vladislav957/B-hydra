@@ -22,6 +22,7 @@ import sys
 import threading
 import time
 import tkinter as tk
+import tkinter.font as tkfont
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
 
@@ -160,7 +161,9 @@ class BHydraApp(tk.Tk):
         self._build_addresses_tab(nb)
         self._build_contracts_tab(nb)
         self._build_quantum_tab(nb)
-        self._text_widgets = [self.mine_log, self.net_log, self.block_details]
+        self._build_console_tab(nb)
+        self._text_widgets = [self.mine_log, self.net_log, self.block_details,
+                              self.console_out]
         self._apply_theme(self._dark.get())      # фирменные стили с самого старта
         nb.bind("<<NotebookTabChanged>>", self._on_tab_changed)
 
@@ -575,6 +578,105 @@ class BHydraApp(tk.Tk):
         self.block_details.tag_configure("hl", background="#fff3a0",
                                          foreground="#000000")
 
+    # --- Терминал ---------------------------------------------------------
+    def _build_console_tab(self, nb: ttk.Notebook) -> None:
+        """Консоль команд — как окно отладки в Bitcoin Core.
+
+        ⚠️ Вкладка — ТОНКАЯ ОБОЛОЧКА: разбор и выполнение живут в `console.py`,
+        который про tkinter не знает вовсе. Поэтому команды проверяются
+        тестами без запуска окна, а здесь остаётся только ввод, вывод и
+        история.
+        """
+        from .console import BANNER, WARNING, Console
+
+        tab = ttk.Frame(nb, padding=12)
+        nb.add(tab, text="⌨ Терминал")
+        self._console_tab = tab
+        self._console = Console(self)
+        self._console_history = []
+        self._console_pos = 0
+
+        # ⚠️ Предупреждение висит ПОСТОЯННО, а не показывается один раз при
+        # первом открытии: уловка «вставь команду, чтобы починить кошелёк»
+        # работает именно на тех, кто это окно видит впервые за полгода.
+        warn = tk.Label(tab, text=WARNING, justify="left", anchor="w",
+                        wraplength=760, padx=8, pady=6)
+        warn.pack(fill="x")
+        self._console_warning = warn
+
+        self.console_out = tk.Text(tab, height=20, state="disabled", wrap="word")
+        self.console_out.pack(fill="both", expand=True, pady=(6, 4))
+
+        row = ttk.Frame(tab)
+        row.pack(fill="x")
+        ttk.Label(row, text=">").pack(side="left")
+        self.console_in = ttk.Entry(row)
+        self.console_in.pack(side="left", fill="x", expand=True, padx=4)
+        self.console_in.bind("<Return>", lambda _e: self._console_submit())
+        self.console_in.bind("<Up>", lambda _e: self._console_recall(-1))
+        self.console_in.bind("<Down>", lambda _e: self._console_recall(1))
+        ttk.Button(row, text="Выполнить",
+                   command=self._console_submit).pack(side="left")
+        ttk.Button(row, text="Очистить",
+                   command=self._console_clear).pack(side="left", padx=4)
+
+        self._console_write(BANNER + "\n")
+
+    def _console_write(self, text: str, tag: str = None) -> None:
+        widget = self.console_out
+        widget.configure(state="normal")
+        widget.insert("end", text, tag or ())
+        widget.configure(state="disabled")
+        widget.see("end")
+
+    def _console_clear(self) -> None:
+        from .console import BANNER
+
+        self.console_out.configure(state="normal")
+        self.console_out.delete("1.0", "end")
+        self.console_out.configure(state="disabled")
+        self._console_write(BANNER + "\n")
+
+    def _console_recall(self, step: int) -> str:
+        """История команд стрелками — иначе консолью неудобно пользоваться."""
+        if not self._console_history:
+            return "break"
+        self._console_pos = max(0, min(len(self._console_history),
+                                       self._console_pos + step))
+        self.console_in.delete(0, "end")
+        if self._console_pos < len(self._console_history):
+            self.console_in.insert(0, self._console_history[self._console_pos])
+        return "break"
+
+    def _console_submit(self) -> None:
+        from .console import ConsoleError
+
+        line = self.console_in.get().strip()
+        if not line:
+            return
+        self.console_in.delete(0, "end")
+        self._console_history.append(line)
+        self._console_pos = len(self._console_history)
+        self._console_write(f"\n> {line}\n", "cmd")
+
+        try:
+            answer = self._console.run(line)
+        except ConsoleError as error:
+            self._console_write(f"{error}\n", "err")
+            return
+        except Exception as error:                      # noqa: BLE001
+            # ⚠️ Консоль не имеет права УРОНИТЬ приложение: в ней кошелёк с
+            # деньгами, и опечатка в команде не должна закрывать окно.
+            self._console_write(f"внутренняя ошибка: {error!r}\n", "err")
+            return
+
+        if answer == "\x00clear":
+            self._console_clear()
+            return
+        if answer:
+            self._console_write(answer + "\n")
+        self._refresh_status()
+
     # --- Гибридный квантово-защищённый кошелёк ---------------------------
     def _build_quantum_tab(self, nb: ttk.Notebook) -> None:
         tab = ttk.Frame(nb, padding=12)
@@ -954,6 +1056,24 @@ class BHydraApp(tk.Tk):
                           ensure_ascii=False, indent=2)
         except OSError:
             pass
+
+    # --- То, что нужно терминалу -------------------------------------------
+    # ⚠️ Консоль (`console.py`) НЕ ЗНАЕТ про tkinter и не лезет в потроха окна:
+    # ей хватает узла, кошелька и этих двух действий. Благодаря этому движок
+    # команд проверяется тестами с поддельным приложением, без запуска GUI.
+    def save_state(self) -> None:
+        self.node.save(STATE_FILE)
+
+    def broadcast_transaction(self, tx) -> None:
+        """Разослать транзакцию соседям, если узел сети поднят.
+
+        ⚠️ Без этого перевод из терминала оставался бы у своего узла и не дошёл
+        бы до майнеров — снаружи это выглядит как «сеть не работает» при
+        исправном соединении. Та же ошибка была когда-то в REST.
+        """
+        if self.p2p and getattr(self.p2p, "_running", False):
+            self.p2p.broadcast({"type": "transaction", "transaction": tx.to_dict(),
+                                "from": [self.p2p.host, self.p2p.port]})
 
     def _after_contract_op(self) -> None:
         """Общий хвост операций: сохранить узел и контракты, обновить экраны."""
@@ -1471,24 +1591,61 @@ class BHydraApp(tk.Tk):
                   f"~{TARGET_BLOCK_TIME / 60:.1f} мин.")
         self._mining_tick()
 
+    def _real_pow(self) -> bool:
+        """Работает ли на этой высоте настоящий перебор (а не таймер).
+
+        ⚠️ Проверяется ВЫСОТА СЛЕДУЮЩЕГО блока, а не текущая вершина: правило
+        развилки говорит про блок, который мы собираемся добыть.
+        """
+        chain = self.node.blockchain
+        fork = getattr(chain, "pow_fork_height", None)
+        return fork is not None and len(chain.chain) >= fork
+
+    def _expected_hashes(self) -> int:
+        """Сколько хешей в среднем нужно на блок при нынешней цели.
+
+        ⚠️ «В среднем» здесь не фигура речи: поиск блока — процесс без памяти,
+        и перебрав вдвое больше ожидаемого, вы не становитесь «ближе». Поэтому
+        доля в строке состояния — это именно доля от ожидания, а не от
+        гарантированного конца, и она спокойно переваливает за 100%.
+        """
+        chain = self.node.blockchain
+        target = chain.expected_target(len(chain.chain))
+        return (1 << 512) // max(1, target)
+
     def _next_block_due(self) -> float:
         """Когда пора добывать следующий блок: вершина + целевой темп сети."""
         return self.node.blockchain.last_block.timestamp + TARGET_BLOCK_TIME
 
     def _mining_tick(self) -> None:
-        """Раз в секунду: обновляет обратный отсчёт; в срок — добывает блок."""
+        """Раз в секунду: до развилки — обратный отсчёт, после — сразу перебор.
+
+        ⚠️ ТАЙМЕР ОСТАЁТСЯ НИЖЕ РАЗВИЛКИ, и это не забывчивость. До неё цель —
+        это сложность 3, то есть 4 096 хешей, доли миллисекунды на блок. Сними
+        таймер там — и оставшиеся до развилки блоки добудутся мгновенно, по
+        50 BHY каждый, без всякого труда. Темп ниже развилки по-прежнему
+        задаёт расписание, настоящий перебор начинается ровно с неё.
+        """
         if not self._mining_on:
             return
         if not self._mining:
-            wait = self._next_block_due() - time.time()
-            if wait <= 0:
+            if self._real_pow():
+                # Настоящий PoW: ждать нечего, блок ищется столько, сколько
+                # ищется. Отсчёт заменяется бесконечным индикатором.
                 self._begin_mining()
             else:
-                self.mine_status.set(
-                    f"Следующий блок через {int(wait // 60)}:"
-                    f"{int(wait % 60):02d} (темп сети)")
-                self.progress.config(maximum=TARGET_BLOCK_TIME,
-                                     value=TARGET_BLOCK_TIME - wait)
+                wait = self._next_block_due() - time.time()
+                if wait <= 0:
+                    self._begin_mining()
+                else:
+                    осталось = len(self.node.blockchain.chain)
+                    до = self.node.blockchain.pow_fork_height - осталось
+                    self.mine_status.set(
+                        f"Следующий блок через {int(wait // 60)}:"
+                        f"{int(wait % 60):02d} (темп сети; до настоящего "
+                        f"перебора {до} бл.)")
+                    self.progress.config(maximum=TARGET_BLOCK_TIME,
+                                         value=TARGET_BLOCK_TIME - wait)
         self._auto_after_id = self.after(1000, self._mining_tick)
 
     def _begin_mining(self) -> bool:
@@ -1503,6 +1660,19 @@ class BHydraApp(tk.Tk):
 
     def _mine_worker(self) -> None:
         # Только майнинг и запись в очередь — НИКАКИХ обращений к tkinter.
+        #
+        # ⚠️ Перебор теперь идёт ДЕСЯТКИ МИНУТ, а не доли миллисекунды, и от
+        # этого меняются два требования. Первое: работу обязано быть чем
+        # прервать — иначе «остановить майнинг» висело бы до конца блока.
+        # Второе: человек должен видеть, что узел занят делом, а не замёрз, —
+        # поэтому раз в интервал уходит отчёт о скорости.
+        def бросить():
+            return not self._mining_on
+
+        def отчёт(попыток, скорость):
+            # Из ПОТОКА в tkinter лезть нельзя — только очередь.
+            self._queue.put(("progress", попыток, скорость))
+
         if self.p2p and self.p2p._running:
             # Сначала встаём на самую длинную цепочку сети, потом майним
             # поверх неё — иначе свой блок «улетит» в форк и не примется.
@@ -1510,9 +1680,12 @@ class BHydraApp(tk.Tk):
                 self.p2p.sync()
             except Exception:
                 pass
-            block = self.p2p.mine(self.wallet.address)   # майнит + рассылает
+            block = self.p2p.mine(self.wallet.address, on_progress=отчёт,
+                                  should_stop=бросить)
         else:
-            block = self.node.mine_pending(self.wallet.address)
+            block = self.node.mine_pending(self.wallet.address,
+                                           on_progress=отчёт,
+                                           should_stop=бросить)
         if block is None:
             # Сосед нашёл блок раньше — наш родитель устарел, и майнер честно
             # бросил работу. Это не сбой, а нормальная гонка: транзакции
@@ -1540,15 +1713,24 @@ class BHydraApp(tk.Tk):
                                          "по темпу сети.")
                     self._refresh_status()
                     self._refresh_blocks()
+                elif msg[0] == "progress":
+                    # ⚠️ Только строка состояния, без записи в журнал: отчёт
+                    # приходит часто, и журнал он бы залил за минуту.
+                    _, попыток, скорость = msg
+                    ожидается = self._expected_hashes()
+                    доля = (100.0 * попыток / ожидается) if ожидается else 0.0
+                    self.mine_status.set(
+                        f"Перебор: {попыток:,} хешей | {скорость:,.0f} хеш/с "
+                        f"| в среднем нужно {ожидается:,} ({доля:.0f}%)")
                 elif msg[0] == "abandoned":
                     _, height = msg
                     self._mining = False
                     self.progress.config(value=0)
                     self._log(self.mine_log,
-                              "↩ блок брошен: сеть ушла вперёд "
-                              f"(высота {height}). Транзакции вернулись "
-                              "в мемпул, начинаем заново.")
-                    self.mine_status.set("Блок брошен — сеть опередила.")
+                              "↩ блок брошен: сеть ушла вперёд или майнинг "
+                              f"остановлен (высота {height}). Транзакции "
+                              "вернулись в мемпул.")
+                    self.mine_status.set("Блок брошен.")
                     self._refresh_status()
                     self._refresh_blocks()
                 elif msg[0] == "synced":
@@ -1900,6 +2082,26 @@ class BHydraApp(tk.Tk):
                   foreground=[("disabled", sub)])
         for widget in self._text_widgets:
             widget.configure(bg=field, fg=fg, insertbackground=fg)
+        # Терминал: своя команда — циан, ошибка — магента, чтобы отказ нельзя
+        # было принять за ответ. Предупреждение о мошенничестве держим
+        # заметным в обеих темах, оно там не для красоты.
+        if hasattr(self, "console_out"):
+            # ⚠️ МОНОШИРИННЫЙ ШРИФТ ЗДЕСЬ ОБЯЗАТЕЛЕН: весь вывод консоли —
+            # таблицы, выровненные пробелами, и на пропорциональном шрифте
+            # колонки разъезжаются в кашу.
+            # ⚠️ И задавать его НАДО ИМЕНОВАННЫМ шрифтом. `("TkFixedFont", 10)`
+            # Tk понимает как СЕМЕЙСТВО с таким именем — а его не существует
+            # (`"TkFixedFont" in font.families()` → False), и Tk молча
+            # откатывается на пропорциональный. Ошибки нет, таблицы просто
+            # разъезжаются; поймано на живом снимке окна.
+            mono = tkfont.nametofont("TkFixedFont").copy()
+            mono.configure(size=10)
+            self.console_out.configure(font=mono)
+            self.console_out.tag_configure("cmd", foreground=accent_hi)
+            self.console_out.tag_configure("err", foreground=magenta)
+            self._console_warning.configure(
+                bg="#3b1d1d" if dark else "#fff4e5",
+                fg="#ffb4a2" if dark else "#7a3b00")
 
     def _about(self) -> None:
         messagebox.showinfo(

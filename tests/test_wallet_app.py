@@ -202,6 +202,97 @@ def test_ensure_files_creates_icons_once(tmp_path):
     assert icon.ensure_files(str(tmp_path)) == []   # второй раз не переписывает
 
 
+def test_an_icon_never_appears_on_disk_half_written(tmp_path):
+    """⚠️ Запись АТОМАРНАЯ: пустого PNG на диске не бывает НИКОГДА.
+
+    Прежний код открывал целевой файл на "wb" — то есть создавал его ПУСТЫМ, а
+    рисовал только потом. Всё это время файл уже существует, и `os.path.exists`
+    у соседнего потока проходит.
+
+    Это не теория: иконки отдаёт REST-сервер, а он многопоточный, и браузер
+    просит /icon-192.png и /icon-512.png ОДНОВРЕМЕННО — оба запроса зовут
+    `ensure_files`. Поймано на живом прогоне: файл нулевой длины уехал в ответ,
+    да ещё и остался лежать на диске навсегда.
+    """
+    seen = []
+    path = tmp_path / "icon-192.png"
+    real = icon.png_bytes
+
+    def watched(size):
+        # Момент «рисуем»: целевого файла в этот миг быть не должно ВОВСЕ.
+        # ⚠️ Записывать сюда размер нельзя: у пустого файла он 0, а `0 == False`
+        # в Python — проверка молча проходила бы и на прежнем, неатомарном коде.
+        seen.append(path.exists())
+        return real(size)
+
+    icon.png_bytes = watched
+    try:
+        icon.ensure_files(str(tmp_path), sizes=(192,))
+    finally:
+        icon.png_bytes = real
+    assert seen == [False], "целевой файл уже создан, а PNG ещё не нарисован"
+    assert path.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def test_an_empty_icon_is_drawn_again(tmp_path):
+    """Испортившаяся иконка обязана выздороветь сама.
+
+    Файл нулевой длины «существует», поэтому проверка на существование никогда
+    бы его не перерисовала — пустой квадрат вместо значка остался бы на телефоне
+    навсегда.
+    """
+    path = tmp_path / "icon-192.png"
+    path.write_bytes(b"")
+    assert icon.ensure_files(str(tmp_path), sizes=(192,)) == [str(path)]
+    assert path.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def test_no_temporary_files_are_left_behind(tmp_path):
+    icon.ensure_files(str(tmp_path))
+    assert [p.name for p in tmp_path.iterdir() if p.name.endswith(".tmp")] == []
+
+
+def test_two_threads_never_see_a_half_written_icon(tmp_path):
+    """⚠️ Гонка тут ВНУТРИПРОЦЕССНАЯ: потоки одного HTTP-сервера.
+
+    Браузер просит обе иконки сразу, сервер многопоточный, и оба обработчика
+    зовут `ensure_files`. Здесь это воспроизводится в лоб: несколько потоков
+    рисуют одну и ту же иконку, а наблюдатель всё это время читает файл. Ни
+    одно чтение не смеет вернуть кусок.
+
+    Имя временного файла поэтому берётся у `tempfile`, а не из pid: у потоков
+    одного процесса pid общий, и они писали бы в один временный файл.
+    """
+    path = tmp_path / "icon-192.png"
+    seen = []
+    stop = threading.Event()
+
+    def watch():
+        while not stop.is_set():
+            try:
+                data = path.read_bytes()
+            except OSError:
+                continue                      # ещё не появился — это законно
+            seen.append(data)
+
+    observer = threading.Thread(target=watch, daemon=True)
+    observer.start()
+    writers = [threading.Thread(target=icon.ensure_files, args=(str(tmp_path),))
+               for _ in range(4)]
+    for thread in writers:
+        thread.start()
+    for thread in writers:
+        thread.join()
+    stop.set()
+    observer.join(timeout=5)
+
+    whole = icon.png_bytes(192)
+    assert path.read_bytes() == whole
+    for data in seen:
+        assert data == whole, f"наблюдатель увидел {len(data)} байт вместо {len(whole)}"
+    assert [p.name for p in tmp_path.iterdir() if p.name.endswith(".tmp")] == []
+
+
 # --- Отдача узлом --------------------------------------------------------------
 def test_node_serves_the_app_files(tmp_path):
     port, server = _serve(tmp_path)

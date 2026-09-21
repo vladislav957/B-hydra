@@ -51,6 +51,16 @@ dist/
 android/app/build/
 android/.gradle/
 
-# Сборка нативного транспорта (cpp/)
+# Сборка нативного кода (cpp/) — всё это собирается командами из CLAUDE.md,
+# и ни одному собранному файлу в репозитории не место: они привязаны к
+# машине и пересобираются из исходников. Раньше здесь стоял только
+# bhydra_bridge, и libbhydra_ec.so чуть не уехала в коммит.
 bhydra_bridge
+bhydra_miner
+bhydra_bt
 *.o
+*.so
+*.dll
+*.dylib
+bhydra_miner.exe
+bhydra_bt.exe

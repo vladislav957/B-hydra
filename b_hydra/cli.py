@@ -13,6 +13,7 @@ cli.py — командная строка B-hydra.
     python cli.py mine BHY<адрес-майнера>
     python cli.py balance BHY<адрес>
     python cli.py chain
+    python cli.py update --check
 """
 
 import argparse
@@ -26,6 +27,7 @@ if __name__ == "__main__" and __package__ in (None, ""):
     __package__ = "b_hydra"
 
 from . import hashing
+from .version import VERSION as __version__
 from .blockchain import DEFAULT_FEE
 from .node import BHydraNode
 from .wallet import Wallet, generate_wallet, is_valid_address
@@ -160,6 +162,32 @@ def cmd_chain(args):
           f"валидна: {node.is_valid()}")
 
 
+def cmd_update(args):
+    """Обновление как у пакетного менеджера: посмотреть и поставить.
+
+    ⚠️ Установка не начинается, пока подпись релиза не проверена ключом из
+    `release_key.py`. Пока ключ не заведён, команда честно говорит об этом и
+    отправляет скачать вручную — подробности в шапке `updater.py`.
+    """
+    from . import updater
+    from .version import VERSION, format_version
+
+    updater.cleanup_backups()        # прибрать `.old` от прошлого обновления
+    print(f"Установлено: B-hydra Core {format_version(VERSION)}")
+    try:
+        release, message = updater.update(dry_run=args.check)
+    except updater.UpdateError as error:
+        print(f"Обновление не выполнено: {error}", file=sys.stderr)
+        return 1
+
+    print(message)
+    if args.check and release.is_newer and release.notes.strip():
+        print("\nЧто нового:")
+        for line in release.notes.strip().splitlines()[:20]:
+            print(f"  {line}")
+    return 0
+
+
 def build_parser():
     parser = argparse.ArgumentParser(
         prog="b-hydra", description="B-hydra — P2P электронная денежная система"
@@ -198,6 +226,14 @@ def build_parser():
     p_addr.set_defaults(func=cmd_address)
 
     sub.add_parser("chain", help="показать цепочку").set_defaults(func=cmd_chain)
+
+    p_upd = sub.add_parser("update", help="проверить и установить обновление")
+    p_upd.add_argument("--check", action="store_true",
+                       help="только посмотреть, что вышло, и ничего не ставить")
+    p_upd.set_defaults(func=cmd_update)
+
+    parser.add_argument("--version", action="version",
+                        version=f"B-hydra Core {__version__}")
     return parser
 
 
@@ -205,11 +241,14 @@ def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
-        args.func(args)
+        # Код возврата ПРОБРАСЫВАЕТСЯ: `update` в скрипте или в cron обязан
+        # отличать «обновился» от «не смог», а раньше любая команда
+        # заканчивалась нулём независимо от исхода.
+        return args.func(args) or 0
     except BrokenPipeError:
         # Вывод оборвали (например, через `| head`) — это не ошибка.
-        pass
+        return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
