@@ -1,24 +1,24 @@
-"""Калибровка цели развилки под конкретную машину.
+"""Calibrating the fork target for a specific machine.
 
-    python -m b_hydra.powcalib                # замерить и показать, что ставить
-    python -m b_hydra.powcalib --threads 1    # столько потоков, сколько отдашь
-    python -m b_hydra.powcalib --hashrate 1.3e6   # уже знаешь число — посчитать
+    python -m b_hydra.powcalib                # measure and show what to set
+    python -m b_hydra.powcalib --threads 1    # as many threads as you will give
+    python -m b_hydra.powcalib --hashrate 1.3e6   # know the number already
 
-⚠️ ЗАЧЕМ. `POW_FORK_TARGET` — КОНСТАНТА КОНСЕНСУСА: цель, которая встаёт на
-высоте развилки. Померить скорость при старте узла и подставить её нельзя в
-принципе — у каждой машины получилось бы своё число, а значит своя цель и своя
-цепочка. Поэтому замер делается ОДИН раз человеком, а в `blockchain.py`
-попадает результат.
+⚠️ WHY. `POW_FORK_TARGET` is a CONSENSUS CONSTANT: the target that takes
+effect at the fork height. Measuring the speed at node startup and plugging it
+in is impossible in principle — every machine would arrive at its own number,
+and therefore its own target and its own chain. So the measurement is taken
+ONCE by a person, and the result is what lands in `blockchain.py`.
 
-⚠️ ОШИБАТЬСЯ НАДО В БОЛЬШУЮ СТОРОНУ. Завысил хешрейт — блоки идут реже цели,
-эмиссия отстаёт, ничего страшного. Занизил — блоки посыплются чаще цели, а
-это ровно тот выброс эмиссии, ради которого развилка и вводится. Поэтому
-показанное значение округляется ВВЕРХ.
+⚠️ ERR ON THE HIGH SIDE. Overstate the hashrate and blocks come in slower
+than the target, issuance lags, no harm done. Understate it and blocks pour
+in faster than the target — which is exactly the issuance blowout the fork
+exists to prevent. That is why the reported value is rounded UP.
 
-⚠️ Замеряется тот движок, которым машина и будет майнить: сначала нативный
-майнер на C++ (он же используется в бою), и только если его нет — Python.
-Мерить чистым Python, а майнить на C++ значило бы занизить хешрейт в тысячу
-раз и получить блоки раз в несколько секунд.
+⚠️ What gets measured is the engine the machine will actually mine with:
+first the native C++ miner (the one used in production), and only if it is
+absent, Python. Measuring with pure Python while mining with C++ would
+understate the hashrate a thousandfold and produce a block every few seconds.
 """
 
 import argparse
@@ -35,7 +35,7 @@ DEFAULT_SECONDS = 5.0
 
 
 def _python_hashrate(seconds: float) -> float:
-    """Скорость чистого Python — запасной путь, если C++ не собран."""
+    """Pure-Python speed — the fallback when C++ has not been built."""
     from .blockchain import Block
 
     block = Block(1, [], "0" * 128, target=0)
@@ -51,10 +51,10 @@ def _python_hashrate(seconds: float) -> float:
 
 
 def measure(seconds=DEFAULT_SECONDS, threads=0):
-    """→ (хеш/с, каким движком). Нативный, если он есть."""
+    """-> (hashes/s, which engine). Native if one is available."""
     miner = native_miner.default()
     if miner is not None:
-        # `benchmark` отдаёт уже готовые хеши в секунду, а не сырой ответ.
+        # `benchmark` hands back hashes per second already, not a raw answer.
         rate = miner.benchmark(seconds=seconds, threads=threads)
         if rate > 0:
             used = threads or "все"
@@ -63,7 +63,7 @@ def measure(seconds=DEFAULT_SECONDS, threads=0):
 
 
 def target_for(hashrate: float) -> int:
-    """Цель, при которой блок ищется примерно TARGET_BLOCK_TIME."""
+    """The target at which a block takes roughly TARGET_BLOCK_TIME to find."""
     hashes = int(hashrate * TARGET_BLOCK_TIME)
     return _HASH_SPACE // max(1, hashes)
 
@@ -92,8 +92,8 @@ def main(argv=None):
         print(f"Замер {args.seconds:g} с…", file=sys.stderr)
         rate, engine = measure(args.seconds, args.threads)
 
-    # ⚠️ Округление ВВЕРХ, до двух значащих цифр: ошибка в большую сторону
-    # безопасна, в меньшую — нет (см. шапку модуля).
+    # ⚠️ Rounded UP, to two significant digits: erring high is safe, erring
+    # low is not (see the module header).
     step = 10 ** (math.floor(math.log10(rate)) - 1)
     safe = math.ceil(rate / step) * step
 

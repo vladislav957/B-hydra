@@ -1,14 +1,16 @@
-"""Версия B-hydra Core и сравнение версий.
+"""B-hydra Core version and version comparison.
 
-Отдельный модуль, а не константа в `__init__.py`, по одной причине: сравнением
-версий пользуется `updater.py`, а импортировать ради этого весь пакет — значит
-тянуть блокчейн, сеть и крипту туда, где нужно сравнить два числа.
+A module of its own rather than a constant in `__init__.py`, for one reason:
+`updater.py` needs the comparison, and importing the whole package for that
+would drag the blockchain, the network and the crypto into a place where two
+numbers have to be compared.
 
-⚠️ Теги в релизах писались ПО-РАЗНОМУ: `v0.0.7`, `v.0.0.8`, `v.0.0.9`, `v0.1.0`
-— точка после «v» то есть, то нет. Это не выдумка для красоты разбора, а то,
-что лежит в репозитории прямо сейчас. Сравнение обязано считать их одной
-схемой, иначе обновление с `v.0.0.9` на `v0.1.0` либо не предложится вовсе,
-либо предложится в обратную сторону.
+⚠️ Release tags were written INCONSISTENTLY: `v0.0.7`, `v.0.0.8`, `v.0.0.9`,
+`v0.1.0` — the dot after the "v" comes and goes. This is not an invented
+edge case to make the parser look clever, it is what sits in the repository
+right now. The comparison must treat them as one scheme, otherwise an update
+from `v.0.0.9` to `v0.1.0` would either never be offered or be offered
+backwards.
 """
 
 import re
@@ -17,23 +19,24 @@ __all__ = ["VERSION", "parse", "is_newer", "format_version"]
 
 VERSION = "0.1.0"
 
-# Сколько числовых полей сравнивается. Дополняются нулями, поэтому «0.1» и
-# «0.1.0» — одна и та же версия, а не разные.
+# How many numeric fields take part in the comparison. They are padded with
+# zeros, so "0.1" and "0.1.0" are one and the same version, not two.
 _FIELDS = 4
 
 _SPLIT = re.compile(r"^[vV]?\.?(?P<numbers>\d+(?:\.\d+)*)(?:[-+.]?(?P<pre>.*))?$")
 
-# Предрелизы идут ПЕРЕД релизом: 1.0.0-rc1 старше 1.0.0 быть не может.
+# Pre-releases come BEFORE the release: 1.0.0-rc1 can never outrank 1.0.0.
 _RELEASE = 1
 _PRERELEASE = 0
 
 
 def parse(text):
-    """Версия → кортеж, который можно сравнивать обычным `<`.
+    """Version -> a tuple that plain `<` can compare.
 
-    Возвращает `None`, если строка на версию не похожа. Именно `None`, а не
-    нули: «не разобралось» и «версия 0.0.0» — разные вещи, и молча считать
-    мусор нулевой версией значит предложить обновление на что попало.
+    Returns `None` if the string does not look like a version. `None`
+    specifically, not zeros: "did not parse" and "version 0.0.0" are
+    different things, and silently treating garbage as version zero means
+    offering an update to just about anything.
     """
     if not isinstance(text, str):
         return None
@@ -42,29 +45,31 @@ def parse(text):
         return None
 
     numbers = [int(part) for part in match.group("numbers").split(".")]
-    # ⚠️ Хвост ДОПОЛНЯЕТСЯ нулями, но не ОБРЕЗАЕТСЯ. Дополнение нужно, чтобы
-    # «0.1» и «0.1.0» считались одной версией; обрезка же молча схлопнула бы
-    # 1.2.3.4 и 1.2.3.5 в одну — то есть обновление между ними не предложилось
-    # бы вовсе. Лишние поля никому не мешают: кортежи сравниваются поэлементно.
+    # ⚠️ The tail is PADDED with zeros but never TRUNCATED. The padding is
+    # what makes "0.1" and "0.1.0" the same version; truncation, by contrast,
+    # would silently collapse 1.2.3.4 and 1.2.3.5 into one — meaning an update
+    # between them would never be offered at all. Extra fields hurt nobody:
+    # tuples are compared element by element.
     if len(numbers) < _FIELDS:
         numbers = numbers + [0] * (_FIELDS - len(numbers))
 
     pre = (match.group("pre") or "").strip().lower()
     if not pre:
         return (tuple(numbers), _RELEASE, ())
-    # Предрелизы сравниваются между собой по частям: rc2 новее rc1.
+    # Pre-releases are compared against each other piecewise: rc2 beats rc1.
     parts = tuple(int(chunk) if chunk.isdigit() else chunk
                   for chunk in re.split(r"[-.+]", pre) if chunk)
     return (tuple(numbers), _PRERELEASE, parts)
 
 
 def is_newer(candidate, current=VERSION) -> bool:
-    """Строго ли `candidate` новее `current`.
+    """Whether `candidate` is STRICTLY newer than `current`.
 
-    ⚠️ СТРОГО, и это защита, а не придирка: равенство означает «у нас уже эта
-    сборка», и разрешить установку «той же» версии значит разрешить подсунуть
-    под её именем другой файл. Отсюда же отказ при неразобранной версии —
-    обновление, про которое нельзя сказать, что оно новее, не ставится.
+    ⚠️ STRICTLY, and that is a defence rather than pedantry: equality means
+    "we already have this build", and allowing "the same" version to install
+    means allowing a different file to be slipped in under its name. The same
+    reasoning drives the refusal on an unparseable version — an update that
+    cannot be shown to be newer does not get installed.
     """
     left, right = parse(candidate), parse(current)
     if left is None or right is None:
@@ -72,12 +77,12 @@ def is_newer(candidate, current=VERSION) -> bool:
     try:
         return left > right
     except TypeError:
-        # Предрелизы с несравнимыми частями («rc» против 1) — не рискуем.
+        # Pre-releases with incomparable parts ("rc" against 1) — do not risk it.
         return False
 
 
 def format_version(text) -> str:
-    """Версия без префикса `v`/`v.` — для показа человеку."""
+    """The version without the `v`/`v.` prefix — for showing to a person."""
     match = _SPLIT.match(str(text).strip())
     if match is None:
         return str(text).strip()

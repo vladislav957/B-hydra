@@ -1,9 +1,9 @@
 """
-hashcash.py — proof-of-work по схеме Hashcash на SHA-512.
+hashcash.py — Hashcash-style proof-of-work over SHA-512.
 
-Используется как самостоятельный PoW-примитив: «отчеканить» марку с заданным
-числом ведущих нулей и проверить её. Майнинг блоков реализован в Blockchain.py,
-а здесь — общий механизм доказательства работы.
+Used as a standalone PoW primitive: "mint" a stamp with a given number of
+leading zeros and verify it. Block mining lives in Blockchain.py; what is
+here is the general proof-of-work mechanism.
 """
 
 import time
@@ -18,7 +18,7 @@ from . import hashing
 
 
 def _leading_zero_bits(digest: bytes) -> int:
-    """Количество ведущих нулевых бит в хеше."""
+    """The number of leading zero bits in the hash."""
     bits = 0
     for byte in digest:
         if byte == 0:
@@ -33,9 +33,9 @@ def _leading_zero_bits(digest: bytes) -> int:
 
 def mint(resource: str, bits: int = 20):
     """
-    Чеканит Hashcash-марку для ресурса с заданной сложностью (в битах).
+    Mints a Hashcash stamp for a resource at the given difficulty (in bits).
 
-    Возвращает (nonce, stamp, digest_hex).
+    Returns (nonce, stamp, digest_hex).
     """
     nonce = 0
     prefix = f"1:{bits}:{resource}:"
@@ -46,13 +46,13 @@ def mint(resource: str, bits: int = 20):
         if _leading_zero_bits(digest) >= bits:
             return nonce, stamp, digest.hex()
         nonce += 1
-        # Защита от вечного цикла при экстремальной сложности.
+        # Guard against an endless loop at extreme difficulty.
         if nonce % 5_000_000 == 0 and time.time() - start > 60:
             raise TimeoutError("Hashcash mint timed out")
 
 
 def check(stamp: str, bits: int = 20, resource: str = None) -> bool:
-    """Проверяет, что марка валидна и имеет нужную сложность."""
+    """Checks that the stamp is valid and has the required difficulty."""
     parts = stamp.split(":")
     if len(parts) != 4:
         return False
@@ -67,9 +67,9 @@ def check(stamp: str, bits: int = 20, resource: str = None) -> bool:
 
 def proof_of_work(data: str, difficulty: int = 4):
     """
-    PoW по ведущим нулям в hex-представлении (как при майнинге блоков).
+    PoW by leading zeros in the hex representation (as in block mining).
 
-    Возвращает (nonce, hash_hex).
+    Returns (nonce, hash_hex).
     """
     target = "0" * difficulty
     nonce = 0
