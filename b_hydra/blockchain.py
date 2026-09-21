@@ -120,6 +120,44 @@ def genesis_target_for(difficulty: int) -> int:
     return _HASH_SPACE >> (4 * difficulty)
 
 
+# --- НАСТОЯЩИЙ PoW: развилка по высоте ---------------------------------------
+# ⚠️ ЧТО БЫЛО НЕ ТАК. Цель генезиса (сложность 3) — это 4 096 хешей в среднем,
+# то есть доли миллисекунды даже на старом ноутбуке. Блок находился мгновенно,
+# а темп задавал ТАЙМЕР в интерфейсе: узел ждал, пока от метки вершины пройдёт
+# TARGET_BLOCK_TIME. Из-за этого все интервалы были РОВНО целевыми, LWMA всегда
+# получала «фактически = ожидаемо», и за 1006 блоков цель не сдвинулась ни разу.
+#
+# ⚠️ ПОЧЕМУ НЕЛЬЗЯ ПРОСТО УБРАТЬ ТАЙМЕР. Смоделировано на этом же коде
+# `expected_target`: при 5,94 Мхеш/с и сложности 3 блоки идут по 1450 в секунду,
+# а LWMA догоняет их сотнями. За один модельный час — 313 блоков и 15 650 BHY
+# «из воздуха», из них 10 000 в первые минуты. Поэтому цель на высоте развилки
+# выставляется СРАЗУ калиброванной, а не доезжает туда пересчётом.
+#
+# ⚠️ ЭТО ПРАВИЛО СЕТИ (хардфорк). Ниже POW_FORK_HEIGHT действуют прежние
+# правила — все существующие блоки остаются валидными; с этой высоты
+# действуют новые. `is_chain_valid` сверяет target КАЖДОГО блока с
+# `expected_target`, поэтому развилка обязана жить внутри неё, а не снаружи.
+POW_FORK_HEIGHT = 1030
+
+# Хешрейт, под который откалибрована цель развилки, хеш/с.
+#
+# ⚠️ ЭТО КОНСТАНТА КОНСЕНСУСА, А НЕ ЗАМЕР ВО ВРЕМЯ РАБОТЫ. Померить скорость
+# при старте и подставить её было бы нельзя в принципе: у каждого узла
+# получилось бы своё число, а значит своя цель и своя цепочка. Замер делается
+# ОДИН раз человеком, и сюда попадает результат.
+#
+# ⚠️ Значение намеренно ЗАВЫШЕНО относительно слабой машины. Ошибка в большую
+# сторону безопасна — блоки идут реже цели, эмиссия отстаёт. Ошибка в меньшую
+# сторону означает ровно тот выброс, ради которого вся эта развилка и вводится.
+# Замер на машине разработки (Xeon 2.1 ГГц): 1,55 Мхеш/с на поток, 5,94 на
+# четырёх. Пересчитать под своё железо: `python -m b_hydra.powcalib`.
+POW_FORK_HASHRATE = 2_000_000
+
+#: Цель, которая выставляется на высоте развилки: столько хешей, сколько
+#: укладывается в целевое время блока при POW_FORK_HASHRATE.
+POW_FORK_TARGET = _HASH_SPACE // int(POW_FORK_HASHRATE * TARGET_BLOCK_TIME)
+
+
 # Лимиты безопасности (анти-DoS / манипуляции).
 MAX_BLOCK_TRANSACTIONS = 5000      # максимум транзакций в блоке
 # ⚠️ ПРАВИЛО СЕТИ, а не настройка. Счётчика транзакций мало: транзакция с
@@ -398,13 +436,23 @@ class Blockchain:
     """Цепочка блоков B-hydra с PoW-консенсусом и халвингом награды."""
 
     def __init__(self, difficulty=DEFAULT_DIFFICULTY,
-                 retarget_interval=RETARGET_INTERVAL):
+                 retarget_interval=RETARGET_INTERVAL,
+                 pow_fork_height=POW_FORK_HEIGHT,
+                 pow_fork_target=POW_FORK_TARGET):
         self.difficulty = difficulty                      # генезис-сложность (база)
         self.genesis_target = genesis_target_for(difficulty)
         # Скользящее окно LWMA — параметр сети (одинаков для всех узлов).
         # По умолчанию RETARGET_INTERVAL; меньшие значения удобны в тестах.
         # Пока высота не превысила окно, держится базовая цель генезиса.
         self.retarget_interval = max(1, retarget_interval)
+        # Развилка настоящего PoW — параметр сети. Вынесен в поле, а не читается
+        # из модуля напрямую, ровно по той же причине, что и окно: тестам нужна
+        # развилка на высоте 3, а не 1030, иначе проверить её было бы нечем —
+        # пришлось бы намайнить тысячу блоков.
+        # ⚠️ None полностью выключает развилку: так ведёт себя цепочка, поднятая
+        # из файла старым кодом, и так же её видит `from_dicts` без параметра.
+        self.pow_fork_height = pow_fork_height
+        self.pow_fork_target = pow_fork_target
         self.chain = [self.create_genesis_block()]
 
     def create_genesis_block(self):
@@ -497,6 +545,25 @@ class Blockchain:
         if height == 0:
             return self.genesis_target
         window = self.retarget_interval
+
+        # --- Развилка настоящего PoW -----------------------------------------
+        # ⚠️ ПОЧЕМУ НЕДОСТАТОЧНО ВЫСТАВИТЬ ЦЕЛЬ ОДНИМ БЛОКОМ. Это проверено
+        # моделью на этом же коде: окно LWMA — последние `window` блоков, и
+        # сразу после развилки они ВСЕ дофорковые, с лёгкой целью. Средняя по
+        # окну ≈ генезис, и один калиброванный блок в ней просто тонет: уже
+        # следующий блок получает сложность 3,02, а за шесть часов набегает
+        # 17 900 BHY. Поэтому калиброванная цель держится, ПОКА окно не
+        # заполнится послефорковыми блоками — ровно так же, как ниже держится
+        # цель генезиса, пока не набралось окна вообще.
+        if self.pow_fork_height is not None and height >= self.pow_fork_height:
+            if height - window < self.pow_fork_height:
+                return self.pow_fork_target
+            ceiling = self.pow_fork_target
+        else:
+            # Ниже развилки — прежние правила, байт в байт. Все существующие
+            # блоки обязаны остаться валидными.
+            ceiling = self.genesis_target
+
         # Окно — блоки [height-window; height-1], а для первого из них нужен
         # ещё предыдущий блок-якорь, чтобы получить его интервал.
         if height <= window:
@@ -531,8 +598,16 @@ class Blockchain:
         average_target = target_sum // window
         new_target = max(average_target // MAX_ADJUST_FACTOR,
                          min(average_target * MAX_ADJUST_FACTOR, new_target))
-        # Не легче генезиса (это «потолок» лёгкости) и не нулевая.
-        return max(1, min(new_target, self.genesis_target))
+        # Не легче потолка и не нулевая.
+        #
+        # ⚠️ ПОТОЛОК ПОСЛЕ РАЗВИЛКИ — КАЛИБРОВАННАЯ ЦЕЛЬ, А НЕ ГЕНЕЗИС. Иначе
+        # остаётся дыра: генезис — это сложность 3, и стоит майнеру уйти на
+        # несколько дней, LWMA начнёт поднимать цель и упрётся в неё, то есть
+        # вернёт мгновенные блоки вместе со всем выбросом эмиссии. Цена в том,
+        # что на машине СЛАБЕЕ калибровочной блоки будут идти реже цели и
+        # отыграть это назад пересчёт уже не сможет — но «реже» безопасно, а
+        # «чаще» нет.
+        return max(1, min(new_target, ceiling))
 
     def block_reward(self, height):
         """Награда за блок с учётом халвинга (Bitcoin-подобная схема).
@@ -649,7 +724,9 @@ class Blockchain:
 
     @classmethod
     def from_dicts(cls, chain_dicts, difficulty=DEFAULT_DIFFICULTY,
-                   retarget_interval=RETARGET_INTERVAL):
+                   retarget_interval=RETARGET_INTERVAL,
+                   pow_fork_height=POW_FORK_HEIGHT,
+                   pow_fork_target=POW_FORK_TARGET):
         """Восстанавливает блокчейн из списка словарей (например, из файла).
 
         retarget_interval нужно передавать тем же, с каким цепочка майнилась,
@@ -660,6 +737,8 @@ class Blockchain:
         blockchain.difficulty = difficulty
         blockchain.genesis_target = genesis_target_for(difficulty)
         blockchain.retarget_interval = max(1, retarget_interval)
+        blockchain.pow_fork_height = pow_fork_height
+        blockchain.pow_fork_target = pow_fork_target
         blockchain.chain = [Block.from_dict(d) for d in chain_dicts]
         return blockchain
 
