@@ -1,26 +1,29 @@
 """
-merkle.py — дерево Меркла B-hydra на двойном SHA-512.
+merkle.py — B-hydra's Merkle tree over double SHA-512.
 
-Корень Меркла фиксирует набор транзакций блока: изменение любой транзакции
-меняет корень, а значит и хеш блока. Кроме корня модуль умеет строить
-**доказательства включения** (audit path / Merkle proof): по ним лёгкий
-клиент (SPV) проверяет, что транзакция входит в блок, зная только корень из
-заголовка — не скачивая все транзакции.
+The Merkle root pins down the block's set of transactions: change any
+transaction and the root changes, and with it the block hash. Besides the
+root, the module can build **inclusion proofs** (audit path / Merkle proof):
+with one, a light client (SPV) verifies that a transaction belongs to a block
+knowing only the root from the header — without downloading every
+transaction.
 
-Единственный источник правды: `merkle_root()` отсюда использует и
-`blockchain.py` (заголовок блока), и обозреватель — реализация не дублируется.
+A single source of truth: the `merkle_root()` here is used both by
+`blockchain.py` (the block header) and by the explorer — the implementation is
+not duplicated.
 
-Модель безопасности:
-  * **CVE-2012-2459** (подмена за счёт дублирования нечётного узла): при
-    нечётном числе узлов последний дублируется — как в Bitcoin. Это создаёт
-    теоретическую неоднозначность корня, поэтому узел ОТДЕЛЬНО запрещает
-    повторяющиеся txid в блоке (`_validate_block_transactions`), что и
-    закрывает атаку. `has_duplicate_promotion()` помечает такие деревья.
-  * **Second-preimage** (выдать внутренний узел за лист): листья — двойной
-    SHA-512 от JSON транзакции, внутренние узлы — двойной SHA-512 от 128 байт
-    (два хеша). Подобрать транзакцию, чья сериализация равна склейке двух
-    хешей, вычислительно нереально; вдобавок узел заново разбирает каждый
-    лист как транзакцию — 128-байтная склейка не пройдёт как валидная tx.
+Security model:
+  * **CVE-2012-2459** (forgery via duplication of an odd node): with an odd
+    number of nodes the last one is duplicated — as in Bitcoin. That creates
+    a theoretical ambiguity in the root, so the node SEPARATELY forbids
+    repeated txids inside a block (`_validate_block_transactions`), which is
+    what closes the attack. `has_duplicate_promotion()` flags such trees.
+  * **Second-preimage** (passing an internal node off as a leaf): leaves are
+    the double SHA-512 of the transaction JSON, internal nodes are the double
+    SHA-512 of 128 bytes (two hashes). Finding a transaction whose
+    serialization equals the concatenation of two hashes is computationally
+    out of reach; on top of that the node re-parses every leaf as a
+    transaction — a 128-byte concatenation will not pass as a valid tx.
 """
 
 from __future__ import annotations
@@ -39,24 +42,25 @@ def _sha512d(data: bytes) -> bytes:
 
 
 def leaf_hash(data) -> bytes:
-    """Хеш листа: двойной SHA-512 от данных (bytes) или их str-представления."""
+    """Leaf hash: double SHA-512 of the data (bytes) or of its str form."""
     if isinstance(data, bytes):
         return _sha512d(data)
     return _sha512d(str(data).encode("utf-8"))
 
 
 def _as_leaves(items) -> list:
-    """Приводит вход к списку хешей-листьев (bytes на входе — уже хеши)."""
+    """Normalises the input to a list of leaf hashes (bytes in = already hashes)."""
     return [item if isinstance(item, bytes) else leaf_hash(item)
             for item in items]
 
 
 def _build_layers(leaves: list) -> list:
-    """Строит все слои дерева снизу вверх (нижний — листья, верхний — корень).
+    """Builds every layer bottom-up (lowest = leaves, topmost = the root).
 
-    Нечётный слой дополняется копией последнего узла — так корень совпадает
-    с классической схемой Bitcoin/предыдущей реализацией B-hydra (байт-в-байт).
-    Возвращает список слоёв; каждый слой — список bytes.
+    An odd layer is padded with a copy of its last node — that is what makes
+    the root match the classic Bitcoin scheme and B-hydra's previous
+    implementation byte for byte. Returns a list of layers; each layer is a
+    list of bytes.
     """
     if not leaves:
         return [[_sha512d(b"")]]
@@ -64,24 +68,25 @@ def _build_layers(leaves: list) -> list:
     while len(layers[-1]) > 1:
         cur = layers[-1]
         if len(cur) % 2 == 1:
-            cur = cur + [cur[-1]]        # дублируем последний при нечётном числе
-            layers[-1] = cur             # сохраняем дополненный слой (для proof)
+            cur = cur + [cur[-1]]        # duplicate the last one when the count is odd
+            layers[-1] = cur             # keep the padded layer (needed for the proof)
         layers.append([_sha512d(cur[i] + cur[i + 1])
                        for i in range(0, len(cur), 2)])
     return layers
 
 
 def merkle_root(leaves) -> str:
-    """Корень дерева Меркла из списка листьев (bytes-хеши или строки) → hex."""
+    """Merkle root from a list of leaves (byte hashes or strings) -> hex."""
     return _build_layers(_as_leaves(leaves))[-1][0].hex()
 
 
 def merkle_proof(leaves, index: int) -> list:
-    """Доказательство включения листа №index: путь от листа к корню.
+    """Inclusion proof for leaf number `index`: the path from leaf to root.
 
-    Возвращает список шагов `{"hash": <hex соседа>, "position": "left"|"right"}`,
-    где position — с какой стороны сосед при склейке. Проверяется
-    `verify_proof()` без доступа ко всем листьям (SPV).
+    Returns a list of steps `{"hash": <sibling hex>, "position":
+    "left"|"right"}`, where position says which side the sibling sits on when
+    concatenated. Checked by `verify_proof()` without access to all the
+    leaves (SPV).
     """
     leaves = _as_leaves(leaves)
     if not leaves:
@@ -92,8 +97,8 @@ def merkle_proof(leaves, index: int) -> list:
     layers = _build_layers(leaves)
     proof = []
     idx = index
-    for layer in layers[:-1]:            # все слои, кроме корневого
-        sibling = idx ^ 1               # сосед: чётный↔следующий, нечётный↔предыдущий
+    for layer in layers[:-1]:            # every layer except the root one
+        sibling = idx ^ 1               # sibling: even <-> the next, odd <-> the previous
         position = "right" if idx % 2 == 0 else "left"
         proof.append({"hash": layer[sibling].hex(), "position": position})
         idx //= 2
@@ -101,10 +106,10 @@ def merkle_proof(leaves, index: int) -> list:
 
 
 def verify_proof(leaf, proof, root: str) -> bool:
-    """Проверяет доказательство включения: лист + путь дают заявленный корень.
+    """Verifies an inclusion proof: leaf + path yield the claimed root.
 
-    leaf — bytes-хеш листа или исходные данные (будут захешированы);
-    root — hex-строка корня из заголовка блока. Возвращает True/False.
+    leaf — the leaf's byte hash or the original data (which will be hashed);
+    root — the hex root string from the block header. Returns True/False.
     """
     try:
         h = leaf if isinstance(leaf, bytes) else leaf_hash(leaf)
@@ -117,7 +122,7 @@ def verify_proof(leaf, proof, root: str) -> bool:
 
 
 class MerkleTree:
-    """Дерево Меркла с корнем и доказательствами включения."""
+    """A Merkle tree with a root and inclusion proofs."""
 
     def __init__(self, data_blocks=None):
         self.leaves: list = []
@@ -125,12 +130,12 @@ class MerkleTree:
             self.add(block)
 
     def add(self, data) -> None:
-        """Добавляет лист (данные хешируются двойным SHA-512)."""
+        """Adds a leaf (the data is hashed with double SHA-512)."""
         self.leaves.append(leaf_hash(data))
 
     @classmethod
     def from_hashes(cls, hashes) -> "MerkleTree":
-        """Строит дерево из готовых хешей-листьев (bytes)."""
+        """Builds the tree from ready-made leaf hashes (bytes)."""
         tree = cls()
         tree.leaves = [h if isinstance(h, bytes) else bytes.fromhex(h)
                        for h in hashes]
@@ -141,11 +146,11 @@ class MerkleTree:
         return merkle_root(self.leaves)
 
     def proof(self, index: int) -> list:
-        """Доказательство включения листа №index."""
+        """Inclusion proof for leaf number `index`."""
         return merkle_proof(self.leaves, index)
 
     def prove_data(self, data):
-        """Ищет лист по данным и возвращает (index, proof) или (None, None)."""
+        """Finds a leaf by its data and returns (index, proof) or (None, None)."""
         target = leaf_hash(data)
         for i, leaf in enumerate(self.leaves):
             if leaf == target:
@@ -153,8 +158,8 @@ class MerkleTree:
         return None, None
 
     def has_duplicate_promotion(self) -> bool:
-        """True, если где-то дублировался нечётный последний узел
-        (индикатор потенциальной CVE-2012-2459-неоднозначности)."""
+        """True if an odd last node was duplicated anywhere
+        (an indicator of potential CVE-2012-2459 ambiguity)."""
         n = len(self.leaves)
         while n > 1:
             if n % 2 == 1:
