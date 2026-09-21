@@ -404,3 +404,61 @@ def test_the_core_count_can_be_set_by_hand(monkeypatch):
     assert native_miner.default_threads() == 2
     monkeypatch.setenv(native_miner.THREADS_ENV, "мусор")
     assert native_miner.default_threads() == max(1, (__import__("os").cpu_count() or 2) - 1)
+
+
+# --- Генезис обязан быть детерминированным -------------------------------------
+def test_the_genesis_is_identical_no_matter_which_engine_is_built():
+    """⚠️ НАСТОЯЩИЙ БАГ, найденный при этой задаче, а не выдуманный случай.
+
+    Нативный майнер (и GPU) перебирают nonce ПАРАЛЛЕЛЬНО и отдают тот, что
+    нашёлся первым. Для обычного блока это безразлично — годится любой валидный
+    nonce. Но генезис обязан получиться ОДИНАКОВЫМ у всех узлов без всякой
+    связи между ними: его хеш и есть отпечаток сети (`p2p.network_id`).
+
+    С собранным `bhydra_miner` два узла на одной машине получали РАЗНЫЙ генезис
+    (nonce 28 и 69), считали друг друга чужой сетью, отказывались соединяться и
+    синхронизироваться. Краснело 17 тестов — p2p, transport, maintenance,
+    bluetooth, — и ни один из них про майнинг.
+    """
+    хеши = {Blockchain(difficulty=1, pow_fork_height=None).chain[0].hash
+            for _ in range(8)}
+    assert len(хеши) == 1, f"генезис получился разным: {len(хеши)} вариантов"
+
+
+def test_the_genesis_never_goes_through_an_external_engine():
+    """Запрет внешних движков для генезиса — не случайность, а условие.
+
+    Проверяется поведением: подсовываем «майнер», который врёт про nonce.
+    Возьми его генезис — хеш разъехался бы; он обязан быть проигнорирован.
+    """
+    вызовов = []
+
+    class Врущий:
+        def mine(self, prefix_hex, target_hex, start, seconds=None):
+            вызовов.append(1)
+            return {"found": True, "nonce": 999_999, "attempts": 1,
+                    "digest": "00" * 64}
+
+    эталон = Blockchain(difficulty=1, pow_fork_height=None).chain[0]
+    блок = Block(0, "0" * 128, "B-hydra Genesis Block", timestamp=0.0,
+                 target=эталон.target)
+    блок.mine_block(deterministic=True, miner=Врущий())
+
+    assert вызовов == [], "генезис пошёл через внешний майнер"
+    assert блок.hash == эталон.hash
+    assert блок.nonce == эталон.nonce
+
+
+def test_ordinary_blocks_may_still_use_the_parallel_engine():
+    """⚠️ И наоборот: обычным блокам параллельный перебор НУЖЕН.
+
+    Запретить внешние движки везде значило бы выбросить весь выигрыш нативного
+    майнера — а он и есть условие работы настоящего PoW.
+    """
+    import inspect
+
+    исходник = inspect.getsource(Block.mine_block)
+    assert "not deterministic" in исходник
+    # Значение по умолчанию — False: запрет только там, где он явно нужен.
+    подпись = inspect.signature(Block.mine_block)
+    assert подпись.parameters["deterministic"].default is False
