@@ -266,14 +266,19 @@ class BHydraApp(tk.Tk):
                                               "Приватный ключ:")).pack(
             side="left", padx=(6, 0))
 
-        # Импорт ключа.
-        imp = ttk.LabelFrame(tab, text="Импорт по приватному ключу", padding=8)
-        imp.pack(fill="x", pady=(10, 0))
-        self.import_var = tk.StringVar()
-        ttk.Entry(imp, textvariable=self.import_var).pack(
-            side="left", fill="x", expand=True)
-        ttk.Button(imp, text="Импорт", style="Accent.TButton",
-                   command=self._import_wallet).pack(side="left", padx=6)
+        # ⚠️ Поля «Импорт по приватному ключу» здесь БОЛЬШЕ НЕТ, и это не потеря
+        # возможности: ключ со стороны заводится кнопкой «Загрузить из файла…»
+        # (`_load_wallet_from` читает те же 64 hex-символа из текстового файла).
+        #
+        # Поле убрано потому, что оно НЕ РАБОТАЛО, и причина поучительная: это
+        # было единственное поле для вставки во всём окне без ПКМ-меню
+        # (`_add_paste_menu`). На русской раскладке Ctrl+V до Tk не доходит —
+        # привязка висит на латинской букве, — поэтому вставить в него ключ было
+        # физически нечем, а руками набирать 64 символа никто не станет. Поле
+        # выглядело рабочим и молча не принимало ничего.
+        #
+        # ⚠️ Вернуть его можно только ВМЕСТЕ с `_add_paste_menu(entry)`, иначе
+        # повторится ровно то же самое.
 
         # Перевод.
         send = ttk.LabelFrame(tab, text="Отправить перевод", padding=8)
@@ -1485,21 +1490,6 @@ class BHydraApp(tk.Tk):
                 "Без пароля ключ хранится открыто (wallet.key) — кто получит "
                 "файл, получит монеты."):
             self._set_wallet_password()
-
-    def _import_wallet(self) -> None:
-        raw = self.import_var.get().strip()
-        if not raw:
-            return messagebox.showwarning(
-                "Импорт", "Вставьте приватный ключ (64 hex-символа) в поле.")
-        try:
-            self.wallet = Wallet.from_private_hex(raw)
-        except ValueError as exc:
-            return messagebox.showerror("Неверный приватный ключ", str(exc))
-        self._persist_wallet()
-        self.import_var.set("")                 # очистить поле после импорта
-        self._refresh_status()
-        self.status.set("Кошелёк импортирован.")
-        messagebox.showinfo("Импорт", f"Кошелёк загружен:\n{self.wallet.address}")
 
     def _send(self) -> None:
         if self.wallet is None and not self._quantum_active():
