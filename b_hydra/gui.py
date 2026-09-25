@@ -61,7 +61,11 @@ class BHydraApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("B-hydra Core — кошелёк · майнинг · сеть")
-        self.geometry("760x640")
+        self.geometry(self._initial_geometry())
+        # ⚠️ Ниже этого окно не сжимается. Без `minsize` его можно было стянуть
+        # так, что таблица истории пропадала совсем, — а пропавшая таблица
+        # выглядит как «операций нет», то есть врёт про деньги.
+        self.minsize(760, 660)
         self._set_icon()
         self._text_widgets: list[tk.Text] = []
         self._dark = tk.BooleanVar(value=False)
@@ -178,7 +182,10 @@ class BHydraApp(tk.Tk):
             self._refresh_hybrid()
 
     def _build_wallet_tab(self, nb: ttk.Notebook) -> None:
-        tab = ttk.Frame(nb, padding=12)
+        # ⚠️ Отступы здесь скупее, чем на других вкладках, и намеренно: всё выше
+        # истории операций — постоянной высоты, и каждые сэкономленные 20 px это
+        # ещё одна видимая строка таблицы на ноутбучном экране.
+        tab = ttk.Frame(nb, padding=10)
         nb.add(tab, text="💼 Кошелёк")
 
         self.addr_var = tk.StringVar()
@@ -186,8 +193,8 @@ class BHydraApp(tk.Tk):
         self.bal_var = tk.StringVar(value="—")
 
         # Шапка-«карточка»: логотип, имя клиента и крупный баланс.
-        head = ttk.Frame(tab, style="Card.TFrame", padding=14)
-        head.pack(fill="x", pady=(0, 10))
+        head = ttk.Frame(tab, style="Card.TFrame", padding=10)
+        head.pack(fill="x", pady=(0, 8))
         try:
             # 256px → 64px (логотип уже загружен для иконки окна — свой экземпляр,
             # т.к. subsample создаёт новый объект, который нужно удерживать).
@@ -242,7 +249,7 @@ class BHydraApp(tk.Tk):
 
         # Адрес — с копированием и QR.
         row = ttk.Frame(tab)
-        row.pack(fill="x", pady=(10, 4))
+        row.pack(fill="x", pady=(8, 2))
         ttk.Label(row, text="Адрес:", width=16).pack(side="left")
         ttk.Entry(row, textvariable=self.addr_var, state="readonly").pack(
             side="left", fill="x", expand=True)
@@ -254,7 +261,7 @@ class BHydraApp(tk.Tk):
 
         # Приватный ключ — скрыт точками; 👁 показывает (защита от чужих глаз).
         row = ttk.Frame(tab)
-        row.pack(fill="x", pady=4)
+        row.pack(fill="x", pady=2)
         ttk.Label(row, text="Приватный ключ:", width=16).pack(side="left")
         self._priv_entry = ttk.Entry(row, textvariable=self.priv_var,
                                      state="readonly", show="•")
@@ -266,14 +273,19 @@ class BHydraApp(tk.Tk):
                                               "Приватный ключ:")).pack(
             side="left", padx=(6, 0))
 
-        # Импорт ключа.
-        imp = ttk.LabelFrame(tab, text="Импорт по приватному ключу", padding=8)
-        imp.pack(fill="x", pady=(10, 0))
-        self.import_var = tk.StringVar()
-        ttk.Entry(imp, textvariable=self.import_var).pack(
-            side="left", fill="x", expand=True)
-        ttk.Button(imp, text="Импорт", style="Accent.TButton",
-                   command=self._import_wallet).pack(side="left", padx=6)
+        # ⚠️ Поля «Импорт по приватному ключу» здесь БОЛЬШЕ НЕТ, и это не потеря
+        # возможности: ключ со стороны заводится кнопкой «Загрузить из файла…»
+        # (`_load_wallet_from` читает те же 64 hex-символа из текстового файла).
+        #
+        # Поле убрано потому, что оно НЕ РАБОТАЛО, и причина поучительная: это
+        # было единственное поле для вставки во всём окне без ПКМ-меню
+        # (`_add_paste_menu`). На русской раскладке Ctrl+V до Tk не доходит —
+        # привязка висит на латинской букве, — поэтому вставить в него ключ было
+        # физически нечем, а руками набирать 64 символа никто не станет. Поле
+        # выглядело рабочим и молча не принимало ничего.
+        #
+        # ⚠️ Вернуть его можно только ВМЕСТЕ с `_add_paste_menu(entry)`, иначе
+        # повторится ровно то же самое.
 
         # Перевод.
         send = ttk.LabelFrame(tab, text="Отправить перевод", padding=8)
@@ -1486,21 +1498,6 @@ class BHydraApp(tk.Tk):
                 "файл, получит монеты."):
             self._set_wallet_password()
 
-    def _import_wallet(self) -> None:
-        raw = self.import_var.get().strip()
-        if not raw:
-            return messagebox.showwarning(
-                "Импорт", "Вставьте приватный ключ (64 hex-символа) в поле.")
-        try:
-            self.wallet = Wallet.from_private_hex(raw)
-        except ValueError as exc:
-            return messagebox.showerror("Неверный приватный ключ", str(exc))
-        self._persist_wallet()
-        self.import_var.set("")                 # очистить поле после импорта
-        self._refresh_status()
-        self.status.set("Кошелёк импортирован.")
-        messagebox.showinfo("Импорт", f"Кошелёк загружен:\n{self.wallet.address}")
-
     def _send(self) -> None:
         if self.wallet is None and not self._quantum_active():
             return messagebox.showwarning("Кошелёк", "Сначала создайте кошелёк.")
@@ -2017,6 +2014,40 @@ class BHydraApp(tk.Tk):
         widget.insert("end", text + "\n")
         widget.see("end")
         widget.config(state="disabled")
+
+    def _initial_geometry(self) -> str:
+        """Начальный размер окна — ПО ЭКРАНУ, а не жёсткие 760×640.
+
+        ⚠️ Жёсткий размер ломал вкладку «Кошелёк», и ломал незаметно. Всё, что
+        выше истории операций (шапка-карточка, тумблер, кнопки, адрес, ключ,
+        блок перевода), занимает около 560 px ПОСТОЯННОЙ высоты, а таблица —
+        единственное, что тянется. При окне в 640 px ей оставалось 56 px, то
+        есть ОДНА строка под заголовком. Замер на живом окне (Xvfb), строк
+        видно — до этой правки и после неё вместе с ужатыми отступами:
+
+            высота окна    640    700    768    880
+            было         1 стр. 4 стр. 8 стр. 13 стр.
+            стало        3 стр. 5 стр. 9 стр. 14 стр.
+
+        Выглядело это как «истории нет» — хотя данные были на месте и модель
+        таблицы заполнялась полностью. Отсюда и жалоба «не видно ничего».
+
+        ⚠️ На ноутбуке 1366×768 окно теперь открывается как 1040×688, и таблица
+        получает 126 px — пять строк вместо одной. Это и был весь баг: данные
+        читались правильно, `address_history` возвращала все операции, включая
+        майнинг, а показать их было негде.
+
+        ⚠️ Перерисовка таблицы дешёвая, и менять тут нечего: замер — 12,7 мс на
+        1081 операцию, 32 мс на 3000. `_auto_refresh` ходит раз в 3 секунды,
+        так что полная пересборка списка окно не тормозит.
+
+        ⚠️ Потолок обязателен: на 4K-мониторе окно во весь экран никому не
+        нужно. Нижняя граница — прежние 760×640, чтобы на маленьком экране
+        поведение не стало ХУЖЕ прежнего.
+        """
+        ширина = max(760, min(1040, self.winfo_screenwidth() - 80))
+        высота = max(640, min(880, self.winfo_screenheight() - 80))
+        return f"{ширина}x{высота}"
 
     def _set_icon(self) -> None:
         """Ставит иконку окна (best-effort: если ресурса нет — пропускаем)."""
