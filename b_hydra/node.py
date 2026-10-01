@@ -791,7 +791,19 @@ class BHydraNode:
         history = []
         for block in self.blockchain.chain:
             for tx in self._block_transactions(block):
-                vout = tx.get("vout", [])
+                # ⚠️ Пустые выходы генезиса-заглушки отсеиваются ЗДЕСЬ ЖЕ, а не
+                # только в `address_stats`. Найдено обходом всех путей узла на
+                # цепочке с такой заглушкой: `sum(o["amount"] …)` падал с
+                # `int + NoneType` ровно тем же образом.
+                #
+                # Через REST это пока не стреляло по случайности: адрес оттуда
+                # всегда строка, а `None == "BHY…"` ложно, и пустой выход не
+                # совпадал ни с кем. Но заглушка с НАСТОЯЩИМ адресом и пустой
+                # суммой уронила бы и этот путь, поэтому условие на сумму
+                # нужно отдельно от условия на адрес.
+                vout = [o for o in tx.get("vout", [])
+                        if o.get("amount") is not None
+                        and o.get("address") is not None]
                 received = sum(o["amount"] for o in vout if o["address"] == address)
                 sent = 0.0
                 sender_addrs = []
@@ -867,13 +879,35 @@ class BHydraNode:
                         s["sent"] += spent["amount"]
                         s["balance"] -= spent["amount"]
                         touched.add(spent["address"])
+                # ⚠️ ГЕНЕЗИС В ЭТОЙ СЕТИ — ЗАГЛУШКА, а не настоящая coinbase.
+                # У его «транзакции» все поля пустые: txid, timestamp,
+                # vin.signature, vout.amount и vout.address равны null. Он
+                # ничего не создаёт и тратить с него нечего: из адреса `null`
+                # нельзя потратить, а `null` BHY — это не сумма.
+                #
+                # Пропуск таких выходов — не обход ошибки, а единственное
+                # верное поведение. Прежний код складывал их наравне со всеми и
+                # падал на `float += None` при первом же открытии вкладки
+                # «Адреса» на живой цепочке в 1011 блоков. Ещё раньше он мог
+                # упасть на `tx["txid"]`: у заглушки нет и его.
+                #
+                # ⚠️ Чинится КОД, а не данные: хеш генезиса входит в отпечаток
+                # сети (`p2p.network_id`), и правка блока расколола бы сеть.
+                txid = tx.get("txid")
                 for index, out in enumerate(tx.get("vout", [])):
-                    outputs[(tx["txid"], index)] = {
-                        "amount": out["amount"], "address": out["address"]}
-                    s = rec(out["address"])
-                    s["received"] += out["amount"]
-                    s["balance"] += out["amount"]
-                    touched.add(out["address"])
+                    amount = out.get("amount")
+                    address = out.get("address")
+                    if amount is None or address is None:
+                        continue
+                    if txid is not None:
+                        # Без txid выход нечем адресовать, значит и потратить
+                        # его никто не сможет — в набор он не попадает.
+                        outputs[(txid, index)] = {"amount": amount,
+                                                  "address": address}
+                    s = rec(address)
+                    s["received"] += amount
+                    s["balance"] += amount
+                    touched.add(address)
                 for addr in touched:
                     s = stats[addr]
                     s["tx_count"] += 1
