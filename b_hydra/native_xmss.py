@@ -39,6 +39,11 @@ len·W + 1 хешей: 1073 в режиме P256 и 2097 в P512.
 Не собрана — не беда: `default()` вернёт None, и листья посчитает Python.
 """
 
+# ⚠️ Без этой строки модуль НЕ ИМПОРТИРУЕТСЯ на Python 3.9 (а он в матрице
+# CI): аннотация `int | None` там вычисляется сразу и падает с TypeError, а
+# вместе с ней падает и `pqcrypto`, который этот модуль импортирует.
+from __future__ import annotations
+
 import ctypes
 import os
 import sys
