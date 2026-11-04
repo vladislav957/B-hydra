@@ -42,7 +42,7 @@ if __name__ == "__main__" and __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     __package__ = "b_hydra"
 
-from . import hashing
+from . import hashing, native_xmss
 from .merkle import _sha512d, verify_proof
 
 # --- Наборы параметров -------------------------------------------------------
@@ -178,6 +178,75 @@ def _wots_pk_hash(pk, p=P256) -> bytes:
     return _h(b"".join(pk), p)
 
 
+# --- Нативная генерация листьев ----------------------------------------------
+# Лист — это len·W + 1 хешей (1073 в P256, 2097 в P512), а дерево высоты h — это
+# 2^h листьев. Узлы дерева при этом стоят 0,24–0,34% времени (замер), поэтому в
+# C++ уехали ТОЛЬКО листья: обход BDS, путь включения и расписание treehash
+# остались здесь одной копией. Подробности и замеры — `native_xmss.py`.
+#
+# ⚠️ Лист выбран границей не случайно. Это ЧИСТАЯ ФУНКЦИЯ от (seed, index): у неё
+# нет состояния, и разойтись двум реализациям негде. Обход же — код с тонкой
+# семантикой, и его второй копии в проекте быть не должно: ровно поэтому в своё
+# время `sign_hash` ВЫНЕСЛИ из `sign`, а не скопировали.
+
+#: Библиотека по режиму хеша: None — нативного пути нет или он не прошёл сверку.
+_NATIVE = {}
+
+
+def _pure_leaf(seed: bytes, i: int, p) -> bytes:
+    """Лист №i чистым Python — эталон, с которым сверяется нативный."""
+    return _wots_pk_hash(
+        wots_keygen(seed=seed + i.to_bytes(4, "big"), params=p)[1], p)
+
+
+def _selftest_leaves(library, p) -> bool:
+    """Совпадают ли нативные листья с чистым Python БАЙТ В БАЙТ.
+
+    ⚠️ Сверка обязательна, и «подпись валидна»-подобной поблажки здесь быть не
+    может: корень дерева — это публичный ключ XMSS и часть гибридного адреса
+    (версия `0x2f`). Ядро с чужим SHA дало бы ДРУГОЙ адрес — монеты ушли бы
+    туда, откуда их никто не достанет.
+
+    ⚠️ Пачка берётся НЕ С НУЛЯ (start=1): так проверяется ещё и то, что
+    библиотека правильно понимает смещение. Считай она всегда от нуля, тест с
+    start=0 этого бы не заметил, а дерево вышло бы из одинаковых листьев.
+    """
+    seed = bytes(range(32))
+    batch = native_xmss.leaves(library, seed, p["name"], 1, 3, threads=1)
+    if batch is None or len(batch) != 3:
+        return False
+    return all(batch[k] == _pure_leaf(seed, 1 + k, p) for k in range(3))
+
+
+def _native_for(p):
+    """Нативная библиотека для режима или None. Результат запоминается.
+
+    ⚠️ Сверка ЛЕНИВАЯ, а не при импорте: эталон считается чистым Python, и три
+    листа стоят около секунды на нашем SHA. Платить её за каждый `import
+    b_hydra` ради модуля, которым пользуется один кошелёк из ста, незачем — а
+    на фоне генерации дерева (минуты) она не видна вовсе.
+    """
+    alg = p["name"]
+    if alg in _NATIVE:
+        return _NATIVE[alg]
+    _NATIVE[alg] = None
+    library = native_xmss.default()
+    if library is not None and _selftest_leaves(library, p):
+        _NATIVE[alg] = library
+    return _NATIVE[alg]
+
+
+def backend(p=P256) -> str:
+    """Чем считаются листья XMSS — для диагностики."""
+    return "native (свой C++)" if _native_for(p) is not None else "pure-python"
+
+
+def reset_backend() -> None:
+    """Забыть выбранный бэкенд (для тестов и после пересборки библиотеки)."""
+    _NATIVE.clear()
+    native_xmss.reset()
+
+
 # =============================================================================
 # 3. XMSS-lite — многоразовая подпись (дерево Меркла над ключами WOTS)
 # =============================================================================
@@ -282,11 +351,14 @@ class MerkleSigner:
     """
 
     def __init__(self, height: int = 4, seed: bytes | None = None, params=P256,
-                 index: int = 0):
+                 index: int = 0, on_progress=None):
         if not 1 <= height <= 20:
             raise ValueError("height должен быть в диапазоне 1..20")
         self.height = height
         self.params = params
+        #: Вызывается как (сделано, всего) между пачками листьев. Дерево
+        #: высоты 20 строится минутами, и окно без отчёта выглядит зависшим.
+        self.on_progress = on_progress
         self.n_leaves = 1 << height
         if not 0 <= index <= self.n_leaves:
             raise ValueError("index вне дерева")
@@ -302,9 +374,60 @@ class MerkleSigner:
         return wots_keygen(seed=self._seed + i.to_bytes(4, "big"),
                            params=self.params)
 
-    def _leaf(self, i: int) -> bytes:
-        """Лист №i дерева: хеш публичного ключа WOTS."""
+    def _leaf_pure(self, i: int) -> bytes:
+        """Лист №i чистым Python — эталон и запасной путь."""
         return _wots_pk_hash(self._wots_keys(i)[1], self.params)
+
+    def _leaf(self, i: int) -> bytes:
+        """Лист №i дерева: хеш публичного ключа WOTS.
+
+        ⚠️ Потоков здесь ОДИН: на единственном листе их запуск стоил бы дороже
+        самой работы. Все ядра берёт `_iter_leaves`, где листьев тысячи.
+        """
+        library = _native_for(self.params)
+        if library is not None:
+            batch = native_xmss.leaves(library, self._seed, self.params["name"],
+                                       i, 1, threads=1)
+            if batch is not None:
+                return batch[0]
+        return self._leaf_pure(i)
+
+    def _iter_leaves(self):
+        """Все листья по порядку: нативно пачками, иначе по одному.
+
+        ⚠️ Генератор, а не список: при h=20 это миллион листьев, то есть 32 МБ
+        в P256 и 64 МБ в P512, которые незачем держать целиком — обход
+        потребляет их строго по одному и назад не возвращается.
+
+        ⚠️ Пачками, а не одним вызовом на всё дерево: генерация h=20 идёт
+        минутами, и между пачками Python снова получает управление — отсюда и
+        отчёт о прогрессе, и возможность прервать создание кошелька. Та же
+        причина, по которой нативный майнер работает срезами по времени.
+        """
+        library = _native_for(self.params)
+        if library is None:
+            for i in range(self.n_leaves):
+                yield self._leaf_pure(i)
+            return
+
+        alg = self.params["name"]
+        threads = native_xmss.default_threads()
+        at = 0
+        while at < self.n_leaves:
+            count = min(native_xmss.CHUNK, self.n_leaves - at)
+            batch = native_xmss.leaves(library, self._seed, alg, at, count,
+                                       threads)
+            if batch is None:
+                # ⚠️ Отказ ПОСРЕДИ работы не роняет генерацию: досчитываем
+                # сами. Уронить её значило бы потерять кошелёк из-за сбоя
+                # ускорителя, без которого всё прекрасно работает.
+                for i in range(at, self.n_leaves):
+                    yield self._leaf_pure(i)
+                return
+            yield from batch
+            at += count
+            if self.on_progress is not None:
+                self.on_progress(at, self.n_leaves)
 
     # --- Построение состояния обхода ------------------------------------
     @staticmethod
@@ -333,8 +456,8 @@ class MerkleSigner:
             self._treehash[level].schedule(targets[level] << level, n_leaves)
 
         stack = []
-        for i in range(n_leaves):
-            node, level = self._leaf(i), 0
+        for i, leaf in enumerate(self._iter_leaves()):
+            node, level = leaf, 0
             self._capture(node, level, i, index, targets)
             while stack and stack[-1][1] == level:
                 left, _ = stack.pop()
