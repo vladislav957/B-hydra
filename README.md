@@ -59,8 +59,9 @@ SHA-256 версии v0.1.0:
 Надёжность и безопасность : гибридная подпись ECDSA + XMSS, устойчивая к квантовому компьютеру; зашифрованный P2P-канал с проверкой целостности кадров.
 Масштабируемость : Возможность расширения сети для работ с указанными объемами данных.
 
-![Снимок экрана (39)](https://github.com/user-attachments/assets/096c8c4e-2ddb-45cd-b01d-b5c89ee1980c)
-![Снимок экрана (40)](https://github.com/user-attachments/assets/5daa4e3d-bff6-4995-b1f3-77bda0f0cbcf)
+<img width="1366" height="768" alt="Снимок экрана (85)" src="https://github.com/user-attachments/assets/ce03da54-eeda-4c03-a2b9-8bba6c736234" />
+<img width="1366" height="768" alt="Снимок экрана (84)" src="https://github.com/user-attachments/assets/6d4f6696-9676-4586-ad27-697be12d8078" />
+<img width="1366" height="768" alt="Снимок экрана (83)" src="https://github.com/user-attachments/assets/40fae8f3-70de-48cd-bb13-cdcbce7e28a7" />
 
  ---
 
@@ -255,9 +256,9 @@ P2P-сеть — несколько узлов синхронизируются 
 Улучшение производительности за счет многоточности.
 Интеграция с другими платёжными жизнью.
  ---
-[B-hydra.docx](https://github.com/user-attachments/files/19970749/B-hydra.docx)
 
-[B-hydra.pdf](https://github.com/user-attachments/files/20148652/B-hydra.pdf)
+[B-Hydra-spec-v0.3.pdf](https://github.com/user-attachments/files/31618647/B-Hydra-spec-v0.3.pdf)
+
 
  ---
 Контакты:
@@ -278,8 +279,10 @@ for v0.1.0 are listed in the Russian section above.
 
 Key Features: Decentralized Architecture: The platform operates without a central server, ensuring complete independence. Ease of Use: Intuitive interface and easy communication with other groups. Reliability and Security: hybrid ECDSA + XMSS signatures resistant to a quantum computer, and an encrypted P2P channel with per-frame integrity checks. Scalability: The ability to expand the network to work with specified data volumes.
 
-![Снимок экрана (39)](https://github.com/user-attachments/assets/4f05102c-824f-42a4-b1f4-73bfbae0db3a)
-![Снимок экрана (40)](https://github.com/user-attachments/assets/2f56edec-3b73-435f-8394-1870d88855ae)
+<img width="1366" height="768" alt="Снимок экрана (85)" src="https://github.com/user-attachments/assets/0b41e626-d2e0-4b19-b0a6-80a33de2f582" />
+<img width="1366" height="768" alt="Снимок экрана (84)" src="https://github.com/user-attachments/assets/2f0c4ecc-514a-489a-8912-e40ad112aee7" />
+<img width="1366" height="768" alt="Снимок экрана (83)" src="https://github.com/user-attachments/assets/c780ef14-03e5-4073-a70e-ae11bd354198" />
+
 
 Installation
 How to install and run : Requirements: Python 3.9 or higher Installed in dependencies (see requirements.txt) Steps: Clone the repositories
@@ -347,9 +350,8 @@ with the most accumulated work wins, not the longest one.
 
 Future plans: Adding a command line interface for the management system. Implementation of the automatic complexity adjustment function. Improving performance through multi-precision. Integration with other payment services.
  ---
-[B-hydra.docx](https://github.com/user-attachments/files/19970757/B-hydra.docx)
 
-[B-hydra.pdf](https://github.com/user-attachments/files/20148653/B-hydra.pdf)
+[B-Hydra-spec-v0.3.pdf](https://github.com/user-attachments/files/31618642/B-Hydra-spec-v0.3.pdf)
 
  ---
 Contacts: If you have any questions or suggestions, please contact me via GitHub Issues or write to: Kovtunvladislav96@gmail.com killnetvladislav@outlook.com
