@@ -1,22 +1,23 @@
 """
-native_miner.py — мост к нативному майнеру (`cpp/bhydra_miner.cpp`).
+native_miner.py — the bridge to the native miner (`cpp/bhydra_miner.cpp`).
 
-Перебор nonce — единственное место в проекте, где Python считает САМ и много:
-миллионы SHA-512 подряд, и всё в один поток из-за GIL. Нативный майнер делает
-то же самое на всех ядрах.
+Nonce search is the one place in the project where Python does a LOT of the
+computing itself: millions of SHA-512 in a row, all on one thread because of
+the GIL. The native miner does the same thing on every core.
 
-Работает СРЕЗАМИ по времени: Python просит «поищи секунду», получает результат
-и решает, продолжать ли. Так сохраняется всё, ради чего переписывался цикл, —
-возможность бросить блок, когда сосед нашёл свой раньше, и отчёт о скорости.
-Отдать управление насовсем нельзя: тогда узел снова стал бы глухим на время
-майнинга.
+It works in time SLICES: Python asks it to "search for a second", gets the
+result and decides whether to continue. That preserves everything the loop
+was rewritten for — the ability to abandon a block when a peer found theirs
+first, and the speed report. Handing over control for good is not an option:
+the node would go deaf again for the duration of the mining.
 
-⚠️ Результат нативного майнера ПРОВЕРЯЕТСЯ (`Block._mine_native`): хеш
-пересчитывается своим кодом и сверяется с порогом. Внешней программе на слово
-здесь не верят — ошибка в ней иначе прошла бы дальше и всплыла уже как
-отвергнутый сетью блок.
+⚠️ The native miner's result is VERIFIED (`Block._mine_native`): the hash is
+recomputed by our own code and checked against the threshold. An external
+program is not taken at its word here — otherwise a bug in it would sail
+through and surface later as a block the network rejects.
 
-Не собран — не беда: `default()` вернёт None, и майнинг пойдёт на Python.
+Not built? No problem: `default()` returns None and mining falls back to
+Python.
 """
 
 import json
@@ -24,14 +25,14 @@ import os
 import shutil
 import subprocess
 
-#: Путь к бинарнику можно задать явно; `off`/`0` полностью выключает нативный
-#: путь (удобно для тестов и для сравнения скорости).
+#: The binary's path can be given explicitly; `off`/`0` disables the native
+#: path entirely (handy for tests and for speed comparisons).
 MINER_ENV = "BHYDRA_MINER"
-#: Сколько ядер отдать под перебор. Пусто — все, кроме одного.
+#: How many cores to give to the search. Empty = all but one.
 THREADS_ENV = "BHYDRA_MINER_THREADS"
 BINARY_NAME = "bhydra_miner"
-#: Сколько секунд длится один срез перебора. Меньше — быстрее реакция на чужой
-#: блок, больше — меньше накладных расходов на запуск процесса.
+#: How many seconds one search slice lasts. Smaller = faster reaction to
+#: somebody else's block, larger = less process-startup overhead.
 SLICE_SECONDS = 1.0
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -40,7 +41,7 @@ _default = None
 
 
 class NativeMiner:
-    """Запускает `bhydra_miner` и разбирает его ответ."""
+    """Runs `bhydra_miner` and parses its answer."""
 
     def __init__(self, path, threads=0, slice_seconds=SLICE_SECONDS):
         self.path = path
@@ -51,7 +52,7 @@ class NativeMiner:
         return bool(self._run("selftest").get("ok"))
 
     def mine(self, prefix_hex, target_hex, start_nonce, seconds=None):
-        """Один срез перебора. None — если бинарник не отработал."""
+        """One search slice. None if the binary did not deliver."""
         answer = self._run("mine", prefix_hex, target_hex, int(start_nonce),
                            self.threads, seconds or self.slice_seconds)
         if "error" in answer or "attempts" not in answer:
@@ -59,7 +60,7 @@ class NativeMiner:
         return answer
 
     def benchmark(self, seconds=2.0, threads=None):
-        """Скорость перебора, хешей в секунду."""
+        """Search speed, in hashes per second."""
         answer = self._run("bench", seconds,
                            self.threads if threads is None else threads)
         elapsed = float(answer.get("seconds") or 0)
@@ -70,8 +71,8 @@ class NativeMiner:
             result = subprocess.run(
                 [self.path, *[str(a) for a in args]],
                 capture_output=True, text=True,
-                # Срез плюс щедрый запас на запуск: зависший бинарник не должен
-                # останавливать узел навсегда.
+                # The slice plus a generous allowance for startup: a hung binary must
+                # not stall the node forever.
                 timeout=max(30.0, self.slice_seconds * 10))
         except (OSError, subprocess.SubprocessError):
             return {}
@@ -83,7 +84,7 @@ class NativeMiner:
 
 
 def find(path=None):
-    """Ищет бинарник: явный путь → переменная окружения → PATH → корень проекта."""
+    """Locates the binary: explicit path -> env var -> PATH -> project root."""
     candidate = path or os.environ.get(MINER_ENV)
     if candidate:
         if str(candidate).lower() in ("off", "0", "no", "none"):
@@ -97,31 +98,34 @@ def find(path=None):
 
 
 def default_threads() -> int:
-    """Сколько ядер отдать перебору: все, кроме одного.
+    """How many cores to give the search: all but one.
 
-    ⚠️ Именно КРОМЕ ОДНОГО, а не все. Перебор грузит ядро на 100% без пауз, и
-    на старом двухъядерном ноутбуке «все ядра» означают неотзывчивый интерфейс
-    и горячий корпус — машина занята майнингом, а не человеком. Одно ядро
-    оставлено системе и окну.
+    ⚠️ ALL BUT ONE specifically, not all of them. The search pins a core at
+    100% with no pauses, and on an old dual-core laptop "all cores" means an
+    unresponsive interface and a hot chassis — the machine is busy mining
+    rather than serving its owner. One core is left to the system and the
+    window.
 
-    ⚠️ Ноль здесь НЕЛЬЗЯ: нативный майнер понимает 0 как «сам реши», и тогда он
-    берёт `hardware_concurrency()`, то есть все ядра — ровно то, чего мы
-    избегаем. Поэтому число всегда явное и не меньше единицы.
+    ⚠️ Zero is NOT allowed here: the native miner reads 0 as "decide for
+    yourself", and then it takes `hardware_concurrency()`, i.e. every core —
+    exactly what we are avoiding. So the number is always explicit and never
+    below one.
     """
     override = os.environ.get(THREADS_ENV)
     if override:
         try:
             return max(1, int(override))
         except ValueError:
-            pass                       # мусор в переменной — ведём себя как без неё
+            pass                       # garbage in the variable — behave as if it were unset
     return max(1, (os.cpu_count() or 2) - 1)
 
 
 def default():
-    """Готовый майнер для этой машины или None. Результат запоминается.
+    """A ready miner for this machine, or None. The result is memoised.
 
-    Проверяется не только наличие файла, но и `selftest`: битый или чужой
-    бинарник с тем же именем не должен молча стать майнером.
+    It is not only the file's presence that is checked but `selftest` too: a
+    broken or foreign binary with the same name must not silently become the
+    miner.
     """
     global _cached, _default
     if _cached:
@@ -137,7 +141,7 @@ def default():
 
 
 def reset():
-    """Забыть найденный майнер (для тестов и после пересборки)."""
+    """Forget the miner that was found (for tests and after a rebuild)."""
     global _cached, _default
     _cached = False
     _default = None

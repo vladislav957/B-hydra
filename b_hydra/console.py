@@ -1,35 +1,38 @@
-"""Терминал B-hydra Core — консоль команд внутри приложения.
+"""B-hydra Core terminal — a command console inside the application.
 
-Аналог консоли отладки в Bitcoin Core (Help → Debug window → Console): окно,
-где вместо хождения по вкладкам набираешь команду и сразу видишь ответ узла.
+The counterpart of Bitcoin Core's debug console (Help -> Debug window ->
+Console): a window where you type a command and see the node's answer right
+away, instead of clicking through tabs.
 
     > getinfo
     > getbalance BHY…
     > getblock 42
-    > mine BHY… --message "привет"
+    > mine BHY… --message "hello"
 
-⚠️ ЭТО НЕ ОБОЛОЧКА ОС И НЕ PYTHON. Ни `eval`, ни `exec`, ни запуска программ
-здесь нет и быть не может: набор команд ЗАКРЫТЫЙ, он весь в `COMMANDS`. Консоль
-живёт в одном процессе с кошельком, поэтому «выполнить произвольный код» здесь
-означало бы «отдать приватный ключ любому, кто продиктует строчку».
+⚠️ THIS IS NOT AN OS SHELL AND NOT PYTHON. There is no `eval`, no `exec` and
+no launching of programs here, and there must never be: the command set is
+CLOSED and lives entirely in `COMMANDS`. The console shares a process with the
+wallet, so "run arbitrary code" would mean "hand the private key to anyone who
+can dictate a line of text".
 
-⚠️ И ЭТО НЕ ПАРАНОЙЯ, А ИЗВЕСТНОЕ МОШЕННИЧЕСТВО. Классика: новичку в чате
-пишут «твой кошелёк повреждён, вставь эту команду в консоль, и всё починится»
-— и монеты уходят. Bitcoin Core не зря держит над своей консолью красное
-предупреждение. Поэтому здесь сделано три вещи:
+⚠️ AND THIS IS NOT PARANOIA, IT IS A WELL-KNOWN SCAM. The classic version:
+somebody messages a newcomer "your wallet is corrupted, paste this command
+into the console and it will be fixed" — and the coins are gone. Bitcoin Core
+keeps a red warning above its console for a reason. So three things are done
+here:
 
-  1. Нет НИ ОДНОЙ команды, печатающей приватный ключ. Совсем. Именно так
-     ключи и уводят — «покажи dumpprivkey и пришли мне». Хочешь ключ — он на
-     вкладке «Кошелёк», за осознанным действием, а не за строчкой, которую
-     можно продиктовать по телефону.
-  2. Трата денег требует ПОДТВЕРЖДЕНИЯ: `send` сначала показывает, сколько и
-     кому, и просит повторить с `--yes`. Продиктованная строчка не уносит
-     деньги с первого раза.
-  3. Предупреждение (`WARNING`) показывается над консолью всегда.
+  1. There is NOT ONE command that prints the private key. None at all. That
+     is exactly how keys get stolen — "run dumpprivkey and send me the
+     output". If you want the key it is on the "Wallet" tab, behind a
+     deliberate action, not behind a line someone can dictate over the phone.
+  2. Spending money requires CONFIRMATION: `send` first shows how much and to
+     whom, then asks you to repeat the command with `--yes`. A dictated line
+     does not move money on the first try.
+  3. The warning (`WARNING`) is always displayed above the console.
 
-Движок НЕ ЗНАЕТ про tkinter: на вход строка, на выход строка. Так его можно
-проверять тестами, а окно остаётся тонкой оболочкой поверх — то же разделение,
-что у `transport.py` и сети.
+The engine KNOWS NOTHING about tkinter: a string goes in, a string comes out.
+That is what makes it testable, and it keeps the window a thin shell on top —
+the same separation `transport.py` has from the network.
 """
 
 import shlex
@@ -49,25 +52,25 @@ BANNER = (f"B-hydra Core {VERSION} — терминал. `help` — список
 
 
 class ConsoleError(Exception):
-    """Команда не выполнена. Текст показывается пользователю как есть."""
+    """The command failed. The text is shown to the user verbatim."""
 
 
 def _fmt_amount(value) -> str:
     return f"{float(value):.4f}"
 
 
-#: Длиннее этого значение уезжает на свою строку с отступом.
-#: ⚠️ Нужно из-за хешей: они по 128 символов, и втиснутые в колонку они
-#: переносились по ширине окна, разваливая всю таблицу. Замечено на живом
-#: снимке окна, а не в рассуждениях.
+#: A value longer than this moves onto its own indented line.
+#: ⚠️ Needed because of hashes: they are 128 characters long, and squeezed
+#: into a column they wrapped at the window width and tore the whole table
+#: apart. Spotted on a real screenshot of the window, not by reasoning.
 _WIDE_VALUE = 48
 
 
 def _table(rows, headers):
-    """Простая таблица с выравниванием — консоль читают глазами.
+    """A simple aligned table — the console is read by eye.
 
-    ⚠️ Выравнивание держится на МОНОШИРИННОМ шрифте окна: на пропорциональном
-    пробелы разной ширины превращают колонки в кашу.
+    ⚠️ The alignment depends on the window's MONOSPACED font: with a
+    proportional one, spaces of differing width turn the columns to mush.
     """
     if not rows:
         return "(пусто)"
@@ -76,20 +79,21 @@ def _table(rows, headers):
     for row in cells:
         for i, cell in enumerate(row):
             if len(row) == 2 and i == 1 and len(cell) > _WIDE_VALUE:
-                continue                 # длинные значения в ширину не входят
+                continue                 # long values are exempt from width
             widths[i] = max(widths[i], len(cell))
 
     out = ["  ".join(str(h).ljust(widths[i]) for i, h in enumerate(headers)),
            "  ".join("─" * w for w in widths)]
     for row in cells:
         if len(row) == 2 and len(row[1]) > _WIDE_VALUE:
-            # Полное значение сохраняем целиком: из `getblock` хеш копируют,
-            # чтобы тут же скормить его `gettx`. Обрезать было бы удобно
-            # глазу и бесполезно на деле.
-            # ⚠️ Отступ РОВНО два пробела, а не по ширине колонки: хеш в 128
-            # символов и так занимает почти всю строку, и отступ под колонку
-            # выталкивал его за край — окно переносило строку, и «аккуратный»
-            # вывод выглядел хуже исходного.
+            # Keep the full value intact: people copy a hash out of
+            # `getblock` to feed it straight into `gettx`. Truncating would
+            # be easy on the eye and useless in practice.
+            # ⚠️ The indent is EXACTLY two spaces, not the column width: a
+            # 128-character hash already fills almost the whole line, and an
+            # indent matching the column pushed it past the edge — the window
+            # wrapped the line, and the "tidy" output looked worse than the
+            # original.
             out.append(row[0])
             out.append("  " + row[1])
         else:
@@ -98,18 +102,19 @@ def _table(rows, headers):
 
 
 class Console:
-    """Разбор и выполнение команд терминала.
+    """Parsing and execution of terminal commands.
 
-    `app` — источник состояния: узел, кошелёк, P2P. Передаётся объектом, а не
-    кучей аргументов, потому что кошелёк в приложении МЕНЯЕТСЯ (его создают,
-    импортируют, шифруют), и консоль обязана видеть текущий, а не тот, что был
-    при её создании.
+    `app` is the source of state: the node, the wallet, P2P. It is passed as
+    one object rather than a pile of arguments because the wallet inside the
+    application CHANGES (it gets created, imported, encrypted), and the
+    console must see the current one, not the one that existed when it was
+    constructed.
     """
 
     def __init__(self, app):
         self.app = app
 
-    # --- Доступ к состоянию ----------------------------------------------------
+    # --- Access to state -------------------------------------------------------
     @property
     def node(self):
         node = getattr(self.app, "node", None)
@@ -126,16 +131,16 @@ class Console:
                 "вкладке «Кошелёк»")
         return wallet
 
-    # --- Разбор строки ---------------------------------------------------------
+    # --- Line parsing ----------------------------------------------------------
     def run(self, line: str) -> str:
-        """Выполнить одну строку. Возвращает текст ответа."""
+        """Run a single line. Returns the response text."""
         text = (line or "").strip()
         if not text:
             return ""
         try:
             parts = shlex.split(text)
         except ValueError as error:
-            # Незакрытая кавычка — обычная опечатка, а не повод для трассировки.
+            # An unclosed quote is an ordinary typo, not a reason for a traceback.
             raise ConsoleError(f"не разобрать строку: {error}") from error
         if not parts:
             return ""
@@ -163,13 +168,13 @@ class Command:
 
 
 def _flag(args, name):
-    """Вынимает флаг `--name` из списка. Возвращает (остаток, был ли флаг)."""
+    """Pulls the `--name` flag out of the list. Returns (rest, flag present)."""
     rest = [a for a in args if a != name]
     return rest, len(rest) != len(args)
 
 
 def _option(args, name):
-    """Вынимает `--name значение`. Возвращает (остаток, значение или None)."""
+    """Pulls out `--name value`. Returns (rest, value or None)."""
     if name not in args:
         return args, None
     index = args.index(name)
@@ -178,7 +183,7 @@ def _option(args, name):
     return args[:index] + args[index + 2:], args[index + 1]
 
 
-# --- Команды -------------------------------------------------------------------
+# --- Commands ------------------------------------------------------------------
 def cmd_help(console, args):
     if args:
         command = COMMANDS.get(args[0].lower())
@@ -238,9 +243,9 @@ def cmd_getblock(console, args):
     except ValueError:
         raise ConsoleError(f"номер блока — целое число, а не {args[0]!r}") from None
     if index < 0:
-        index = len(node.blockchain.chain) + index      # getblock -1 — последний
-    # ⚠️ `get_block` отдаёт СЛОВАРЬ (`to_dict`), а не объект Block: обращение
-    # через точку падало бы AttributeError на каждой команде.
+        index = len(node.blockchain.chain) + index      # getblock -1 = the last
+    # ⚠️ `get_block` returns a DICT (`to_dict`), not a Block object: attribute
+    # access would raise AttributeError on every single command.
     block = node.get_block(index)
     if block is None:
         raise ConsoleError(f"блока #{args[0]} нет "
@@ -272,10 +277,10 @@ def cmd_gettx(console, args):
     found = node.find_transaction(args[0])
     block_index = None
     if found:
-        # `find_transaction` отдаёт {"transaction": …, "block_index": …}.
+        # `find_transaction` returns {"transaction": …, "block_index": …}.
         tx, block_index = found["transaction"], found["block_index"]
     else:
-        # В цепочке нет — может лежать в мемпуле, неподтверждённой.
+        # Not in the chain — it may be sitting unconfirmed in the mempool.
         tx = node.mempool.get(args[0]) if hasattr(node.mempool, "get") else None
         if tx is None:
             raise ConsoleError(f"транзакции {args[0][:16]}… нет ни в цепочке, "
@@ -376,7 +381,7 @@ def cmd_mine(console, args):
 
 
 def cmd_send(console, args):
-    """⚠️ Единственная команда, которая ТРАТИТ ДЕНЬГИ — и потому с подтверждением."""
+    """⚠️ The only command that SPENDS MONEY — hence the confirmation step."""
     args, confirmed = _flag(args, "--yes")
     args, fee_text = _option(args, "--fee")
     if len(args) < 2:
@@ -407,8 +412,9 @@ def cmd_send(console, args):
                            f"доступно {_fmt_amount(balance)} BHY")
 
     if not confirmed:
-        # ⚠️ Вот эта ветка и защищает от продиктованной строчки: с первого раза
-        # деньги не уходят, а человек видит СУММУ и АДРЕС словами.
+        # ⚠️ This branch is what protects against a dictated line: money does
+        # not move on the first try, and the person sees the AMOUNT and the
+        # ADDRESS spelled out.
         return (f"ПОДТВЕРДИТЕ ПЕРЕВОД — деньги уйдут безвозвратно:\n"
                 f"  кому    : {recipient}\n"
                 f"  сумма   : {_fmt_amount(amount)} BHY\n"
@@ -485,8 +491,8 @@ def cmd_update(console, args):
 
 
 def cmd_clear(console, args):
-    # Обрабатывает окно; движку тут делать нечего, но команда обязана
-    # существовать, иначе `clear` ругался бы «нет такой команды».
+    # The window handles this; the engine has nothing to do here, but the
+    # command must exist or `clear` would complain "no such command".
     return "\x00clear"
 
 

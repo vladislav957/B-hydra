@@ -1,14 +1,15 @@
 """
-economics.py — экономика эмиссии B-hydra.
+economics.py — B-hydra issuance economics.
 
-Считает награду за блок (с халвингом и округлением до делимости монеты),
-суммарную эмиссию и год окончания майнинга. Параметры берутся из blockchain.py,
-чтобы экономика всегда совпадала с правилами консенсуса:
+Computes the block reward (with halving and rounding to the coin's
+divisibility), the total issuance and the year mining ends. The parameters
+come from blockchain.py so that the economics always match the consensus
+rules:
 
-    310 000 (интервал халвинга) * 50 (награда) * 2  =  31 000 000 (максимум).
+    310,000 (halving interval) * 50 (reward) * 2  =  31,000,000 (maximum).
 
-Награда строго 50 BHY и делится пополам каждые HALVING_INTERVAL блоков (как
-халвинг Bitcoin); выпуск монет конечен и завершается примерно в 3000 году.
+The reward is exactly 50 BHY and halves every HALVING_INTERVAL blocks (like
+Bitcoin's halving); coin issuance is finite and ends around the year 3000.
 """
 
 if __name__ == "__main__" and __package__ in (None, ""):
@@ -25,7 +26,7 @@ from .blockchain import (
 
 
 def block_reward(height: int) -> float:
-    """Награда за блок на заданной высоте (с округлением до делимости)."""
+    """The block reward at a given height (rounded to the divisibility)."""
     halvings = height // HALVING_INTERVAL
     if halvings >= 64:
         return 0.0
@@ -33,37 +34,38 @@ def block_reward(height: int) -> float:
 
 
 def blocks_per_year() -> float:
-    """Сколько блоков добывается за год при текущем времени блока."""
+    """How many blocks are mined per year at the current block time."""
     return SECONDS_PER_YEAR / BLOCK_TIME_SECONDS
 
 
 def halving_years() -> float:
-    """Сколько лет проходит между халвингами при ЦЕЛЕВОМ времени блока.
+    """How many years pass between halvings at the TARGET block time.
 
-    ⚠️ Это СЛЕДСТВИЕ, а не правило. Правило консенсуса — по ВЫСОТЕ: награда
-    делится пополам каждые HALVING_INTERVAL блоков, и никакой календарь в него
-    не входит. Годы получаются из целевого времени блока, а фактическое время
-    гуляет вокруг цели вместе с хешрейтом сети: майнеров стало больше —
-    халвинг придёт раньше срока, меньше — позже. Писать в документах «халвинг
-    раз в N лет» без этой оговорки нельзя, иначе число выглядит обещанием,
-    которого код не даёт. (В белой книге стояло «каждые 4 года» — цифра
-    Bitcoin, к нашим параметрам отношения не имеющая.)
+    ⚠️ This is a CONSEQUENCE, not a rule. The consensus rule goes by HEIGHT:
+    the reward halves every HALVING_INTERVAL blocks, and no calendar enters
+    into it. The years follow from the target block time, while the actual
+    time drifts around the target along with the network hashrate: more
+    miners and the halving arrives early, fewer and it arrives late. Writing
+    "a halving every N years" in documents without that caveat is not
+    allowed, or the number reads as a promise the code does not make. (The
+    white paper said "every 4 years" — Bitcoin's figure, unrelated to our
+    parameters.)
     """
     return HALVING_INTERVAL * BLOCK_TIME_SECONDS / SECONDS_PER_YEAR
 
 
 def year_of_height(height: int) -> float:
-    """Календарный год, к которому будет добыт блок с данной высотой."""
+    """The calendar year by which a block at the given height will be mined."""
     return GENESIS_YEAR + height / blocks_per_year()
 
 
 def mining_end_year() -> float:
-    """Год, в котором прекращается выпуск новых монет."""
+    """The year in which the issuance of new coins stops."""
     return year_of_height(MINING_END_HEIGHT)
 
 
 def total_supply_after(blocks: int) -> float:
-    """Суммарная эмиссия после `blocks` добытых блоков (приближённо)."""
+    """Total issuance after `blocks` mined blocks (approximate)."""
     supply = 0.0
     height = 0
     remaining = blocks
@@ -79,7 +81,7 @@ def total_supply_after(blocks: int) -> float:
 
 
 def emission_schedule(max_halvings: int = 10):
-    """Возвращает таблицу [(эпоха, награда, эмиссия за эпоху)]."""
+    """Returns the table [(epoch, reward, issuance for the epoch)]."""
     schedule = []
     for era in range(max_halvings):
         reward = round(INITIAL_REWARD / (2 ** era), DECIMALS)

@@ -1,47 +1,50 @@
-"""Открытый ключ, которым подписаны релизы B-hydra Core.
+"""The public key that B-hydra Core releases are signed with.
 
-Это КЕЙРИНГ, как `/etc/apt/trusted.gpg.d` у Debian. Обновление ставится только
-тогда, когда манифест релиза подписан соответствующим ЗАКРЫТЫМ ключом, а он
-лежит у владельца проекта офлайн и в репозиторий не попадает никогда.
+This is a KEYRING, like Debian's `/etc/apt/trusted.gpg.d`. An update installs
+only when the release manifest is signed with the corresponding PRIVATE key,
+and that key lives offline with the project owner and never reaches the
+repository.
 
-⚠️ ЗАЧЕМ ЭТО ВООБЩЕ НУЖНО, РАЗ ЕСТЬ HTTPS. TLS защищает канал до GitHub — и
-только его. Он ничего не говорит о том, ЧТО именно там лежит: угоняют не
-канал, а учётную запись или токен CI, и тогда подменённый файл приезжает по
-честному сертификату, с честной контрольной суммой (её атакующий правит в том
-же релизе) и с правильным адресом в строке браузера. Для кошелька это не
-абстракция: подменённая сборка читает приватные ключи всех, кто обновился.
-Подпись закрытым ключом — единственное, что переживает угон сервера, ровно
-поэтому apt и проверяет подписи, а не контрольные суммы с зеркала.
+⚠️ WHY THIS IS NEEDED AT ALL WHEN THERE IS HTTPS. TLS protects the channel to
+GitHub — and nothing else. It says nothing about WHAT is sitting there: what
+gets hijacked is not the channel but the account or the CI token, and then
+the substituted file arrives over an honest certificate, with an honest
+checksum (the attacker edits it in the same release) and with the right
+address in the browser bar. For a wallet this is not an abstraction: a
+substituted build reads the private keys of everyone who updated. A signature
+made with a private key is the only thing that survives a server takeover,
+which is precisely why apt verifies signatures rather than checksums from a
+mirror.
 
-⚠️ КЛЮЧА ПОКА НЕТ, и обновлятель из-за этого ОТКАЗЫВАЕТСЯ СТАВИТЬ обновления —
-он только сообщает, что вышла новая версия, и предлагает скачать её руками.
-Это не недоделка, а осознанный отказ: обновление без проверки подписи опаснее
-отсутствия обновлений. Чтобы включить установку, владелец проекта один раз
-делает:
+⚠️ THERE IS NO KEY YET, and because of that the updater REFUSES TO INSTALL
+updates — it only reports that a new version is out and offers to download it
+by hand. This is not an unfinished corner but a deliberate refusal: an update
+without signature verification is more dangerous than no updates at all. To
+enable installation, the project owner does this once:
 
     python -m b_hydra.release keygen --out ~/.bhydra-release.key
-    # закрытый ключ — В ОФЛАЙН, в репозиторий его класть НЕЛЬЗЯ;
-    # напечатанный открытый ключ — сюда, в RELEASE_PUBLIC_KEY
+    # the private key goes OFFLINE; it must NEVER be put in the repository,
+    # the printed public key goes here, into RELEASE_PUBLIC_KEY
 
-и на каждый релиз:
+and for every release:
 
     python -m b_hydra.release sign --key ~/.bhydra-release.key \\
         --version v0.1.1 B-hydra-Core-windows.exe B-hydra-Core-macos ...
-    # получившиеся bhydra-release.json и .sig — приложить к релизу на GitHub
+    # attach the resulting bhydra-release.json and .sig to the GitHub release
 
-⚠️ Подписывать в GitHub Actions НЕЛЬЗЯ, даже через secrets: ключ в CI защищает
-ровно от того, от чего уже защищает TLS, и не защищает от угона учётной
-записи — то есть от единственной угрозы, ради которой подпись и вводится.
-Подписывает человек на своей машине.
+⚠️ Signing inside GitHub Actions is NOT allowed, not even through secrets: a
+key in CI protects against exactly what TLS already protects against, and
+does not protect against an account takeover — that is, against the one
+threat the signature exists for. A person signs on their own machine.
 """
 
 __all__ = ["RELEASE_PUBLIC_KEY", "have_key"]
 
-#: PEM с открытым ключом RSA (SPKI). None — ключ не заведён, установка
-#: обновлений выключена. Подставляется руками из вывода `release keygen`.
+#: PEM holding the RSA public key (SPKI). None = no key set up, update
+#: installation is off. Pasted in by hand from `release keygen` output.
 RELEASE_PUBLIC_KEY = None
 
 
 def have_key() -> bool:
-    """Заведён ли ключ релизов. Без него `update` умеет только проверять."""
+    """Whether the release key is set up. Without it `update` can only check."""
     return bool(RELEASE_PUBLIC_KEY and RELEASE_PUBLIC_KEY.strip())
