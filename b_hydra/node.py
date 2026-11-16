@@ -9,6 +9,7 @@ Node.py — узел сети B-hydra (модель UTXO).
 """
 
 import json
+import math
 import os
 
 import time
@@ -247,7 +248,7 @@ class BHydraNode:
             return False  # coinbase создаёт только узел при майнинге
         if not tx.vin or not tx.vout:
             return False
-        if any(o.amount <= 0 for o in tx.vout):
+        if any(not math.isfinite(o.amount) or o.amount <= 0 for o in tx.vout):
             return False
 
         utxos = utxos if utxos is not None else self.utxo_set()
@@ -290,9 +291,37 @@ class BHydraNode:
             return False
         # Комиссию считаем ЗДЕСЬ: мемпул сам её не знает (нужен набор UTXO), а
         # без неё он не может ни вытеснить дешёвое, ни отдать майнеру порядок.
-        if not self.mempool.add(tx, fee=self._tx_fee(tx, utxos)):
+        fee = self._tx_fee(tx, utxos)
+        evicted = set()
+        if (self.mempool.max_size is not None
+                and len(self.mempool) >= self.mempool.max_size):
+            victim = self.mempool.cheapest()
+            rate = fee / max(tx.size_bytes(), 1)
+            if victim is not None and rate > self.mempool.fee_rate(victim.txid):
+                # Removing a parent also invalidates every descendant. Find the
+                # whole dependency tree before changing the pool, including
+                # whether the incoming transaction depends on that tree.
+                children = {}
+                for pending in self.mempool.transactions:
+                    for inp in pending.vin:
+                        children.setdefault(inp.txid, set()).add(pending.txid)
+                evicted.add(victim.txid)
+                queue = [victim.txid]
+                while queue:
+                    for child in children.get(queue.pop(), ()):
+                        if child not in evicted:
+                            evicted.add(child)
+                            queue.append(child)
+                if any(inp.txid in evicted for inp in tx.vin):
+                    return False
+        if not self.mempool.add(tx, fee=fee):
             return False
-        self._cache_apply(tx)  # инкрементально: без пересборки всего набора
+        if evicted:
+            for txid in evicted:
+                self.mempool.remove(txid)
+            self._rebuild_effective()
+        else:
+            self._cache_apply(tx)  # инкрементально: без пересборки всего набора
         return True
 
     def create_transaction(self, wallet: Wallet, recipient: str,
@@ -391,6 +420,8 @@ class BHydraNode:
         valid = []
         fees = 0.0
         snapshot = self._by_fee_rate(list(self.mempool.transactions))
+        snapshot_rates = {tx.txid: self.mempool.fee_rate(tx.txid)
+                          for tx in snapshot}
         leftover = []
         # Бюджет по размеру, а не только по числу: транзакции бывают крупные, и
         # узел не должен собирать блок, который потом не сможет ни передать, ни
@@ -412,8 +443,6 @@ class BHydraNode:
                 valid.append(tx)
                 used += weight
             # невалидная транзакция просто отбрасывается
-        self.mempool.transactions = leftover
-
         height = len(self.blockchain.chain)
         reward = self.blockchain.block_reward(height)
         if wallet is not None and wallet.address != miner_address:
@@ -430,14 +459,19 @@ class BHydraNode:
                                  message=str(message), wallet=wallet)
 
         data = [reward_tx.to_dict()] + [tx.to_dict() for tx in valid]
-        block = self.blockchain.add_block(data=data, should_stop=should_stop,
-                                          max_attempts=max_attempts,
-                                          on_progress=on_progress)
+        self.mempool.transactions = leftover
+        try:
+            block = self.blockchain.add_block(data=data, should_stop=should_stop,
+                                              max_attempts=max_attempts,
+                                              on_progress=on_progress)
+        except Exception:
+            self._return_to_mempool(snapshot, rates=snapshot_rates)
+            raise
         if block is None:
             # Блок брошен (сосед успел раньше). Транзакции надо ВЕРНУТЬ: они
             # сняты с мемпула ДО майнинга, а в цепочку не попали — иначе
             # прерванный майнинг молча съедал бы чужие переводы.
-            self._return_to_mempool(snapshot)
+            self._return_to_mempool(snapshot, rates=snapshot_rates)
             return None
         self._rebuild_effective()  # цепочка и мемпул изменились
         return block
@@ -480,7 +514,7 @@ class BHydraNode:
             place(tx, set())
         return ordered
 
-    def _return_to_mempool(self, taken) -> int:
+    def _return_to_mempool(self, taken, rates=None) -> int:
         """Возвращает в мемпул транзакции брошенного блока.
 
         Именно доложить, а не заменить список: пока шёл майнинг, сеть могла
@@ -490,6 +524,10 @@ class BHydraNode:
         restored = [tx for tx in taken if tx.txid not in present]
         if restored:
             self.mempool.transactions = restored + list(self.mempool.transactions)
+            if rates is not None:
+                for tx in restored:
+                    if tx.txid in rates:
+                        self.mempool._rates[tx.txid] = rates[tx.txid]
         self._rebuild_effective()
         return len(restored)
 
@@ -558,7 +596,13 @@ class BHydraNode:
         txids = [Transaction.from_dict(t).txid for t in txs]
         if len(set(txids)) != len(txids):
             return False
+        if any(raw.get("txid") != txid for raw, txid in zip(txs, txids)):
+            return False
         if not _is_coinbase_dict(txs[0]):
+            return False
+        reward_tx = Transaction.from_dict(txs[0])
+        if any(not math.isfinite(out.amount) or out.amount < 0
+               for out in reward_tx.vout):
             return False
         # Сообщение майнера ограничено по длине: это данные, которые каждый
         # узел хранит вечно, и без потолка блок набивали бы чем угодно.
@@ -590,7 +634,9 @@ class BHydraNode:
             if _is_coinbase_dict(raw):
                 return False  # только одна coinbase на блок
             tx = Transaction.from_dict(raw)
-            if not tx.vin or not tx.vout or any(o.amount <= 0 for o in tx.vout):
+            if (not tx.vin or not tx.vout
+                    or any(not math.isfinite(o.amount) or o.amount <= 0
+                           for o in tx.vout)):
                 return False
             payload = tx.signing_payload()
             total_in = 0.0
@@ -618,7 +664,7 @@ class BHydraNode:
                 created[(tx.txid, position)] = {"amount": out.amount,
                                                 "address": out.address}
 
-        coinbase_out = Transaction.from_dict(txs[0]).total_output
+        coinbase_out = reward_tx.total_output
         if coinbase_out > self.blockchain.block_reward(height) + fees + _EPS:
             return False  # фальшивый coinbase — печать монет
         return True
