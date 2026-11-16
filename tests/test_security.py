@@ -161,3 +161,58 @@ def test_tcp_rejects_oversize_message():
 
     header = struct.pack(">I", tcp.MAX_MESSAGE_SIZE + 1)
     assert tcp.recv_message(_FakeSock(header)) == b""
+
+
+def test_coinbase_cannot_hide_issuance_in_a_negative_output():
+    honest, attacker = BHydraNode(difficulty=1), BHydraNode(difficulty=1)
+    miner = generate_wallet()
+    reward = coinbase(miner.address, 50, height=1)
+    reward.vout = [TxOutput(1000, miner.address), TxOutput(-950, miner.address)]
+    block = _mine(attacker.blockchain, [reward.to_dict()])
+    assert not honest.receive_block(block.to_dict())
+    assert not honest.replace_chain(attacker.blockchain.to_dicts())
+
+
+def test_coinbase_rejects_nonfinite_values_but_allows_zero():
+    node = BHydraNode(difficulty=1)
+    miner = generate_wallet()
+    for amount in (float('nan'), float('inf'), float('-inf')):
+        reward = coinbase(miner.address, amount, height=1)
+        block = Block(1, node.blockchain.last_block.hash, [reward.to_dict()],
+                      target=node.blockchain.expected_target(1))
+        block.mine_block()
+        assert not node.receive_block(block.to_dict())
+    reward = coinbase(miner.address, 0, height=1)
+    block = Block(1, node.blockchain.last_block.hash, [reward.to_dict()],
+                  target=node.blockchain.expected_target(1))
+    block.mine_block()
+    assert node.receive_block(block.to_dict())
+
+
+def test_nonfinite_transaction_output_cannot_hide_inflated_coinbase():
+    node = BHydraNode(difficulty=1)
+    sender = generate_wallet()
+    node.mine_pending(sender.address)
+    spend = node.create_transaction(sender, generate_wallet().address, 1)
+    spend.vout[0].amount = float('nan')
+    spend.sign(sender)
+    assert not node.add_transaction(spend)
+    reward = coinbase(sender.address, 1000, height=node.height)
+    block = Block(node.height, node.blockchain.last_block.hash,
+                  [reward.to_dict(), spend.to_dict()],
+                  target=node.blockchain.expected_target(node.height))
+    block.mine_block()
+    assert not node.receive_block(block.to_dict())
+
+
+def test_receive_and_replace_reject_forged_or_missing_transaction_id():
+    for bogus_id in ('a' * 128, None):
+        honest, attacker = BHydraNode(difficulty=1), BHydraNode(difficulty=1)
+        reward = coinbase(generate_wallet().address, 50, height=1).to_dict()
+        if bogus_id is None:
+            del reward['txid']
+        else:
+            reward['txid'] = bogus_id
+        block = _mine(attacker.blockchain, [reward])
+        assert not honest.receive_block(block.to_dict())
+        assert not honest.replace_chain(attacker.blockchain.to_dicts())

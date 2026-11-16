@@ -227,3 +227,36 @@ def test_replacing_the_list_drops_stale_rates():
 
 def test_cheapest_is_none_on_an_empty_pool():
     assert TransactionPool(max_size=5).cheapest() is None
+
+
+def test_eviction_removes_descendants_and_repairs_effective_utxos():
+    node = BHydraNode(difficulty=1, mempool_size=2)
+    first, second = _funded(node), _funded(node)
+    recipient = generate_wallet()
+    parent = node.create_transaction(first, recipient.address, 1, 0.0001)
+    assert node.add_transaction(parent)
+    child = node.create_transaction(first, recipient.address, 1, 1)
+    assert node.add_transaction(child)
+    assert any(inp.txid == parent.txid for inp in child.vin)
+    incoming = node.create_transaction(second, recipient.address, 1, 10)
+    assert node.add_transaction(incoming)
+    assert node.mempool.get(parent.txid) is None
+    assert node.mempool.get(child.txid) is None
+    assert node.mempool.get(incoming.txid) is incoming
+    effective = node.effective_utxo_set()
+    assert parent.vin[0].outpoint in effective
+    assert all(txid not in {parent.txid, child.txid} for txid, _ in effective)
+    assert node.create_transaction(first, recipient.address, 5) is not None
+
+
+def test_incoming_child_cannot_evict_its_own_parent():
+    node = BHydraNode(difficulty=1, mempool_size=1)
+    sender = _funded(node)
+    parent = node.create_transaction(sender, generate_wallet().address, 1, 0.0001)
+    assert node.add_transaction(parent)
+    child = node.create_transaction(sender, generate_wallet().address, 1, 5)
+    assert any(inp.txid == parent.txid for inp in child.vin)
+    assert not node.add_transaction(child)
+    assert node.mempool.get(parent.txid) is parent
+    assert node.mempool.get(child.txid) is None
+    assert (parent.txid, 1) in node.effective_utxo_set()

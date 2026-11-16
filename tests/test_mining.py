@@ -307,3 +307,32 @@ def test_new_loop_is_faster_than_the_old_one():
         assert fast > slow * 1.5, f"было {slow:.0f}/с, стало {fast:.0f}/с"
     finally:
         hashing.use_pure_sha(previous)
+
+
+def test_invalid_mining_options_keep_pending_transactions():
+    from b_hydra.blockchain import MAX_COINBASE_MESSAGE
+    node, sender = _node_with_pending(2)
+    before = list(node.mempool.transactions)
+    rates = {tx.txid: node.mempool.fee_rate(tx.txid) for tx in before}
+    with pytest.raises(ValueError):
+        node.mine_pending(sender.address, message='x' * (MAX_COINBASE_MESSAGE + 1))
+    assert node.mempool.transactions == before
+    assert {tx.txid: node.mempool.fee_rate(tx.txid) for tx in before} == rates
+    with pytest.raises(ValueError):
+        node.mine_pending(sender.address, wallet=generate_wallet())
+    assert node.mempool.transactions == before
+
+
+def test_mining_exception_restores_pending_and_fee_rates(monkeypatch):
+    node, sender = _node_with_pending(2)
+    before = list(node.mempool.transactions)
+    rates = {tx.txid: node.mempool.fee_rate(tx.txid) for tx in before}
+
+    def fail(*args, **kwargs):
+        raise RuntimeError('mining failed')
+
+    monkeypatch.setattr(node.blockchain, 'add_block', fail)
+    with pytest.raises(RuntimeError, match='mining failed'):
+        node.mine_pending(sender.address)
+    assert node.mempool.transactions == before
+    assert {tx.txid: node.mempool.fee_rate(tx.txid) for tx in before} == rates
